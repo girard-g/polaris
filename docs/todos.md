@@ -1,0 +1,108 @@
+# TODOs & Roadmap
+
+## Known Limitations
+
+### No model ID validation on DB open
+
+The database stores `model_id` in the `metadata` table but `Database::open()` does not validate it against the config. If a user changes `model_id` without deleting the DB, they'll get silently wrong search results (old embeddings mixed with new ones). Should error the same way dimension mismatch does.
+
+### Blocking async in MCP tool handlers
+
+Tool methods are `async fn` but perform blocking work (embedding, SQLite I/O). On a heavily loaded system this could block the tokio executor. Fix: wrap blocking operations in `tokio::task::spawn_blocking`.
+
+### No concurrent DB access
+
+The `Arc<Mutex<Database>>` design serializes all tool calls through a single mutex. This is fine for single-user local use, but would bottleneck under concurrent MCP sessions.
+
+### No file watching
+
+Polaris does not watch directories for changes. Users must manually call `polaris index` or trigger the `index` MCP tool to pick up new/modified files.
+
+### No non-markdown formats
+
+Only `.md` files are indexed. Plain `.txt`, `.rst`, code files, and PDFs are ignored.
+
+### Chunk byte offsets are approximate
+
+`start_byte` and `end_byte` in `ChunkRecord` track approximate positions in the original file. They are not verified to be accurate after heading extraction and paragraph splitting.
+
+---
+
+## Near-Term Improvements
+
+### Model ID validation
+
+Add `model_id` check in `Database::open()`, analogous to `embedding_dim` mismatch detection.
+
+### `spawn_blocking` for embedding and DB calls
+
+Wrap `EmbeddingEngine::embed_*` and `Database` operations in `tokio::task::spawn_blocking` inside MCP tool handlers.
+
+### Config validation
+
+Validate config values at load time:
+- `embedding_dim` in range `[64, 768]`
+- `max_chunk_tokens` > 0
+- `chunk_overlap_chars` < `max_chunk_tokens * 4`
+
+### Better error messages for missing DB
+
+When `polaris search` is run before any `polaris index`, the DB is empty. The error or output should be a clear hint rather than "No results found."
+
+---
+
+## Medium-Term Ideas
+
+### Watch mode
+
+```bash
+polaris watch ./docs
+```
+
+Use `notify` crate to re-index files on change automatically.
+
+### Multi-database support
+
+Allow querying across multiple `.db` files without merging them. Useful for keeping project docs separate from library docs.
+
+### CLI `--output json`
+
+Return search results as JSON for scripting:
+
+```bash
+polaris search "query" --output json | jq '.[0].content'
+```
+
+### Chunk viewer
+
+```bash
+polaris chunks docs/guide.md
+```
+
+Show how a specific file was chunked, with heading contexts and byte offsets. Useful for debugging retrieval quality.
+
+### Configurable models
+
+Support additional fastembed models (e.g. BGE, E5) via the `model_id` config field. Currently only `nomic-embed-text-v1.5` is used regardless of config.
+
+### Progress in MCP `index` tool
+
+The `index` MCP tool currently returns a summary after completion. Real-time progress (via MCP progress notifications) would improve the UX for large indexing runs.
+
+---
+
+## Long-Term / Speculative
+
+### Packaging
+
+- `cargo install polaris` via crates.io
+- Pre-built binaries via GitHub Releases
+- Homebrew formula
+
+### Cross-encoder reranking
+
+After KNN + BM25 retrieval, re-score with a small cross-encoder model for better precision on ambiguous queries.
+
+### Web UI
+
+Simple local web interface for browsing indexed docs and testing search queries.

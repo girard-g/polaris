@@ -2,8 +2,26 @@
 
 ## Prerequisites
 
-- Rust toolchain (stable, edition 2024) — install via [rustup](https://rustup.rs)
-- No other system dependencies (SQLite is bundled, ONNX runtime ships with fastembed)
+**All platforms:** Rust 1.87+ (stable) — install via [rustup](https://rustup.rs)
+
+**Linux (Debian/Ubuntu):**
+```bash
+sudo apt-get install gcc libssl-dev pkg-config
+```
+
+**Linux (Fedora/RHEL):**
+```bash
+sudo dnf install gcc openssl-devel pkg-config
+```
+
+**macOS:** Xcode Command Line Tools:
+```bash
+xcode-select --install
+```
+
+**Windows:** MSVC Build Tools — install via Visual Studio Installer, selecting "Desktop development with C++"
+
+SQLite is bundled and the ONNX runtime ships with fastembed, so no additional runtime dependencies are needed.
 
 ## Build
 
@@ -19,7 +37,13 @@ The first build downloads and compiles all dependencies including fastembed's ON
 
 ## First Run
 
-On first run, the embedding model is downloaded (~137 MB) to `~/.cache/huggingface/`. Subsequent runs reuse the cache.
+On first run, the embedding model is downloaded (~137 MB) and cached. Subsequent runs reuse the cache.
+
+| Platform | Model cache location |
+|----------|----------------------|
+| Linux    | `~/.cache/huggingface/` |
+| macOS    | `~/Library/Caches/huggingface/` |
+| Windows  | `%LOCALAPPDATA%\huggingface\` |
 
 ```bash
 ./target/debug/polaris index ./docs
@@ -119,11 +143,15 @@ Then watch `polaris-debug.log` while Claude Code interacts with the server.
 
 ## Releasing
 
-```bash
-cargo build --release
-# Binary at: target/release/polaris
+Pre-built binaries for Linux x86_64, macOS aarch64, macOS x86_64, and Windows x86_64 are built automatically via GitHub Actions on tag push:
 
-# Update .mcp.json with the correct binary path for distribution
+```bash
+git tag v0.1.0
+git push --tags
 ```
 
-There is no automated release process yet. See `todos.md` for packaging plans.
+This triggers the release workflow, which builds all platform binaries and creates a GitHub Release with the binaries attached.
+
+**Known limitations:**
+- musl/Alpine Linux is not supported (ONNX Runtime pre-built binaries are glibc-only)
+- Linux aarch64 is not included in the initial release matrix

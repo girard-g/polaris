@@ -27,7 +27,8 @@ src/
 
 ### `config.rs`
 - `PolarisConfig` is the central config struct (serde-deserializable from TOML)
-- Load priority: explicit `--config` flag → `./polaris.toml` → `~/.config/polaris/polaris.toml` → defaults
+- Load priority: explicit `--config` flag → `./polaris.toml` → platform config dir → defaults
+- Platform config dir: `~/.config/polaris/` (Linux), `~/Library/Application Support/polaris/` (macOS), `%APPDATA%\polaris\` (Windows)
 - `apply_overrides()` handles `--dim` and `--db` CLI flags after loading
 - Fields: `db_path`, `embedding_dim`, `max_chunk_tokens`, `chunk_overlap_chars`, `model_id`, `mmr_lambda`, `mmr_candidate_multiplier`, `heading_boost`, `rrf_k`
 

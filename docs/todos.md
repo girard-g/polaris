@@ -1,7 +1,8 @@
 # TODOs & Roadmap
 
-## Known Limitations
+## Known Limitations (v1)
 
+These are accepted constraints for the initial release, documented for transparency.
 
 ### ~~Blocking async in MCP tool handlers~~ ✓ Done
 
@@ -25,8 +26,7 @@ Only `.md` files are indexed. Plain `.txt`, `.rst`, code files, and PDFs are ign
 
 ---
 
-## Near-Term Improvements
-
+## v1 Improvements (all done ✓)
 
 ### ~~`spawn_blocking` for embedding and DB calls~~ ✓ Done
 
@@ -40,7 +40,9 @@ Only `.md` files are indexed. Plain `.txt`, `.rst`, code files, and PDFs are ign
 
 ---
 
-## Medium-Term Ideas
+## v2 Todo List
+
+Features and fixes targeted for the next release, in rough priority order.
 
 ### Watch mode
 
@@ -48,11 +50,11 @@ Only `.md` files are indexed. Plain `.txt`, `.rst`, code files, and PDFs are ign
 polaris watch ./docs
 ```
 
-Use `notify` crate to re-index files on change automatically.
+Use `notify` crate to re-index files on change automatically. Addresses the "no file watching" known limitation.
 
-### Multi-database support
+### Configurable models
 
-Allow querying across multiple `.db` files without merging them. Useful for keeping project docs separate from library docs.
+Honor the `model_id` config field at runtime. Currently `nomic-embed-text-v1.5` is always used regardless of config. Support at minimum one alternative (e.g. BGE-small, E5-small) to let users trade speed for quality.
 
 ### CLI `--output json`
 
@@ -70,9 +72,9 @@ polaris chunks docs/guide.md
 
 Show how a specific file was chunked, with heading contexts and byte offsets. Useful for debugging retrieval quality.
 
-### Configurable models
+### Multi-database support
 
-Support additional fastembed models (e.g. BGE, E5) via the `model_id` config field. Currently only `nomic-embed-text-v1.5` is used regardless of config.
+Allow querying across multiple `.db` files without merging them. Useful for keeping project docs separate from library docs.
 
 ### Progress in MCP `index` tool
 
@@ -95,3 +97,11 @@ After KNN + BM25 retrieval, re-score with a small cross-encoder model for better
 ### Web UI
 
 Simple local web interface for browsing indexed docs and testing search queries.
+
+### Non-markdown formats
+
+Extend indexing to `.txt`, `.rst`, and source code files. Requires format-specific chunking strategies.
+
+### Concurrent DB access
+
+Replace `Arc<Mutex<Database>>` with a connection pool (e.g. `r2d2` + `rusqlite`) to allow parallel read queries. Write operations (indexing) would still serialize.

@@ -102,6 +102,13 @@ Config is resolved in order: `--config <path>` → `./polaris.toml` → `~/.conf
 
 CLI overrides: `polaris --dim 384 --db /tmp/test.db search "query"`
 
+## Known Limitations
+
+- **Markdown only** — only `.md` files are indexed; `.txt`, `.rst`, code files, and PDFs are ignored
+- **Single-user** — all tool calls are serialized through a single DB mutex; not designed for concurrent MCP sessions
+- **Manual re-indexing** — no file watching; run `polaris index` again to pick up changes
+- **Approximate chunk offsets** — `start_byte`/`end_byte` metadata is approximate and not verified post-split
+
 ## Tech Stack
 
 | | |

@@ -70,7 +70,8 @@ src/
 ### `mcp/server.rs`
 - `PolarisState` holds `Arc<PolarisConfig>`, `Arc<EmbeddingEngine>`, `Arc<Mutex<Database>>`
 - `PolarisServer` implements `ServerHandler` with three `#[tool]` methods
-- DB lock is acquired per tool call (not held globally)
+- Each tool clones required `Arc`s, then offloads all blocking work via `tokio::task::spawn_blocking`
+- DB mutex is acquired inside the blocking closure (never across an `.await`)
 - Tool errors are returned as formatted strings (not MCP error objects) for simplicity
 
 ## Data Flow
@@ -131,6 +132,6 @@ The `Arc<Mutex<Database>>` means only one tool call can hold the DB at a time. T
 ## Threading Model
 
 - tokio runtime runs the MCP server loop
-- Tool handlers are `async fn` but do blocking work (embedding, SQLite)
-- No `spawn_blocking` currently — acceptable for single-user local usage
-- If concurrent MCP clients are ever supported, embedding and DB access would need to move to `spawn_blocking`
+- Tool handlers are `async fn`; all blocking work (embedding, SQLite, filesystem) runs on a dedicated thread pool via `tokio::task::spawn_blocking`
+- Each tool clones the relevant `Arc`s before entering `spawn_blocking`; the DB mutex is acquired inside the closure, never across an `.await` point
+- `Arc<Mutex<Database>>` serializes concurrent tool calls through the mutex (one active DB holder at a time)

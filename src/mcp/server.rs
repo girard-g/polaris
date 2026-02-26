@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use rmcp::{
@@ -79,24 +79,28 @@ impl PolarisServer {
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let top_k = params.top_k.unwrap_or(5) as usize;
+        let query = params.query;
+        let db = Arc::clone(&self.state.db);
+        let engine = Arc::clone(&self.state.embedding_engine);
+        let config = Arc::clone(&self.state.config);
 
-        let db = match self.state.db.lock() {
-            Ok(d) => d,
-            Err(e) => return format!("Error: failed to lock database: {e}"),
-        };
+        let result = tokio::task::spawn_blocking(move || {
+            let db = match db.lock() {
+                Ok(d) => d,
+                Err(e) => return format!("Error: failed to lock database: {e}"),
+            };
+            let search = SearchEngine::new(
+                &engine, &db,
+                config.mmr_lambda, config.mmr_candidate_multiplier,
+                config.heading_boost, config.rrf_k,
+            );
+            match search.search(&query, top_k) {
+                Ok(results) => SearchEngine::format_results(&results),
+                Err(e) => format!("Error: {e}"),
+            }
+        }).await;
 
-        let engine = SearchEngine::new(
-            &self.state.embedding_engine,
-            &db,
-            self.state.config.mmr_lambda,
-            self.state.config.mmr_candidate_multiplier,
-            self.state.config.heading_boost,
-            self.state.config.rrf_k,
-        );
-        match engine.search(&params.query, top_k) {
-            Ok(results) => SearchEngine::format_results(&results),
-            Err(e) => format!("Error: {e}"),
-        }
+        result.unwrap_or_else(|e| format!("Error: task failed: {e}"))
     }
 
     /// Index markdown files from a directory or file path.
@@ -105,38 +109,39 @@ impl PolarisServer {
         description = "Index markdown files from a path. Supports recursive directory indexing and incremental updates."
     )]
     async fn index(&self, Parameters(params): Parameters<IndexParams>) -> String {
-        let path = Path::new(&params.path).to_path_buf();
+        let path = PathBuf::from(&params.path);
         let recursive = params.recursive.unwrap_or(true);
         let force = params.force.unwrap_or(false);
+        let db = Arc::clone(&self.state.db);
+        let engine = Arc::clone(&self.state.embedding_engine);
+        let config = Arc::clone(&self.state.config);
 
         if !path.exists() {
             return format!("Error: path not found: {}", params.path);
         }
 
-        let indexer = Indexer::new(
-            Arc::clone(&self.state.embedding_engine),
-            self.state.config.max_chunk_tokens,
-            self.state.config.chunk_overlap_chars,
-        );
-
-        let db = match self.state.db.lock() {
-            Ok(d) => d,
-            Err(e) => return format!("Error: failed to lock database: {e}"),
-        };
-
-        match indexer.index_path(&db, &path, recursive, force) {
-            Ok(report) => {
-                let mut out = report.summary();
-                if !report.errors.is_empty() {
-                    out.push_str("\n\nErrors:\n");
-                    for (path, err) in &report.errors {
-                        out.push_str(&format!("  - {}: {}\n", path.display(), err));
+        let result = tokio::task::spawn_blocking(move || {
+            let indexer = Indexer::new(engine, config.max_chunk_tokens, config.chunk_overlap_chars);
+            let db = match db.lock() {
+                Ok(d) => d,
+                Err(e) => return format!("Error: failed to lock database: {e}"),
+            };
+            match indexer.index_path(&db, &path, recursive, force) {
+                Ok(report) => {
+                    let mut out = report.summary();
+                    if !report.errors.is_empty() {
+                        out.push_str("\n\nErrors:\n");
+                        for (path, err) in &report.errors {
+                            out.push_str(&format!("  - {}: {}\n", path.display(), err));
+                        }
                     }
+                    out
                 }
-                out
+                Err(e) => format!("Error: {e}"),
             }
-            Err(e) => format!("Error: {e}"),
-        }
+        }).await;
+
+        result.unwrap_or_else(|e| format!("Error: task failed: {e}"))
     }
 
     /// Get current status of the Polaris index.
@@ -145,22 +150,25 @@ impl PolarisServer {
         description = "Returns statistics about the current index: document count, chunk count, database size, and embedding configuration."
     )]
     async fn status(&self, _params: Parameters<StatusParams>) -> String {
-        let db = match self.state.db.lock() {
-            Ok(d) => d,
-            Err(e) => return format!("Error: failed to lock database: {e}"),
-        };
+        let db = Arc::clone(&self.state.db);
+        let config = Arc::clone(&self.state.config);
 
-        match db.get_stats(&self.state.config.db_path) {
-            Ok(stats) => format!(
-                "Documents: {}\nChunks: {}\nDatabase size: {} bytes\nEmbedding dim: {}\nLast indexed: {}",
-                stats.doc_count,
-                stats.chunk_count,
-                stats.db_size_bytes,
-                stats.embedding_dim,
-                stats.last_indexed.unwrap_or_else(|| "never".to_string()),
-            ),
-            Err(e) => format!("Error: {e}"),
-        }
+        let result = tokio::task::spawn_blocking(move || {
+            let db = match db.lock() {
+                Ok(d) => d,
+                Err(e) => return format!("Error: failed to lock database: {e}"),
+            };
+            match db.get_stats(&config.db_path) {
+                Ok(stats) => format!(
+                    "Documents: {}\nChunks: {}\nDatabase size: {} bytes\nEmbedding dim: {}\nLast indexed: {}",
+                    stats.doc_count, stats.chunk_count, stats.db_size_bytes,
+                    stats.embedding_dim, stats.last_indexed.unwrap_or_else(|| "never".to_string()),
+                ),
+                Err(e) => format!("Error: {e}"),
+            }
+        }).await;
+
+        result.unwrap_or_else(|e| format!("Error: task failed: {e}"))
     }
 }
 

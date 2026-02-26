@@ -120,7 +120,7 @@ PolarisState {
 }
 ```
 
-The DB is locked per tool call. Tool calls are effectively serialized through the mutex.
+Each tool clones the required `Arc`s and offloads all blocking work (embedding, SQLite, filesystem) to `tokio::task::spawn_blocking`. The DB mutex is acquired inside the blocking closure — never across an `.await` point. Tool calls are serialized through the mutex.
 
 ## Error Handling in Tools
 
@@ -136,3 +136,4 @@ Error: <embedding error message>
 - The `mcp/server.rs` file does **not** import `use crate::error::Result` — it conflicts with rmcp macro-generated code that expects `ErrorData`. Use `std::result::Result` or `PolarisError` directly.
 - The `#[tool_router]` attribute on the `impl PolarisServer` block generates the routing table.
 - `#[tool_handler(router = self.tool_router)]` wires it into `ServerHandler`.
+- `Database` (`rusqlite::Connection`) is `!Send`. It is accessed via `Arc<Mutex<Database>>` — the `Arc` is cloned on the async side, the lock is acquired inside the `spawn_blocking` closure where `Send` is not required.

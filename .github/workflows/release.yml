@@ -23,11 +23,6 @@ jobs:
             artifact-name: polaris-macos-aarch64
             binary-name: polaris
 
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact-name: polaris-macos-x86_64
-            binary-name: polaris
-
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact-name: polaris-windows-x86_64.exe

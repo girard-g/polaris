@@ -1,5 +1,7 @@
 # Polaris
 
+Polaris is the North Star — the fixed point sailors and navigators have used for centuries to orient themselves in the dark. This tool aims to do the same for coding agents: give them a reliable reference point in an unfamiliar codebase, so they always know where they are.
+
 Lightweight RAG system for coding agents. Index your project docs, search them semantically, serve results over MCP — single binary, no runtime dependencies.
 
 ```bash

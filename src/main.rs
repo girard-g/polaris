@@ -100,6 +100,7 @@ async fn run(cli: Cli) -> Result<()> {
     // Load config and apply CLI overrides.
     let mut cfg = PolarisConfig::load(cli.config.as_deref())?;
     cfg.apply_overrides(cli.db, cli.dim);
+    cfg.validate()?;
 
     // Register sqlite-vec before any DB connection is made.
     db::register_vec_extension();

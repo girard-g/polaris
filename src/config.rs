@@ -130,6 +130,29 @@ impl PolarisConfig {
         }
     }
 
+    /// Validate config values, returning a descriptive error if any are out of range.
+    pub fn validate(&self) -> Result<()> {
+        if self.embedding_dim < 64 || self.embedding_dim > 768 {
+            return Err(PolarisError::Config(format!(
+                "embedding_dim must be in [64, 768], got {}",
+                self.embedding_dim
+            )));
+        }
+        if self.max_chunk_tokens == 0 {
+            return Err(PolarisError::Config(
+                "max_chunk_tokens must be greater than 0".to_string(),
+            ));
+        }
+        if self.chunk_overlap_chars >= self.max_chunk_tokens * 4 {
+            return Err(PolarisError::Config(format!(
+                "chunk_overlap_chars ({}) must be less than max_chunk_tokens * 4 ({})",
+                self.chunk_overlap_chars,
+                self.max_chunk_tokens * 4,
+            )));
+        }
+        Ok(())
+    }
+
     /// Apply CLI overrides (None means "not specified", keep existing value).
     pub fn apply_overrides(
         &mut self,
@@ -218,6 +241,61 @@ mod tests {
         cfg.apply_overrides(None, None);
         assert_eq!(cfg.db_path, PathBuf::from("polaris.db"));
         assert_eq!(cfg.embedding_dim, 512);
+    }
+
+    #[test]
+    fn validate_defaults_ok() {
+        PolarisConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn validate_embedding_dim_too_small() {
+        let mut cfg = PolarisConfig::default();
+        cfg.embedding_dim = 32;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("embedding_dim"), "{err}");
+    }
+
+    #[test]
+    fn validate_embedding_dim_too_large() {
+        let mut cfg = PolarisConfig::default();
+        cfg.embedding_dim = 769;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("embedding_dim"), "{err}");
+    }
+
+    #[test]
+    fn validate_embedding_dim_boundary_values() {
+        let mut cfg = PolarisConfig::default();
+        cfg.embedding_dim = 64;
+        cfg.validate().unwrap();
+        cfg.embedding_dim = 768;
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_max_chunk_tokens_zero() {
+        let mut cfg = PolarisConfig::default();
+        cfg.max_chunk_tokens = 0;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("max_chunk_tokens"), "{err}");
+    }
+
+    #[test]
+    fn validate_chunk_overlap_too_large() {
+        let mut cfg = PolarisConfig::default();
+        cfg.max_chunk_tokens = 100;
+        cfg.chunk_overlap_chars = 400; // == max_chunk_tokens * 4, not strictly less
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("chunk_overlap_chars"), "{err}");
+    }
+
+    #[test]
+    fn validate_chunk_overlap_boundary_ok() {
+        let mut cfg = PolarisConfig::default();
+        cfg.max_chunk_tokens = 100;
+        cfg.chunk_overlap_chars = 399; // one below the limit
+        cfg.validate().unwrap();
     }
 
     #[test]

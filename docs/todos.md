@@ -3,9 +3,9 @@
 ## Known Limitations
 
 
-### Blocking async in MCP tool handlers
+### ~~Blocking async in MCP tool handlers~~ ✓ Done
 
-Tool methods are `async fn` but perform blocking work (embedding, SQLite I/O). On a heavily loaded system this could block the tokio executor. Fix: wrap blocking operations in `tokio::task::spawn_blocking`.
+All three tool handlers now offload blocking work via `tokio::task::spawn_blocking`.
 
 ### No concurrent DB access
 
@@ -28,16 +28,11 @@ Only `.md` files are indexed. Plain `.txt`, `.rst`, code files, and PDFs are ign
 ## Near-Term Improvements
 
 
-### `spawn_blocking` for embedding and DB calls
+### ~~`spawn_blocking` for embedding and DB calls~~ ✓ Done
 
-Wrap `EmbeddingEngine::embed_*` and `Database` operations in `tokio::task::spawn_blocking` inside MCP tool handlers.
+### ~~Config validation~~ ✓ Done
 
-### Config validation
-
-Validate config values at load time:
-- `embedding_dim` in range `[64, 768]`
-- `max_chunk_tokens` > 0
-- `chunk_overlap_chars` < `max_chunk_tokens * 4`
+`PolarisConfig::validate()` is called after load + CLI overrides. Errors are descriptive and halt startup early.
 
 ### Better error messages for missing DB
 

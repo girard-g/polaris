@@ -52,17 +52,27 @@ Config is resolved in this order (first match wins):
 
 ## Defaults Reference
 
-| Field | Default | Notes |
-|-------|---------|-------|
-| `db_path` | `"polaris.db"` | Relative to CWD |
-| `embedding_dim` | `512` | Matryoshka truncation from 768 |
-| `max_chunk_tokens` | `450` | ≈ 1800 chars |
-| `chunk_overlap_chars` | `200` | Chars of overlap |
-| `model_id` | `"nomic-embed-text-v1.5"` | Validated on open; changing requires re-index |
-| `mmr_lambda` | `0.7` | 0 = diversity, 1 = relevance |
-| `mmr_candidate_multiplier` | `3` | Candidate pool = top_k × 3 |
-| `heading_boost` | `0.05` | Additive; 0.0 disables it |
-| `rrf_k` | `60` | RRF rank fusion constant |
+| Field | Default | Constraints | Notes |
+|-------|---------|-------------|-------|
+| `db_path` | `"polaris.db"` | — | Relative to CWD |
+| `embedding_dim` | `512` | `[64, 768]` | Matryoshka truncation from 768 |
+| `max_chunk_tokens` | `450` | `> 0` | ≈ 1800 chars |
+| `chunk_overlap_chars` | `200` | `< max_chunk_tokens * 4` | Chars of overlap |
+| `model_id` | `"nomic-embed-text-v1.5"` | — | Validated on open; changing requires re-index |
+| `mmr_lambda` | `0.7` | — | 0 = diversity, 1 = relevance |
+| `mmr_candidate_multiplier` | `3` | — | Candidate pool = top_k × 3 |
+| `heading_boost` | `0.05` | — | Additive; 0.0 disables it |
+| `rrf_k` | `60` | — | RRF rank fusion constant |
+
+## Config Validation
+
+Config values are validated at startup (after loading the file and applying any CLI overrides). Invalid values produce a clear error and halt the process before any DB or model is opened:
+
+```
+Error: Config error: embedding_dim must be in [64, 768], got 32
+Error: Config error: max_chunk_tokens must be greater than 0
+Error: Config error: chunk_overlap_chars (2000) must be less than max_chunk_tokens * 4 (1800)
+```
 
 ## CLI Overrides
 

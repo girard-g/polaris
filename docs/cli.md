@@ -86,6 +86,14 @@ To configure authentication, set the `AUTH_TOKEN` environment variable...
 
 Score is `1.0 - cosine_distance`. Higher is more similar.
 
+**Error cases (stderr, exit 1):**
+
+| Situation | Message |
+|-----------|---------|
+| DB file doesn't exist | `No index found at 'polaris.db'. Run 'polaris index <path>' first.` |
+| DB exists but empty | `Index is empty. Run 'polaris index <path>' to add documents.` |
+| DB has docs, no match | `No results found.` (stdout, exit 0) |
+
 ---
 
 ### `polaris serve`

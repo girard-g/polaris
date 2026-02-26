@@ -34,9 +34,9 @@ Only `.md` files are indexed. Plain `.txt`, `.rst`, code files, and PDFs are ign
 
 `PolarisConfig::validate()` is called after load + CLI overrides. Errors are descriptive and halt startup early.
 
-### Better error messages for missing DB
+### ~~Better error messages for missing DB~~ ✓ Done
 
-When `polaris search` is run before any `polaris index`, the DB is empty. The error or output should be a clear hint rather than "No results found."
+`polaris search` now distinguishes: DB file missing → actionable hint (exit 1); DB empty → actionable hint; no match → "No results found."
 
 ---
 

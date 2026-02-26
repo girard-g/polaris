@@ -161,11 +161,31 @@ async fn cmd_index(
 }
 
 async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize) -> Result<()> {
+    if !cfg.db_path.exists() {
+        eprintln!(
+            "No index found at '{}'. Run `polaris index <path>` first.",
+            cfg.db_path.display()
+        );
+        std::process::exit(1);
+    }
+
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let engine = EmbeddingEngine::new(cfg.embedding_dim)?;
 
     let search = SearchEngine::new(&engine, &db, cfg.mmr_lambda, cfg.mmr_candidate_multiplier, cfg.heading_boost, cfg.rrf_k);
     let results = search.search(query, top_k)?;
+
+    if results.is_empty() {
+        let stats = db.get_stats(&cfg.db_path)?;
+        if stats.doc_count == 0 {
+            eprintln!(
+                "Index is empty. Run `polaris index <path>` to add documents."
+            );
+        } else {
+            println!("No results found.");
+        }
+        return Ok(());
+    }
 
     print!("{}", SearchEngine::format_results(&results));
     Ok(())

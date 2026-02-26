@@ -22,6 +22,9 @@ pub enum PolarisError {
 
     #[error("Dimension mismatch: database has dim={db_dim}, config has dim={config_dim}")]
     DimensionMismatch { db_dim: usize, config_dim: usize },
+
+    #[error("Model mismatch: database was indexed with model '{db_model}', config has '{config_model}' — delete the database and re-index to switch models")]
+    ModelMismatch { db_model: String, config_model: String },
 }
 
 pub type Result<T> = std::result::Result<T, PolarisError>;

@@ -2,9 +2,6 @@
 
 ## Known Limitations
 
-### No model ID validation on DB open
-
-The database stores `model_id` in the `metadata` table but `Database::open()` does not validate it against the config. If a user changes `model_id` without deleting the DB, they'll get silently wrong search results (old embeddings mixed with new ones). Should error the same way dimension mismatch does.
 
 ### Blocking async in MCP tool handlers
 
@@ -30,9 +27,6 @@ Only `.md` files are indexed. Plain `.txt`, `.rst`, code files, and PDFs are ign
 
 ## Near-Term Improvements
 
-### Model ID validation
-
-Add `model_id` check in `Database::open()`, analogous to `embedding_dim` mismatch detection.
 
 ### `spawn_blocking` for embedding and DB calls
 

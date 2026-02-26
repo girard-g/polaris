@@ -29,8 +29,8 @@ CREATE TABLE metadata (
 | Key | Example Value | Notes |
 |-----|---------------|-------|
 | `schema_version` | `"2"` | Incremented on schema migrations |
-| `embedding_dim` | `"512"` | Validated against config on open |
-| `model_id` | `"nomic-embed-text-v1.5"` | Informational only (not validated) |
+| `embedding_dim` | `"512"` | Validated against config on open — mismatch is a hard error |
+| `model_id` | `"nomic-embed-text-v1.5"` | Validated against config on open — mismatch is a hard error |
 
 ### `documents`
 

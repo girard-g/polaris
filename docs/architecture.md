@@ -32,7 +32,7 @@ src/
 - Fields: `db_path`, `embedding_dim`, `max_chunk_tokens`, `chunk_overlap_chars`, `model_id`, `mmr_lambda`, `mmr_candidate_multiplier`, `heading_boost`, `rrf_k`
 
 ### `error.rs`
-- `PolarisError` with `thiserror` — distinct variants for Embedding, Database, IO, Config, MCP, DimensionMismatch
+- `PolarisError` with `thiserror` — distinct variants for Embedding, Database, IO, Config, MCP, DimensionMismatch, ModelMismatch
 - `Result<T>` alias used throughout the codebase
 - Exception: `mcp/server.rs` does NOT import this alias (conflicts with rmcp macro-generated code)
 
@@ -44,7 +44,7 @@ src/
 
 ### `db.rs`
 - `register_vec_extension()` must be called once before any `Connection` is opened
-- `Database::open()` creates schema on first run; validates dimension on subsequent runs; applies migrations automatically
+- `Database::open(path, dim, model_id)` creates schema on first run; validates `embedding_dim` and `model_id` against metadata on subsequent runs; applies migrations automatically
 - Schema v2: `documents`, `chunks`, `vec_chunks` (sqlite-vec KNN), `chunks_fts` (FTS5 BM25)
 - `search_knn_with_embeddings()` — KNN with per-result embedding fetch (for MMR)
 - `search_bm25()` — FTS5 BM25 ranked search

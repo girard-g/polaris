@@ -21,7 +21,9 @@ max_chunk_tokens = 450
 # Prevents context loss at chunk boundaries
 chunk_overlap_chars = 200
 
-# fastembed model identifier — changing this requires re-indexing all documents
+# fastembed model identifier
+# Validated against the DB on every open — changing this requires deleting
+# the database and re-indexing all documents
 model_id = "nomic-embed-text-v1.5"
 
 # MMR lambda: 0.0 = pure diversity, 1.0 = pure relevance
@@ -56,7 +58,7 @@ Config is resolved in this order (first match wins):
 | `embedding_dim` | `512` | Matryoshka truncation from 768 |
 | `max_chunk_tokens` | `450` | ≈ 1800 chars |
 | `chunk_overlap_chars` | `200` | Chars of overlap |
-| `model_id` | `"nomic-embed-text-v1.5"` | Downloaded once, cached |
+| `model_id` | `"nomic-embed-text-v1.5"` | Validated on open; changing requires re-index |
 | `mmr_lambda` | `0.7` | 0 = diversity, 1 = relevance |
 | `mmr_candidate_multiplier` | `3` | Candidate pool = top_k × 3 |
 | `heading_boost` | `0.05` | Additive; 0.0 disables it |
@@ -73,15 +75,24 @@ polaris --db /tmp/test.db search "query"  # Override db_path
 
 These flags are global (accepted before any subcommand).
 
-## Dimension Constraints
+## Database Constraints
 
-`embedding_dim` is validated against the database on every open. If the value in the DB's metadata table does not match the configured value, Polaris exits with a `DimensionMismatch` error:
+Both `embedding_dim` and `model_id` are written to the database on first index and validated on every subsequent open.
+
+### Dimension mismatch
 
 ```
 Dimension mismatch: database has dim=256, config has dim=384
 ```
 
-To switch dimensions you must delete (or move) the existing database and re-index.
+### Model mismatch
+
+```
+Model mismatch: database was indexed with model 'nomic-embed-text-v1.5',
+config has 'bge-small-en' — delete the database and re-index to switch models
+```
+
+In both cases, resolution is the same: delete (or move) the existing database and re-index.
 
 ## Model Caching
 

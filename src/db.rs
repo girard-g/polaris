@@ -10,6 +10,7 @@ const SCHEMA_VERSION: &str = "2";
 pub struct Database {
     conn: Connection,
     embedding_dim: usize,
+    pub model_id: String,
 }
 
 /// A document row as stored in the `documents` table.
@@ -108,30 +109,30 @@ pub fn register_vec_extension() {
 // ---------------------------------------------------------------------------
 
 impl Database {
-    /// Open (or create) the database at `path` with the given embedding dimension.
+    /// Open (or create) the database at `path` with the given embedding dimension and model ID.
     ///
     /// On first open the schema is created. On subsequent opens the stored
-    /// `embedding_dim` is validated against `config_dim`.
-    pub fn open(path: &Path, config_dim: usize) -> Result<Self> {
+    /// `embedding_dim` and `model_id` are validated against the config values.
+    pub fn open(path: &Path, config_dim: usize, config_model_id: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
 
         conn.pragma_update(None, "foreign_keys", "ON")?;
 
-        let mut db = Self { conn, embedding_dim: config_dim };
-        db.init_schema(config_dim)?;
+        let mut db = Self { conn, embedding_dim: config_dim, model_id: config_model_id.to_string() };
+        db.init_schema(config_dim, config_model_id)?;
         Ok(db)
     }
 
     /// Open an in-memory database (useful for tests).
-    pub fn open_in_memory(embedding_dim: usize) -> Result<Self> {
+    pub fn open_in_memory(embedding_dim: usize, model_id: &str) -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let mut db = Self { conn, embedding_dim };
-        db.init_schema(embedding_dim)?;
+        let mut db = Self { conn, embedding_dim, model_id: model_id.to_string() };
+        db.init_schema(embedding_dim, model_id)?;
         Ok(db)
     }
 
-    fn init_schema(&mut self, config_dim: usize) -> Result<()> {
+    fn init_schema(&mut self, config_dim: usize, config_model_id: &str) -> Result<()> {
         // Check whether schema already exists.
         let table_count: i64 = self.conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='metadata'",
@@ -141,7 +142,7 @@ impl Database {
 
         if table_count == 0 {
             // Fresh database — create everything.
-            self.create_schema(config_dim)?;
+            self.create_schema(config_dim, config_model_id)?;
         } else {
             // Existing database — validate dimension.
             let stored_dim: Option<String> = self
@@ -164,6 +165,25 @@ impl Database {
                     });
                 }
                 self.embedding_dim = db_dim;
+            }
+
+            // Validate model ID.
+            let stored_model: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='model_id'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+
+            if let Some(db_model) = stored_model {
+                if db_model != config_model_id {
+                    return Err(PolarisError::ModelMismatch {
+                        db_model,
+                        config_model: config_model_id.to_string(),
+                    });
+                }
             }
 
             // Apply any pending schema migrations.
@@ -209,7 +229,7 @@ impl Database {
         Ok(())
     }
 
-    fn create_schema(&self, dim: usize) -> Result<()> {
+    fn create_schema(&self, dim: usize, model_id: &str) -> Result<()> {
         self.conn.execute_batch("
             CREATE TABLE metadata (
                 key   TEXT PRIMARY KEY,
@@ -255,7 +275,7 @@ impl Database {
                 ('schema_version', ?1),
                 ('embedding_dim',  ?2),
                 ('model_id',       ?3)",
-            params![SCHEMA_VERSION, dim.to_string(), "nomic-embed-text-v2-moe"],
+            params![SCHEMA_VERSION, dim.to_string(), model_id],
         )?;
 
         Ok(())
@@ -727,7 +747,7 @@ mod tests {
     /// Registers the sqlite-vec extension once and opens a fresh in-memory DB with dim=4.
     fn setup() -> Database {
         INIT.call_once(register_vec_extension);
-        Database::open_in_memory(4).unwrap()
+        Database::open_in_memory(4, "test-model").unwrap()
     }
 
     /// Shorthand: insert a chunk with a 4-element embedding.
@@ -912,10 +932,10 @@ mod tests {
         let db_path = dir.path().join("mismatch.db");
 
         // Create DB with dim=4.
-        { let _db = Database::open(&db_path, 4).unwrap(); }
+        { let _db = Database::open(&db_path, 4, "test-model").unwrap(); }
 
         // Re-open with a different dimension → must error.
-        let result = Database::open(&db_path, 8);
+        let result = Database::open(&db_path, 8, "test-model");
         match result {
             Err(PolarisError::DimensionMismatch { db_dim, config_dim }) => {
                 assert_eq!(db_dim, 4);
@@ -923,6 +943,39 @@ mod tests {
             }
             _ => panic!("expected DimensionMismatch error"),
         }
+    }
+
+    #[test]
+    fn model_mismatch_returns_error() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("model_mismatch.db");
+
+        // Create DB with model-a.
+        { let _db = Database::open(&db_path, 4, "model-a").unwrap(); }
+
+        // Re-open with a different model → must error.
+        let result = Database::open(&db_path, 4, "model-b");
+        match result {
+            Err(PolarisError::ModelMismatch { db_model, config_model }) => {
+                assert_eq!(db_model, "model-a");
+                assert_eq!(config_model, "model-b");
+            }
+            _ => panic!("expected ModelMismatch error"),
+        }
+    }
+
+    #[test]
+    fn same_model_id_opens_successfully() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("model_ok.db");
+
+        { let _db = Database::open(&db_path, 4, "nomic-embed-text-v1.5").unwrap(); }
+
+        // Same model → no error.
+        let db = Database::open(&db_path, 4, "nomic-embed-text-v1.5").unwrap();
+        assert_eq!(db.model_id, "nomic-embed-text-v1.5");
     }
 
     // -----------------------------------------------------------------------
@@ -1069,7 +1122,7 @@ mod tests {
         }
 
         // Open with our Database — should trigger migration.
-        let db = Database::open(&db_path, 4).unwrap();
+        let db = Database::open(&db_path, 4, "test").unwrap();
 
         // After migration, the pre-existing chunk should be findable via BM25.
         let results = db.search_bm25("migration_test_token", 5).unwrap();

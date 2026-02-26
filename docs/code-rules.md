@@ -91,9 +91,9 @@ Required deletion order:
 2. `DELETE FROM vec_chunks`
 3. `DELETE FROM documents` (cascade removes `chunks`) or `DELETE FROM chunks`
 
-### Dimension is fixed at DB creation time
+### `embedding_dim` and `model_id` are fixed at DB creation time
 
-The `embedding_dim` stored in metadata is checked on every `Database::open()`. A mismatch is a hard error. Do not silently truncate or pad embeddings to fit.
+Both values are written to the `metadata` table on first open and validated on every subsequent `Database::open()`. A mismatch on either is a hard error — `DimensionMismatch` or `ModelMismatch` respectively. Do not silently truncate embeddings or mix embeddings from different models.
 
 ## Chunking
 

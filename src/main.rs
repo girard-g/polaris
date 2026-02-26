@@ -132,7 +132,7 @@ async fn cmd_index(
     }
 
     tracing::info!("Opening database: {}", cfg.db_path.display());
-    let db = Database::open(&cfg.db_path, cfg.embedding_dim)?;
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
 
     let model_spinner = ProgressBar::new_spinner();
     model_spinner.set_style(
@@ -160,7 +160,7 @@ async fn cmd_index(
 }
 
 async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize) -> Result<()> {
-    let db = Database::open(&cfg.db_path, cfg.embedding_dim)?;
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let engine = EmbeddingEngine::new(cfg.embedding_dim)?;
 
     let search = SearchEngine::new(&engine, &db, cfg.mmr_lambda, cfg.mmr_candidate_multiplier, cfg.heading_boost, cfg.rrf_k);
@@ -175,7 +175,7 @@ async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     tracing::info!("Database: {}", cfg.db_path.display());
     tracing::info!("Embedding dim: {}", cfg.embedding_dim);
 
-    let db = Database::open(&cfg.db_path, cfg.embedding_dim)?;
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     tracing::info!("Loading embedding model…");
     let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim)?);
 
@@ -199,7 +199,7 @@ async fn cmd_status(cfg: PolarisConfig) -> Result<()> {
         return Ok(());
     }
 
-    let db = Database::open(&cfg.db_path, cfg.embedding_dim)?;
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let stats = db.get_stats(&cfg.db_path)?;
 
     println!("Documents  : {}", stats.doc_count);

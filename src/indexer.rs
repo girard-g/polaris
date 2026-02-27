@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
@@ -146,7 +147,11 @@ impl Indexer {
 
         let discovered = discover_markdown_files(root, recursive);
         discover_spinner.finish_and_clear();
-        eprintln!("  Found {} markdown file(s)", discovered.len());
+        eprintln!(
+            "{}  {} files found",
+            style("✓").green().bold(),
+            style(discovered.len().to_string()).bold(),
+        );
 
         // 2. Load existing hashes from DB.
         let existing: HashMap<String, String> = db
@@ -264,7 +269,6 @@ impl Indexer {
         }
 
         if file_data.is_empty() {
-            eprintln!("  Nothing to index ({} file(s) unchanged)", report.unchanged.len());
             report.elapsed = start.elapsed();
             return Ok(report);
         }
@@ -287,7 +291,7 @@ impl Indexer {
             let pb = ProgressBar::new(total_chunks as u64);
             pb.set_style(
                 ProgressStyle::with_template(
-                    "[{bar:40.cyan/blue}] {pos}/{len} chunks | ETA {eta}",
+                    "  [{bar:40.cyan/blue}] {pos}/{len} chunks  ETA {eta}",
                 )
                 .unwrap()
                 .progress_chars("█▓░"),

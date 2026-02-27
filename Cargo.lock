@@ -2107,6 +2107,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "console",
  "dirs 5.0.1",
  "fastembed",
  "hex",

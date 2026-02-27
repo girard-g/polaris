@@ -4,6 +4,8 @@
 
 The indexing pipeline takes a file system path and produces semantic vector chunks in the database. It is incremental by default — unchanged files are skipped.
 
+For large corpora (5k+ documents), the pipeline uses a **three-phase design** that eliminates double file reads, maximises embedding batch sizes, and writes all files in a single transaction.
+
 ## Pipeline Stages
 
 ```
@@ -16,22 +18,22 @@ The indexing pipeline takes a file system path and produces semantic vector chun
 3. Detect Removals
    (DB paths) ∖ (disk paths) → delete from DB
 
-4. Hash & Classify
-   for each disk path:
-     compute SHA256
-     compare to DB hash
-     → unchanged | modified | new
+── Phase A: Parallel Collect (rayon) ───────────────────────────────────
+4. For each pending file (in parallel across CPU cores):
+     read_to_string            ← single read
+     SHA256 from content bytes ← no second read
+     compare to DB hash        → unchanged | modified | new
+     chunk_markdown()          ← parse + split in parallel
 
-5. Skip Unchanged
-   (unless --force)
+── Phase B: Cross-file Embedding ───────────────────────────────────────
+5. Flatten all chunks from all pending files into one Vec
+   Embed in batches of 32 across the entire corpus
+   (batches are always full except the last)
 
-6. Process Changed Files
-   for each new/modified file:
-     read content
-     extract title (first H1)
-     chunk markdown (heading-aware)
-     embed in batches of 32
-     store in transaction
+── Phase C: Single-Transaction Write ───────────────────────────────────
+6. BEGIN
+   For each file: delete old + insert document + insert chunks
+   COMMIT  (one write barrier for the entire run)
 
 7. Report
    → IndexReport { added, modified, removed, unchanged, errors }
@@ -43,7 +45,7 @@ The indexing pipeline takes a file system path and produces semantic vector chun
 
 ## Change Detection
 
-SHA256 is computed from the raw file bytes. The digest is compared against the stored `content_hash` in the `documents` table:
+SHA256 is computed from the file's in-memory bytes (the same buffer used for chunking — no second read). The digest is compared against the stored `content_hash` in the `documents` table:
 
 - **Unchanged** → skip (no embedding, no DB write)
 - **Modified** → delete old chunks, re-embed, re-store
@@ -51,6 +53,42 @@ SHA256 is computed from the raw file bytes. The digest is compared against the s
 - **Missing from disk** → delete from DB (cascades to chunks + vec_chunks)
 
 Use `--force` to bypass hash comparison and re-index everything.
+
+## Phase A — Parallel Collect
+
+`rayon::par_iter()` processes all pending files concurrently across available CPU cores. Each file is read **once**: SHA256 is computed from the in-memory content bytes, then `chunk_markdown()` runs on the same buffer. The collect phase produces a `Vec<FileData>` ready for embedding.
+
+```rust
+struct FileData {
+    path: PathBuf,
+    norm: String,      // forward-slash normalized path (DB key)
+    hash: String,      // SHA256 hex
+    file_size: i64,    // bytes
+    title: Option<String>,
+    is_new: bool,
+    chunks: Vec<Chunk>,
+}
+```
+
+Files that exceed `max_file_size` (default 10 MB) are skipped with an error recorded in `IndexReport.errors`.
+
+## Phase B — Cross-file Embedding
+
+All chunks from all `FileData` structs are flattened into a single `Vec<String>`, then embedded in a stream of `EMBED_BATCH_SIZE` (32) batches. Because chunks come from many files, batches are almost always exactly 32 — compared to the per-file approach where a 5-chunk file wastes 27 batch slots.
+
+Per-file chunk boundaries are tracked with `(start_idx, chunk_count)` offsets so the flat embedding `Vec` can be sliced back per file during Phase C.
+
+## Phase C — Single-Transaction Write
+
+One `BEGIN` / `COMMIT` covers all files in the run. Each file goes through:
+
+1. `delete_document(norm_path)` — removes old chunks (cascade) if the file existed
+2. `insert_document(norm, hash, title, file_size)` — upsert the document row
+3. `insert_chunk(...)` × N — one row per chunk with its embedding slice
+
+Files that produce **0 chunks** still receive a document record so they are skipped on the next incremental run.
+
+On any error during Phase C, the transaction is rolled back in full — no partial state is committed.
 
 ## Markdown Chunking
 
@@ -66,8 +104,8 @@ A **heading context** string is built hierarchically:
 
 ```
 # Guide
-## Installation     → "# Guide > ## Installation"
-### Linux           → "# Guide > ## Installation > ### Linux"
+## Installation     → "Guide > Installation"
+### Linux           → "Guide > Installation > Linux"
 ```
 
 ### Step 2 — Chunk Formation
@@ -119,36 +157,29 @@ Chunks are embedded in batches of **32** using `EmbeddingEngine::embed_documents
 3. Truncate each embedding to `target_dim`
 4. L2-normalize each embedding
 
-## Storage
-
-For each file, everything is written inside a single DB transaction:
-
-1. If the file existed before: delete its old chunks (+ vec_chunks cascade)
-2. Insert/update the `documents` row
-3. For each chunk: insert into `chunks` and `vec_chunks`
-4. Commit
-
-On any error during this process, the transaction is rolled back and the error is recorded in `IndexReport.errors`. The file is skipped; other files continue processing.
+Because Phase B flattens chunks across all pending files before embedding, batches in a large run are always full (except the last batch), maximising ONNX throughput.
 
 ## Progress Display
 
-During indexing, `indicatif` shows a progress bar:
+Three progress indicators are shown, one per phase:
 
 ```
-[████████████████████] 10/10 | docs/guide.md · 48/160 chunks [embedding…]
+Phase A  ⠹ Reading & chunking files…          (spinner — fast, parallel)
+Phase B  [████████████████░░░░] 320/500 chunks | ETA 0:12
+Phase C  ⠹ Writing to database…               (spinner — fast, single tx)
 ```
 
-The message updates per chunk-batch to show the current file and embedding progress.
+Phase B is where the wall-clock time is spent. The chunk-level progress bar with ETA gives an accurate view of the slow part.
 
 ## IndexReport
 
 ```rust
 pub struct IndexReport {
-    pub added:       Vec<PathBuf>,
-    pub modified:    Vec<PathBuf>,
-    pub removed:     Vec<PathBuf>,
-    pub unchanged:   Vec<PathBuf>,
-    pub errors:      Vec<(PathBuf, String)>,
+    pub added:        Vec<PathBuf>,
+    pub modified:     Vec<PathBuf>,
+    pub removed:      Vec<PathBuf>,
+    pub unchanged:    Vec<PathBuf>,
+    pub errors:       Vec<(PathBuf, String)>,
     pub total_chunks: usize,
     pub total_bytes:  u64,
     pub elapsed:      Duration,

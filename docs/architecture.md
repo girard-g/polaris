@@ -55,10 +55,12 @@ src/
 
 ### `indexer.rs`
 - `Indexer` holds `Arc<EmbeddingEngine>` + chunking config
-- `index_path()` runs the full discover → diff → embed → store pipeline
-- `Chunk` struct carries `heading_context` (e.g. `"# Guide > ## Install"`)
-- Embedding done in batches of 32 for memory efficiency
-- Each document is wrapped in a DB transaction (begin → insert → commit or rollback)
+- `index_path()` runs a **three-phase pipeline** optimised for large corpora:
+  - **Phase A (parallel collect):** `rayon::par_iter()` reads each file once — SHA256 from in-memory bytes, then `chunk_markdown()`. Concurrent across all CPU cores.
+  - **Phase B (cross-file embedding):** All chunks from all pending files are flattened and embedded in batches of 32. Batches are always full (except the last), maximising ONNX throughput.
+  - **Phase C (single-transaction write):** One `BEGIN`/`COMMIT` for the entire run.
+- `Chunk` struct carries `heading_context` (e.g. `"Guide > Installation"`)
+- `FileData` struct is the intermediate representation produced by Phase A
 
 ### `search.rs`
 - `SearchEngine<'a>` borrows both `EmbeddingEngine` and `Database` by reference
@@ -82,16 +84,31 @@ src/
 ```
 Path on disk
   → walkdir (discover .md files)
-  → SHA256 hash (change detection)
+  → DB hash load (existing SHA256 per path)
+
+── Phase A (rayon par_iter) ──────────────────────────────────────────────
+  → read_to_string           (single read per file)
+  → SHA256 from content bytes (no second read)
+  → skip if hash unchanged   (unless --force)
   → pulldown-cmark (parse markdown events + byte offsets)
   → Section extraction (heading-bounded blocks)
   → Chunk splitting (paragraph → sentence → word fallback)
+  → Vec<FileData>
+
+── Phase B (sequential, full batches) ────────────────────────────────────
+  → Flatten all chunks across all files → Vec<String>
   → Batch embedding (32 chunks/batch via fastembed)
-  → SQLite transaction:
+  → Vec<Vec<f32>> (indexed by global chunk position)
+
+── Phase C (single transaction) ──────────────────────────────────────────
+  → BEGIN
+  → For each file:
+      delete old document + chunks (cascade)
       insert documents row
       insert chunks rows
       insert vec_chunks rows (embeddings)
       insert chunks_fts rows (BM25 index)
+  → COMMIT
 ```
 
 ### Searching

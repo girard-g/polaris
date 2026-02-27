@@ -83,6 +83,7 @@ pub struct Indexer {
     embedding_engine: Arc<EmbeddingEngine>,
     max_chunk_tokens: usize,
     chunk_overlap_chars: usize,
+    max_file_size: u64,
 }
 
 impl Indexer {
@@ -90,11 +91,13 @@ impl Indexer {
         embedding_engine: Arc<EmbeddingEngine>,
         max_chunk_tokens: usize,
         chunk_overlap_chars: usize,
+        max_file_size: u64,
     ) -> Self {
         Self {
             embedding_engine,
             max_chunk_tokens,
             chunk_overlap_chars,
+            max_file_size,
         }
     }
 
@@ -232,6 +235,15 @@ impl Indexer {
         display: &str,
         pb: &ProgressBar,
     ) -> Result<usize> {
+        // Guard against files that exceed the configured size limit.
+        let file_size_bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+        if file_size_bytes > self.max_file_size {
+            return Err(crate::error::PolarisError::Indexing(format!(
+                "file size {} bytes exceeds max_file_size limit {} bytes",
+                file_size_bytes, self.max_file_size
+            )));
+        }
+
         let content = std::fs::read_to_string(path)?;
         let file_size = content.len() as i64;
         let title = extract_title(&content);

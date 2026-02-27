@@ -25,11 +25,19 @@ use super::types::{IndexParams, SearchParams, StatusParams};
 // Shared state
 // ---------------------------------------------------------------------------
 
+/// Shared state for the MCP server.
+///
+/// Two separate SQLite connections to the same file are used so that
+/// read operations (search, status) and write operations (index) can proceed
+/// concurrently under WAL mode without mutual serialisation.
 #[derive(Clone)]
 pub struct PolarisState {
     pub config: Arc<PolarisConfig>,
     pub embedding_engine: Arc<EmbeddingEngine>,
-    pub db: Arc<Mutex<Database>>,
+    /// Connection used exclusively by read operations (search, status).
+    pub read_db: Arc<Mutex<Database>>,
+    /// Connection used exclusively by write operations (index).
+    pub write_db: Arc<Mutex<Database>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,11 +86,11 @@ impl PolarisServer {
         description = "Search indexed documentation using semantic similarity. Returns the most relevant chunks for the given query."
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
-        let top_k = params.top_k.unwrap_or(5) as usize;
-        let query = params.query;
-        let db = Arc::clone(&self.state.db);
-        let engine = Arc::clone(&self.state.embedding_engine);
         let config = Arc::clone(&self.state.config);
+        let top_k = (params.top_k.unwrap_or(5) as usize).min(config.max_top_k);
+        let query = params.query;
+        let db = Arc::clone(&self.state.read_db);
+        let engine = Arc::clone(&self.state.embedding_engine);
 
         let result = tokio::task::spawn_blocking(move || {
             let db = match db.lock() {
@@ -112,7 +120,7 @@ impl PolarisServer {
         let path = PathBuf::from(&params.path);
         let recursive = params.recursive.unwrap_or(true);
         let force = params.force.unwrap_or(false);
-        let db = Arc::clone(&self.state.db);
+        let db = Arc::clone(&self.state.write_db);
         let engine = Arc::clone(&self.state.embedding_engine);
         let config = Arc::clone(&self.state.config);
 
@@ -121,7 +129,12 @@ impl PolarisServer {
         }
 
         let result = tokio::task::spawn_blocking(move || {
-            let indexer = Indexer::new(engine, config.max_chunk_tokens, config.chunk_overlap_chars);
+            let indexer = Indexer::new(
+                engine,
+                config.max_chunk_tokens,
+                config.chunk_overlap_chars,
+                config.max_file_size,
+            );
             let db = match db.lock() {
                 Ok(d) => d,
                 Err(e) => return format!("Error: failed to lock database: {e}"),
@@ -150,7 +163,7 @@ impl PolarisServer {
         description = "Returns statistics about the current index: document count, chunk count, database size, and embedding configuration."
     )]
     async fn status(&self, _params: Parameters<StatusParams>) -> String {
-        let db = Arc::clone(&self.state.db);
+        let db = Arc::clone(&self.state.read_db);
         let config = Arc::clone(&self.state.config);
 
         let result = tokio::task::spawn_blocking(move || {

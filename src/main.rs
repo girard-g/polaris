@@ -147,7 +147,7 @@ async fn cmd_index(
     model_spinner.finish_and_clear();
     eprintln!("  Model ready.");
 
-    let indexer = Indexer::new(engine, cfg.max_chunk_tokens, cfg.chunk_overlap_chars);
+    let indexer = Indexer::new(engine, cfg.max_chunk_tokens, cfg.chunk_overlap_chars, cfg.max_file_size);
 
     eprintln!("  Indexing: {}", path.display());
     let report = indexer.index_path(&db, path, recursive, force)?;
@@ -196,14 +196,18 @@ async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     tracing::info!("Database: {}", cfg.db_path.display());
     tracing::info!("Embedding dim: {}", cfg.embedding_dim);
 
-    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+    // Open two connections to the same file so reads and writes don't serialise
+    // each other under WAL mode.
+    let read_db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+    let write_db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     tracing::info!("Loading embedding model…");
     let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim)?);
 
     let state = PolarisState {
         config: Arc::new(cfg),
         embedding_engine: engine,
-        db: Arc::new(Mutex::new(db)),
+        read_db: Arc::new(Mutex::new(read_db)),
+        write_db: Arc::new(Mutex::new(write_db)),
     };
 
     let server = PolarisServer::new(state);

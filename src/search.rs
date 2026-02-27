@@ -38,7 +38,8 @@ impl<'a> SearchEngine<'a> {
             self.db.search_knn_with_embeddings(&query_embedding, candidate_count)?;
 
         // 2. BM25 retrieval (graceful degradation on syntax error or empty FTS table).
-        let bm25_results = self.db.search_bm25(query, candidate_count).unwrap_or_default();
+        let sanitized_query = sanitize_fts5_query(query);
+        let bm25_results = self.db.search_bm25(&sanitized_query, candidate_count).unwrap_or_default();
 
         if vector_results.is_empty() && bm25_results.is_empty() {
             return Ok(vec![]);
@@ -80,11 +81,15 @@ impl<'a> SearchEngine<'a> {
         // 6. MMR reranking.
         let selected = mmr_rerank(boosted, top_k, self.mmr_lambda);
 
-        // 7. Store the combined RRF+heading score in the `distance` field for display.
+        // 7. Normalize scores to [0, 1] by dividing by the maximum score.
+        //    The top result always gets 1.000; others are proportional.
+        let max_score = selected.iter().map(|(s, _)| *s).fold(0.0_f32, f32::max);
+
+        // 8. Store the normalised score in the `score` field for display.
         Ok(selected
             .into_iter()
-            .map(|(score, mut c)| {
-                c.distance = score;
+            .map(|(s, mut c)| {
+                c.score = if max_score > 0.0 { s / max_score } else { 0.0 };
                 c.into_search_result()
             })
             .collect())
@@ -101,7 +106,7 @@ impl<'a> SearchEngine<'a> {
             out.push_str(&format!(
                 "### Result {} — score: {:.3}\n",
                 i + 1,
-                r.distance
+                r.score
             ));
             if !r.heading_context.is_empty() {
                 out.push_str(&format!("**Section:** {}\n", r.heading_context));
@@ -117,6 +122,25 @@ impl<'a> SearchEngine<'a> {
 // ---------------------------------------------------------------------------
 // Pure functions (testable without DB)
 // ---------------------------------------------------------------------------
+
+/// Sanitize a user query for safe use as an FTS5 query string.
+///
+/// Strips FTS5 operator characters and leading dashes to prevent syntax errors
+/// when the user's query contains punctuation or special operators.
+pub fn sanitize_fts5_query(query: &str) -> String {
+    // Remove characters with special meaning in FTS5 query syntax.
+    const FTS5_SPECIAL: &[char] = &['"', '(', ')', '*', '+', '^', ':', '{', '}', '~'];
+    query
+        .split_whitespace()
+        .map(|token| {
+            let t: String = token.chars().filter(|c| !FTS5_SPECIAL.contains(c)).collect();
+            // Strip leading dashes (NOT operator in FTS5).
+            t.trim_start_matches('-').to_string()
+        })
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Dot product of two L2-normalised vectors = cosine similarity.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -222,24 +246,24 @@ mod tests {
         content: &str,
         heading_context: &str,
         file_path: &str,
-        distance: f32,
+        score: f32,
     ) -> SearchResult {
         SearchResult {
             chunk_id: 1,
             content: content.to_string(),
             heading_context: heading_context.to_string(),
             file_path: file_path.to_string(),
-            distance,
+            score,
         }
     }
 
-    fn make_candidate(distance: f32, embedding: Vec<f32>) -> SearchResultWithEmbedding {
+    fn make_candidate(score: f32, embedding: Vec<f32>) -> SearchResultWithEmbedding {
         SearchResultWithEmbedding {
             chunk_id: 1,
             content: String::new(),
             heading_context: String::new(),
             file_path: String::new(),
-            distance,
+            score,
             embedding,
         }
     }
@@ -398,7 +422,7 @@ mod tests {
             content: String::new(),
             heading_context: String::new(),
             file_path: String::new(),
-            distance: 0.0,
+            score: 0.0,
             embedding: vec![],
         }
     }
@@ -449,5 +473,39 @@ mod tests {
         assert_eq!(bm25_only.len(), 2);
         assert!(bm25_only.contains(&5));
         assert!(bm25_only.contains(&6));
+    }
+
+    // -----------------------------------------------------------------------
+    // sanitize_fts5_query (Phase 4b)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_plain_query_unchanged() {
+        assert_eq!(sanitize_fts5_query("rust programming"), "rust programming");
+    }
+
+    #[test]
+    fn sanitize_strips_fts5_operators() {
+        // Quotes, parens, wildcards, etc. are removed.
+        assert_eq!(sanitize_fts5_query("\"hello world\""), "hello world");
+        assert_eq!(sanitize_fts5_query("foo* AND bar"), "foo AND bar");
+        assert_eq!(sanitize_fts5_query("(one OR two)"), "one OR two");
+    }
+
+    #[test]
+    fn sanitize_strips_leading_dashes() {
+        assert_eq!(sanitize_fts5_query("-bad token"), "bad token");
+        assert_eq!(sanitize_fts5_query("---triple"), "triple");
+    }
+
+    #[test]
+    fn sanitize_empty_query_returns_empty() {
+        assert_eq!(sanitize_fts5_query(""), "");
+        assert_eq!(sanitize_fts5_query("   "), "");
+    }
+
+    #[test]
+    fn sanitize_all_special_chars_returns_empty() {
+        assert_eq!(sanitize_fts5_query("\"\"()"), "");
     }
 }

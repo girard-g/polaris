@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -42,7 +43,7 @@ pub struct SearchResult {
     pub content: String,
     pub heading_context: String,
     pub file_path: String,
-    pub distance: f32,
+    pub score: f32,
 }
 
 /// Like `SearchResult` but also carries the stored embedding (for MMR reranking).
@@ -51,7 +52,7 @@ pub struct SearchResultWithEmbedding {
     pub content: String,
     pub heading_context: String,
     pub file_path: String,
-    pub distance: f32,
+    pub score: f32,
     pub embedding: Vec<f32>,
 }
 
@@ -62,7 +63,7 @@ impl SearchResultWithEmbedding {
             content: self.content,
             heading_context: self.heading_context,
             file_path: self.file_path,
-            distance: self.distance,
+            score: self.score,
         }
     }
 }
@@ -81,6 +82,24 @@ pub struct DbStats {
     pub last_indexed: Option<String>,
     pub db_size_bytes: u64,
     pub embedding_dim: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Pragma helpers
+// ---------------------------------------------------------------------------
+
+/// Apply all connection-level pragmas. Called from both `open()` and `open_in_memory()`.
+///
+/// WAL is a no-op on `:memory:` databases (safe for tests).
+fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous  = NORMAL;
+         PRAGMA cache_size   = -64000;
+         PRAGMA mmap_size    = 268435456;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA foreign_keys = ON;",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -115,9 +134,7 @@ impl Database {
     /// `embedding_dim` and `model_id` are validated against the config values.
     pub fn open(path: &Path, config_dim: usize, config_model_id: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
-
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-
+        apply_pragmas(&conn)?;
         let mut db = Self { conn, embedding_dim: config_dim, model_id: config_model_id.to_string() };
         db.init_schema(config_dim, config_model_id)?;
         Ok(db)
@@ -126,7 +143,7 @@ impl Database {
     /// Open an in-memory database (useful for tests).
     pub fn open_in_memory(embedding_dim: usize, model_id: &str) -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+        apply_pragmas(&conn)?;
         let mut db = Self { conn, embedding_dim, model_id: model_id.to_string() };
         db.init_schema(embedding_dim, model_id)?;
         Ok(db)
@@ -473,7 +490,7 @@ impl Database {
         let rows = stmt.query_map(params![bytes, top_k as i64], |r| {
             Ok(SearchResult {
                 chunk_id: r.get(0)?,
-                distance: r.get(1)?,
+                score: r.get(1)?,
                 content: r.get(2)?,
                 heading_context: r.get(3)?,
                 file_path: r.get(4)?,
@@ -488,6 +505,8 @@ impl Database {
     }
 
     /// Like `search_knn` but also fetches each result's stored embedding for MMR.
+    ///
+    /// Uses exactly 2 queries: one KNN query + one batch embedding fetch (no N+1).
     pub fn search_knn_with_embeddings(
         &self,
         query_embedding: &[f32],
@@ -510,30 +529,50 @@ impl Database {
              ORDER BY vc.distance",
         )?;
 
-        let rows = stmt.query_map(params![bytes, candidate_count as i64], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, f32>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-            ))
-        })?;
+        // Collect KNN results first (releases the statement borrow).
+        let rows_data: Vec<(i64, f32, String, String, String)> = stmt
+            .query_map(params![bytes, candidate_count as i64], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f32>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
 
-        let mut results = Vec::new();
-        for row in rows {
-            let (chunk_id, distance, content, heading_context, file_path) = row?;
+        if rows_data.is_empty() {
+            return Ok(vec![]);
+        }
 
-            let emb_bytes: Vec<u8> = self.conn.query_row(
-                "SELECT embedding FROM vec_chunks WHERE chunk_id = ?1",
-                params![chunk_id],
-                |r| r.get(0),
-            )?;
-            let embedding = bytes_to_f32_slice(&emb_bytes);
+        // Batch-fetch all embeddings in one query (eliminates N+1).
+        let chunk_ids: Vec<i64> = rows_data.iter().map(|r| r.0).collect();
+        let placeholders = (1..=chunk_ids.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let batch_sql = format!(
+            "SELECT chunk_id, embedding FROM vec_chunks WHERE chunk_id IN ({placeholders})"
+        );
+        let mut emb_stmt = self.conn.prepare(&batch_sql)?;
+        let id_params: Vec<&dyn rusqlite::ToSql> =
+            chunk_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let mut embeddings: HashMap<i64, Vec<f32>> = HashMap::new();
+        let mut emb_rows = emb_stmt.query(rusqlite::params_from_iter(id_params))?;
+        while let Some(row) = emb_rows.next()? {
+            let cid: i64 = row.get(0)?;
+            let emb_bytes: Vec<u8> = row.get(1)?;
+            embeddings.insert(cid, bytes_to_f32_slice(&emb_bytes));
+        }
 
+        // Assemble final results.
+        let mut results = Vec::with_capacity(rows_data.len());
+        for (chunk_id, score, content, heading_context, file_path) in rows_data {
+            let embedding = embeddings.remove(&chunk_id).unwrap_or_default();
             results.push(SearchResultWithEmbedding {
                 chunk_id,
-                distance,
+                score,
                 content,
                 heading_context,
                 file_path,
@@ -609,7 +648,7 @@ impl Database {
             content,
             heading_context,
             file_path,
-            distance: 0.0,
+            score: 0.0,
             embedding,
         }))
     }
@@ -662,6 +701,18 @@ impl Database {
             db_size_bytes,
             embedding_dim: self.embedding_dim,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+impl Database {
+    /// Query `PRAGMA journal_mode` (for WAL tests).
+    fn journal_mode(&self) -> String {
+        self.conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap()
     }
 }
 
@@ -870,8 +921,8 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].content, "chunk X");
         assert!(
-            results[0].distance < results[1].distance,
-            "nearest chunk should have smaller distance"
+            results[0].score < results[1].score,
+            "nearest chunk should have smaller score (raw cosine distance)"
         );
     }
 
@@ -1127,5 +1178,48 @@ mod tests {
         // After migration, the pre-existing chunk should be findable via BM25.
         let results = db.search_bm25("migration_test_token", 5).unwrap();
         assert_eq!(results.len(), 1, "backfilled chunk should be found after migration");
+    }
+
+    // -----------------------------------------------------------------------
+    // WAL mode (Phase 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn wal_mode_enabled_on_file_db() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("wal_test.db");
+        let db = Database::open(&db_path, 4, "test-model").unwrap();
+        assert_eq!(db.journal_mode(), "wal", "WAL mode should be active on file-based DB");
+    }
+
+    #[test]
+    fn in_memory_db_opens_successfully_with_pragmas() {
+        // WAL is a no-op on :memory: but open_in_memory should not fail.
+        let db = setup();
+        let stats = db.get_stats(Path::new("nonexistent")).unwrap();
+        assert_eq!(stats.doc_count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch embedding fetch — no N+1 (Phase 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn search_knn_with_embeddings_batch_fetch_returns_correct_results() {
+        let db = setup();
+        let doc_id = db.insert_document("batch.md", "hash", None, 0).unwrap();
+        db.insert_chunk(doc_id, "chunk alpha", "", 0, 11, 0, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        db.insert_chunk(doc_id, "chunk beta",  "", 0, 10, 1, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        db.insert_chunk(doc_id, "chunk gamma", "", 0, 11, 2, &[0.0, 0.0, 1.0, 0.0]).unwrap();
+
+        let results = db.search_knn_with_embeddings(&[1.0, 0.0, 0.0, 0.0], 3).unwrap();
+        assert_eq!(results.len(), 3, "should return all 3 chunks");
+        // Each result must carry a non-empty embedding.
+        for r in &results {
+            assert_eq!(r.embedding.len(), 4, "embedding length must equal dim");
+        }
+        // The chunk most aligned with [1,0,0,0] should come first.
+        assert_eq!(results[0].content, "chunk alpha");
     }
 }

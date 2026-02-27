@@ -41,6 +41,14 @@ pub struct PolarisConfig {
     /// RRF k constant for Reciprocal Rank Fusion (higher → smoother score distribution)
     #[serde(default = "default_rrf_k")]
     pub rrf_k: usize,
+
+    /// Maximum allowed `top_k` value for search requests (caps runaway queries)
+    #[serde(default = "default_max_top_k")]
+    pub max_top_k: usize,
+
+    /// Maximum file size in bytes that the indexer will process (larger files are skipped)
+    #[serde(default = "default_max_file_size")]
+    pub max_file_size: u64,
 }
 
 fn default_db_path() -> PathBuf {
@@ -79,6 +87,14 @@ fn default_rrf_k() -> usize {
     60
 }
 
+fn default_max_top_k() -> usize {
+    50
+}
+
+fn default_max_file_size() -> u64 {
+    10 * 1024 * 1024 // 10 MB
+}
+
 impl Default for PolarisConfig {
     fn default() -> Self {
         Self {
@@ -91,6 +107,8 @@ impl Default for PolarisConfig {
             mmr_candidate_multiplier: default_mmr_candidate_multiplier(),
             heading_boost: default_heading_boost(),
             rrf_k: default_rrf_k(),
+            max_top_k: default_max_top_k(),
+            max_file_size: default_max_file_size(),
         }
     }
 }

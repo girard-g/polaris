@@ -79,6 +79,8 @@ pub struct Bm25Result {
 pub struct DbStats {
     pub doc_count: usize,
     pub chunk_count: usize,
+    pub empty_doc_count: usize,
+    pub total_source_bytes: u64,
     pub last_indexed: Option<String>,
     pub db_size_bytes: u64,
     pub embedding_dim: usize,
@@ -680,6 +682,14 @@ impl Database {
         let chunk_count: i64 =
             self.conn
                 .query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))?;
+        let empty_doc_count: i64 = self.conn.query_row(
+            "SELECT count(*) FROM documents WHERE id NOT IN (SELECT DISTINCT document_id FROM chunks)",
+            [],
+            |r| r.get(0),
+        )?;
+        let total_source_bytes: i64 = self
+            .conn
+            .query_row("SELECT coalesce(sum(file_size), 0) FROM documents", [], |r| r.get(0))?;
         let last_indexed: Option<String> = self
             .conn
             .query_row(
@@ -697,6 +707,8 @@ impl Database {
         Ok(DbStats {
             doc_count: doc_count as usize,
             chunk_count: chunk_count as usize,
+            empty_doc_count: empty_doc_count as usize,
+            total_source_bytes: total_source_bytes as u64,
             last_indexed,
             db_size_bytes,
             embedding_dim: self.embedding_dim,

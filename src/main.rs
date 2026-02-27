@@ -227,9 +227,24 @@ async fn cmd_status(cfg: PolarisConfig) -> Result<()> {
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let stats = db.get_stats(&cfg.db_path)?;
 
+    let avg_chunks = if stats.doc_count > 0 {
+        format!("{:.1}", stats.chunk_count as f64 / stats.doc_count as f64)
+    } else {
+        "—".to_string()
+    };
+    let empty_docs = if stats.empty_doc_count > 0 {
+        format!("{} (no chunks — too small or empty)", stats.empty_doc_count)
+    } else {
+        "0".to_string()
+    };
+
     println!("Documents  : {}", stats.doc_count);
+    println!("  Source   : {:.1} MB", stats.total_source_bytes as f64 / 1_048_576.0);
+    println!("  No chunks: {}", empty_docs);
     println!("Chunks     : {}", stats.chunk_count);
+    println!("  Avg/doc  : {}", avg_chunks);
     println!("DB size    : {:.1} KB", stats.db_size_bytes as f64 / 1024.0);
+    println!("Model      : {}", cfg.model_id);
     println!("Embed dim  : {}", stats.embedding_dim);
     println!(
         "Last index : {}",

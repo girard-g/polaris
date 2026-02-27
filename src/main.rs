@@ -15,12 +15,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tracing_subscriber::EnvFilter;
 
 use config::PolarisConfig;
-use db::Database;
+use db::{Database, SearchResult};
 use embedding::EmbeddingEngine;
 use error::{PolarisError, Result};
 use indexer::Indexer;
 use mcp::{PolarisServer, PolarisState};
-use db::SearchResult;
 use search::SearchEngine;
 
 // ---------------------------------------------------------------------------
@@ -233,13 +232,10 @@ async fn cmd_index(
 
 async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize) -> Result<()> {
     if !cfg.db_path.exists() {
-        eprintln!(
-            "{}  no index at {}  —  run {} first",
-            style("✗").red().bold(),
-            style(cfg.db_path.display().to_string()).dim(),
-            style("polaris index <path>").cyan(),
-        );
-        std::process::exit(1);
+        return Err(PolarisError::Indexing(format!(
+            "no index at {}  —  run `polaris index <path>` first",
+            cfg.db_path.display()
+        )));
     }
 
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;

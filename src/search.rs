@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 use crate::db::{Bm25Result, Database, SearchResult, SearchResultWithEmbedding};
 use crate::embedding::EmbeddingEngine;
@@ -103,15 +104,11 @@ impl<'a> SearchEngine<'a> {
 
         let mut out = String::new();
         for (i, r) in results.iter().enumerate() {
-            out.push_str(&format!(
-                "### Result {} — score: {:.3}\n",
-                i + 1,
-                r.score
-            ));
+            write!(out, "### Result {} — score: {:.3}\n", i + 1, r.score).unwrap();
             if !r.heading_context.is_empty() {
-                out.push_str(&format!("**Section:** {}\n", r.heading_context));
+                write!(out, "**Section:** {}\n", r.heading_context).unwrap();
             }
-            out.push_str(&format!("**File:** `{}`\n\n", r.file_path));
+            write!(out, "**File:** `{}`\n\n", r.file_path).unwrap();
             out.push_str(&r.content);
             out.push_str("\n\n---\n\n");
         }

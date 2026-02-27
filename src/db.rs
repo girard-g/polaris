@@ -330,11 +330,9 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare("SELECT path, content_hash FROM documents")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        let mut pairs = Vec::new();
-        for row in rows {
-            pairs.push(row?);
-        }
+        let pairs = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
         Ok(pairs)
     }
 
@@ -489,20 +487,17 @@ impl Database {
              ORDER BY vc.distance",
         )?;
 
-        let rows = stmt.query_map(params![bytes, top_k as i64], |r| {
-            Ok(SearchResult {
-                chunk_id: r.get(0)?,
-                score: r.get(1)?,
-                content: r.get(2)?,
-                heading_context: r.get(3)?,
-                file_path: r.get(4)?,
-            })
-        })?;
-
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
+        let results = stmt
+            .query_map(params![bytes, top_k as i64], |r| {
+                Ok(SearchResult {
+                    chunk_id: r.get(0)?,
+                    score: r.get(1)?,
+                    content: r.get(2)?,
+                    heading_context: r.get(3)?,
+                    file_path: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
         Ok(results)
     }
 
@@ -596,15 +591,11 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?1 ORDER BY rank LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![query, limit as i64], |r| r.get::<_, i64>(0))?;
-
-        let mut results = Vec::new();
-        for (rank, row) in rows.enumerate() {
-            results.push(Bm25Result {
-                chunk_id: row?,
-                bm25_rank: rank + 1,
-            });
-        }
+        let results = stmt
+            .query_map(params![query, limit as i64], |r| r.get::<_, i64>(0))?
+            .enumerate()
+            .map(|(rank, row)| row.map(|chunk_id| Bm25Result { chunk_id, bm25_rank: rank + 1 }))
+            .collect::<rusqlite::Result<_>>()?;
         Ok(results)
     }
 
@@ -733,17 +724,13 @@ impl Database {
 // ---------------------------------------------------------------------------
 
 fn f32_slice_to_bytes(v: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(v.len() * 4);
-    for f in v {
-        bytes.extend_from_slice(&f.to_le_bytes());
-    }
-    bytes
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 pub fn bytes_to_f32_slice(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .map(|c| f32::from_le_bytes(c.try_into().expect("chunks_exact(4) guarantees 4 bytes")))
         .collect()
 }
 

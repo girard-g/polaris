@@ -1,4 +1,4 @@
 pub mod server;
-pub mod types;
+mod types;
 
 pub use server::{PolarisServer, PolarisState};

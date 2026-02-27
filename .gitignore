@@ -1,4 +1,6 @@
 /target
 *.db
+polaris.db-shm
+polaris.db-wal
 .fastembed_cache/
 .mcp.json

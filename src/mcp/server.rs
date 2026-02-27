@@ -75,6 +75,16 @@ impl PolarisServer {
 }
 
 // ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Acquire a `Mutex` lock and return the guard, or format an error string on
+/// poison. Used to deduplicate the lock-or-error pattern across tool handlers.
+fn lock_db(db: &std::sync::Mutex<Database>) -> std::result::Result<std::sync::MutexGuard<'_, Database>, String> {
+    db.lock().map_err(|e| format!("Error: failed to lock database: {e}"))
+}
+
+// ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
 
@@ -93,9 +103,9 @@ impl PolarisServer {
         let engine = Arc::clone(&self.state.embedding_engine);
 
         let result = tokio::task::spawn_blocking(move || {
-            let db = match db.lock() {
+            let db = match lock_db(&db) {
                 Ok(d) => d,
-                Err(e) => return format!("Error: failed to lock database: {e}"),
+                Err(e) => return e,
             };
             let search = SearchEngine::new(
                 &engine, &db,
@@ -135,9 +145,9 @@ impl PolarisServer {
                 config.chunk_overlap_chars,
                 config.max_file_size,
             );
-            let db = match db.lock() {
+            let db = match lock_db(&db) {
                 Ok(d) => d,
-                Err(e) => return format!("Error: failed to lock database: {e}"),
+                Err(e) => return e,
             };
             match indexer.index_path(&db, &path, recursive, force) {
                 Ok(report) => {
@@ -167,9 +177,9 @@ impl PolarisServer {
         let config = Arc::clone(&self.state.config);
 
         let result = tokio::task::spawn_blocking(move || {
-            let db = match db.lock() {
+            let db = match lock_db(&db) {
                 Ok(d) => d,
-                Err(e) => return format!("Error: failed to lock database: {e}"),
+                Err(e) => return e,
             };
             match db.get_stats(&config.db_path) {
                 Ok(stats) => format!(

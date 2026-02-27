@@ -116,11 +116,14 @@ All three tools share a single `PolarisState`:
 PolarisState {
     config:           Arc<PolarisConfig>,
     embedding_engine: Arc<EmbeddingEngine>,  // Mutex<TextEmbedding> inside
-    db:               Arc<Mutex<Database>>,
+    read_db:          Arc<Mutex<Database>>,  // search + status
+    write_db:         Arc<Mutex<Database>>,  // index
 }
 ```
 
-Each tool clones the required `Arc`s and offloads all blocking work (embedding, SQLite, filesystem) to `tokio::task::spawn_blocking`. The DB mutex is acquired inside the blocking closure — never across an `.await` point. Tool calls are serialized through the mutex.
+Two separate `rusqlite::Connection`s open the same WAL-mode file. Search/status use `read_db`; index uses `write_db`. Under WAL, a concurrent index run won't block search queries.
+
+Each tool clones the required `Arc`s and offloads all blocking work to `tokio::task::spawn_blocking`. The DB mutex is acquired inside the blocking closure — never across an `.await` point.
 
 ## Error Handling in Tools
 

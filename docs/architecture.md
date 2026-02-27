@@ -68,10 +68,12 @@ src/
 - `compute_rrf_scores()` — pure function, rank-based fusion (scale-invariant)
 - `compute_heading_boost()` — additive bonus for heading term matches
 - `mmr_rerank()` — greedy Maximal Marginal Relevance selection
-- `format_results()` — formats to markdown string; `distance` field holds the final score
+- `format_results()` — formats to markdown string; `score` field holds the final normalized [0,1] score
 
 ### `mcp/server.rs`
-- `PolarisState` holds `Arc<PolarisConfig>`, `Arc<EmbeddingEngine>`, `Arc<Mutex<Database>>`
+- `PolarisState` holds `Arc<PolarisConfig>`, `Arc<EmbeddingEngine>`, `read_db: Arc<Mutex<Database>>`, `write_db: Arc<Mutex<Database>>`
+- Two separate DB connections to the same file so reads (search, status) and writes (index) don't mutually serialize under WAL mode
+- `lock_db()` helper acquires a `Mutex` guard or returns a formatted error string — used by all three tool closures
 - `PolarisServer` implements `ServerHandler` with three `#[tool]` methods
 - Each tool clones required `Arc`s, then offloads all blocking work via `tokio::task::spawn_blocking`
 - DB mutex is acquired inside the blocking closure (never across an `.await`)
@@ -137,19 +139,18 @@ Query string
 
 ```
 PolarisState {
-    config:           Arc<PolarisConfig>     (read-only)
-    embedding_engine: Arc<EmbeddingEngine>   (Mutex<TextEmbedding> inside)
-    db:               Arc<Mutex<Database>>   (lock per tool call)
+    config:           Arc<PolarisConfig>       (read-only)
+    embedding_engine: Arc<EmbeddingEngine>     (Mutex<TextEmbedding> inside)
+    read_db:          Arc<Mutex<Database>>     (search + status)
+    write_db:         Arc<Mutex<Database>>     (index)
 }
 ```
 
-The `Arc<Mutex<Database>>` means only one tool call can hold the DB at a time. This is acceptable because:
-1. The MCP transport is stdio (inherently sequential per session)
-2. Indexing is already CPU-bound on the embedding side
+Two separate `rusqlite::Connection`s open the same WAL-mode database file. Read operations (search, status) use `read_db`; write operations (index) use `write_db`. Under WAL mode a writer never blocks readers, so a background index call won't stall concurrent search queries.
 
 ## Threading Model
 
 - tokio runtime runs the MCP server loop
 - Tool handlers are `async fn`; all blocking work (embedding, SQLite, filesystem) runs on a dedicated thread pool via `tokio::task::spawn_blocking`
 - Each tool clones the relevant `Arc`s before entering `spawn_blocking`; the DB mutex is acquired inside the closure, never across an `.await` point
-- `Arc<Mutex<Database>>` serializes concurrent tool calls through the mutex (one active DB holder at a time)
+- `read_db` and `write_db` each serialize their respective callers through their own mutex; a search and an index can proceed concurrently under WAL mode

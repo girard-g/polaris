@@ -561,6 +561,17 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
 // Text splitting (paragraph → sentence → word fallback)
 // ---------------------------------------------------------------------------
 
+/// Take the last `overlap_chars` characters from `s` as an owned String,
+/// clamped to a valid char boundary.  Returns the whole string if it is
+/// shorter than `overlap_chars`.
+fn take_overlap(s: &str, overlap_chars: usize) -> String {
+    if s.len() > overlap_chars {
+        s[s.floor_char_boundary(s.len() - overlap_chars)..].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 fn split_text(
     text: &str,
     max_chars: usize,
@@ -571,12 +582,10 @@ fn split_text(
     let mut chunks = Vec::new();
 
     // Try paragraph boundaries first.
-    let paragraphs: Vec<&str> = text.split("\n\n").filter(|s| !s.trim().is_empty()).collect();
-
     let mut current = String::new();
     let mut current_start = base_byte_offset;
 
-    for para in &paragraphs {
+    for para in text.split("\n\n").filter(|s| !s.trim().is_empty()) {
         let sep_len = if current.is_empty() { 0 } else { 2 };
         if current.len() + sep_len + para.len() <= max_chars {
             if !current.is_empty() {
@@ -594,11 +603,7 @@ fn split_text(
                 });
 
                 // Overlap: take last `overlap_chars` chars from current.
-                let overlap = if current.len() > overlap_chars {
-                    current[current.floor_char_boundary(current.len() - overlap_chars)..].to_string()
-                } else {
-                    current.clone()
-                };
+                let overlap = take_overlap(&current, overlap_chars);
                 current_start = end_byte.saturating_sub(overlap_chars);
                 current = overlap;
             }
@@ -658,11 +663,7 @@ fn split_by_sentence(
                     start_byte: current_start,
                     end_byte: current_start + current.len(),
                 });
-                let overlap = if current.len() > overlap_chars {
-                    current[current.floor_char_boundary(current.len() - overlap_chars)..].to_string()
-                } else {
-                    current.clone()
-                };
+                let overlap = take_overlap(&current, overlap_chars);
                 current_start += current.len().saturating_sub(overlap_chars);
                 current = overlap;
             }
@@ -712,11 +713,10 @@ fn split_by_word(
     heading_context: &str,
 ) -> Vec<Chunk> {
     let mut chunks = Vec::new();
-    let words: Vec<&str> = text.split_whitespace().collect();
     let mut current = String::new();
     let mut current_start = base_byte_offset;
 
-    for word in words {
+    for word in text.split_whitespace() {
         let sep_len = if current.is_empty() { 0 } else { 1 };
         if current.len() + sep_len + word.len() <= max_chars {
             if !current.is_empty() {
@@ -731,11 +731,7 @@ fn split_by_word(
                     start_byte: current_start,
                     end_byte: current_start + current.len(),
                 });
-                let overlap = if current.len() > overlap_chars {
-                    current[current.floor_char_boundary(current.len() - overlap_chars)..].to_string()
-                } else {
-                    current.clone()
-                };
+                let overlap = take_overlap(&current, overlap_chars);
                 current_start += current.len().saturating_sub(overlap_chars);
                 current = overlap;
             }
@@ -764,22 +760,19 @@ fn split_by_word(
 // ---------------------------------------------------------------------------
 
 fn discover_markdown_files(root: &Path, recursive: bool) -> Vec<PathBuf> {
-    let mut files = Vec::new();
     let walker = if recursive {
         WalkDir::new(root)
     } else {
         WalkDir::new(root).max_depth(1)
     };
 
-    for entry in walker.into_iter().filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() {
-            let path = entry.path().to_path_buf();
-            if path.extension().map(|e| e == "md").unwrap_or(false) {
-                files.push(path);
-            }
-        }
-    }
-    files
+    walker
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.path().to_path_buf())
+        .filter(|p| p.extension().map(|ext| ext == "md").unwrap_or(false))
+        .collect()
 }
 
 /// Normalise to a forward-slash path string for stable DB storage.
@@ -789,13 +782,11 @@ fn normalise_path(path: &Path) -> Option<String> {
 
 /// Extract the first H1 title from markdown content.
 fn extract_title(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("# ") {
-            return Some(rest.trim().to_string());
-        }
-    }
-    None
+    content.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("# ")
+            .map(|rest| rest.trim().to_string())
+    })
 }
 
 #[cfg(test)]

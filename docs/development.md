@@ -61,7 +61,7 @@ cargo clippy
 # Format
 cargo fmt
 
-# Run tests (none exist yet — see todos.md)
+# Run tests
 cargo test
 ```
 

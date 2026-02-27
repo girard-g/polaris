@@ -2112,6 +2112,7 @@ dependencies = [
  "hex",
  "indicatif",
  "pulldown-cmark",
+ "rayon",
  "rmcp",
  "rusqlite",
  "schemars",

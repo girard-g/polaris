@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 
 const EMBED_BATCH_SIZE: usize = 32; // mirrors EmbeddingEngine's internal BATCH_SIZE
 use pulldown_cmark::{Event, HeadingLevel, Options as CmarkOptions, Parser, Tag, TagEnd};
@@ -76,6 +77,20 @@ pub struct Chunk {
 }
 
 // ---------------------------------------------------------------------------
+// Per-file data collected during Phase A
+// ---------------------------------------------------------------------------
+
+struct FileData {
+    path: PathBuf,
+    norm: String,
+    hash: String,
+    file_size: i64,
+    title: Option<String>,
+    is_new: bool,
+    chunks: Vec<Chunk>,
+}
+
+// ---------------------------------------------------------------------------
 // Public indexer entry point
 // ---------------------------------------------------------------------------
 
@@ -104,6 +119,11 @@ impl Indexer {
     /// Index all `.md` files under `root` (recursively unless `recursive==false`).
     ///
     /// When `force` is true, all files are re-indexed regardless of hash.
+    ///
+    /// Three-phase pipeline for large corpora:
+    ///   Phase A — parallel collect: read once, hash from bytes, chunk (rayon)
+    ///   Phase B — cross-file embedding: flat batch across all files (full EMBED_BATCH_SIZE batches)
+    ///   Phase C — single-transaction write: one BEGIN/COMMIT for all files
     pub fn index_path(
         &self,
         db: &Database,
@@ -150,162 +170,190 @@ impl Indexer {
             }
         }
 
-        // 5. Classify each discovered file: unchanged vs. needs indexing.
-        let mut to_index: Vec<(PathBuf, String, String, bool)> = Vec::new();
+        // ── Phase A: Parallel collect ─────────────────────────────────────
+        // Read each file exactly once: hash from in-memory bytes, chunk in parallel.
+        let collect_spinner = ProgressBar::new_spinner();
+        collect_spinner.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .unwrap()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
+        );
+        collect_spinner.set_message("Reading & chunking files…");
+        collect_spinner.enable_steady_tick(Duration::from_millis(80));
 
-        for path in &discovered {
-            let Some(norm) = normalise_path(path) else {
-                report.errors.push((path.clone(), "Non-UTF-8 path".to_string()));
-                continue;
-            };
+        // Capture config values so they can be moved into the rayon closure.
+        let max_chunk_chars = self.max_chunk_tokens * 4;
+        let overlap = self.chunk_overlap_chars;
+        let max_file_size = self.max_file_size;
 
-            let hash = match file_sha256(path) {
-                Ok(h) => h,
-                Err(e) => {
-                    report.errors.push((path.clone(), e.to_string()));
-                    continue;
-                }
-            };
-
-            let needs_index = force
-                || existing.get(&norm).map(|h| h != &hash).unwrap_or(true);
-
-            if !needs_index {
-                report.unchanged.push(path.clone());
-                continue;
-            }
-
-            let is_new = !existing.contains_key(&norm);
-            to_index.push((path.clone(), norm, hash, is_new));
+        enum CollectResult {
+            ToIndex(FileData),
+            Unchanged(PathBuf),
+            Error(PathBuf, String),
         }
 
-        // 6. Process files with a progress bar; chunk progress lives in the message field.
-        if to_index.is_empty() {
+        let collect_results: Vec<CollectResult> = discovered
+            .par_iter()
+            .map(|path| {
+                let norm = match normalise_path(path) {
+                    Some(n) => n,
+                    None => {
+                        return CollectResult::Error(
+                            path.clone(),
+                            "Non-UTF-8 path".to_string(),
+                        )
+                    }
+                };
+
+                let file_size_bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+                if file_size_bytes > max_file_size {
+                    return CollectResult::Error(
+                        path.clone(),
+                        format!(
+                            "file size {} bytes exceeds max_file_size limit {} bytes",
+                            file_size_bytes, max_file_size
+                        ),
+                    );
+                }
+
+                // Single read — used for both hashing and chunking.
+                let content = match std::fs::read_to_string(path) {
+                    Ok(c) => c,
+                    Err(e) => return CollectResult::Error(path.clone(), e.to_string()),
+                };
+
+                // Hash from in-memory bytes: no second file read.
+                let mut hasher = Sha256::new();
+                hasher.update(content.as_bytes());
+                let hash = hex::encode(hasher.finalize());
+
+                let is_new = !existing.contains_key(&norm);
+                let needs_index =
+                    force || existing.get(&norm).map(|h| h != &hash).unwrap_or(true);
+
+                if !needs_index {
+                    return CollectResult::Unchanged(path.clone());
+                }
+
+                let file_size = content.len() as i64;
+                let title = extract_title(&content);
+                let chunks = chunk_markdown(&content, max_chunk_chars, overlap);
+
+                CollectResult::ToIndex(FileData {
+                    path: path.clone(),
+                    norm,
+                    hash,
+                    file_size,
+                    title,
+                    is_new,
+                    chunks,
+                })
+            })
+            .collect();
+
+        collect_spinner.finish_and_clear();
+
+        // Partition collect results.
+        let mut file_data: Vec<FileData> = Vec::new();
+        for result in collect_results {
+            match result {
+                CollectResult::ToIndex(fd) => file_data.push(fd),
+                CollectResult::Unchanged(p) => report.unchanged.push(p),
+                CollectResult::Error(p, e) => report.errors.push((p, e)),
+            }
+        }
+
+        if file_data.is_empty() {
             eprintln!("  Nothing to index ({} file(s) unchanged)", report.unchanged.len());
-        } else {
-            let pb = ProgressBar::new(to_index.len() as u64);
+            report.elapsed = start.elapsed();
+            return Ok(report);
+        }
+
+        // ── Phase B: Cross-file embedding ─────────────────────────────────
+        // Flatten all chunks from all files into one Vec, embed in full batches of
+        // EMBED_BATCH_SIZE. Track per-file offsets to split embeddings back afterwards.
+        let mut all_texts: Vec<String> = Vec::new();
+        let mut file_offsets: Vec<(usize, usize)> = Vec::new(); // (start_idx, chunk_count)
+        for fd in &file_data {
+            let start_idx = all_texts.len();
+            all_texts.extend(fd.chunks.iter().map(|c| c.content.clone()));
+            file_offsets.push((start_idx, fd.chunks.len()));
+        }
+
+        let total_chunks = all_texts.len();
+
+        // Chunks-level progress bar — this is the slow phase.
+        let embed_pb = if total_chunks > 0 {
+            let pb = ProgressBar::new(total_chunks as u64);
             pb.set_style(
                 ProgressStyle::with_template(
-                    "{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} files | {wide_msg} | ETA {eta}",
+                    "{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} chunks | ETA {eta}",
                 )
                 .unwrap()
                 .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
                 .progress_chars("█▓░"),
             );
             pb.enable_steady_tick(Duration::from_millis(80));
+            pb
+        } else {
+            ProgressBar::hidden()
+        };
 
-            for (path, norm, hash, is_new) in to_index {
-                let display = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .to_string();
-                pb.set_message(display.clone());
-
-                match self.index_file(db, &path, &norm, &hash, &display, &pb) {
-                    Ok(chunk_count) => {
-                        report.total_chunks += chunk_count;
-                        if let Ok(meta) = path.metadata() {
-                            report.total_bytes += meta.len();
-                        }
-                        if is_new {
-                            report.added.push(path);
-                        } else {
-                            report.modified.push(path);
-                        }
-                    }
-                    Err(e) => report.errors.push((path, e.to_string())),
-                }
-                pb.inc(1);
-            }
-
-            pb.finish_and_clear();
-        }
-
-        report.elapsed = start.elapsed();
-        Ok(report)
-    }
-
-    fn index_file(
-        &self,
-        db: &Database,
-        path: &Path,
-        norm_path: &str,
-        hash: &str,
-        display: &str,
-        pb: &ProgressBar,
-    ) -> Result<usize> {
-        // Guard against files that exceed the configured size limit.
-        let file_size_bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
-        if file_size_bytes > self.max_file_size {
-            return Err(crate::error::PolarisError::Indexing(format!(
-                "file size {} bytes exceeds max_file_size limit {} bytes",
-                file_size_bytes, self.max_file_size
-            )));
-        }
-
-        let content = std::fs::read_to_string(path)?;
-        let file_size = content.len() as i64;
-        let title = extract_title(&content);
-
-        // Chunk first — no DB writes yet.
-        let chunks = chunk_markdown(
-            &content,
-            self.max_chunk_tokens * 4,
-            self.chunk_overlap_chars,
-        );
-        let total_chunks = chunks.len();
-
-        if total_chunks == 0 {
-            // Document is too small to produce chunks; record it so we skip it next run.
-            db.delete_document(norm_path)?;
-            db.insert_document(norm_path, hash, title.as_deref(), file_size)?;
-            return Ok(0);
-        }
-
-        // Show total chunk count immediately — before the slow embedding starts.
-        pb.set_message(format!("{display}  ·  0/{total_chunks} chunks"));
-
-        // Embed all chunks in batches (the slow part — no DB writes here).
-        let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
         let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(total_chunks);
-
         for batch_start in (0..total_chunks).step_by(EMBED_BATCH_SIZE) {
             let batch_end = (batch_start + EMBED_BATCH_SIZE).min(total_chunks);
-            pb.set_message(format!(
-                "{display}  ·  {}/{total_chunks} chunks  [embedding…]",
-                all_embeddings.len()
-            ));
             let batch_emb =
-                self.embedding_engine.embed_documents(&texts[batch_start..batch_end])?;
+                self.embedding_engine.embed_documents(&all_texts[batch_start..batch_end])?;
             all_embeddings.extend(batch_emb);
-            pb.set_message(format!(
-                "{display}  ·  {}/{total_chunks} chunks",
-                all_embeddings.len()
-            ));
+            embed_pb.set_position(all_embeddings.len() as u64);
         }
+        embed_pb.finish_and_clear();
 
-        // Persist everything in one transaction: delete old, insert doc + all chunks.
-        // If anything fails the whole operation rolls back — no orphaned records.
+        // ── Phase C: Single-transaction write ─────────────────────────────
+        // One BEGIN / COMMIT for all files — avoids 5k write barriers.
+        let write_spinner = ProgressBar::new_spinner();
+        write_spinner.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .unwrap()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
+        );
+        write_spinner.set_message("Writing to database…");
+        write_spinner.enable_steady_tick(Duration::from_millis(80));
+
         db.begin()?;
         let write_result = (|| -> Result<()> {
-            db.delete_document(norm_path)?;
-            let doc_id = db.insert_document(norm_path, hash, title.as_deref(), file_size)?;
-            for (i, (chunk, embedding)) in
-                chunks.iter().zip(all_embeddings.iter()).enumerate()
-            {
-                db.insert_chunk(
-                    doc_id,
-                    &chunk.content,
-                    &chunk.heading_context,
-                    chunk.start_byte,
-                    chunk.end_byte,
-                    i,
-                    embedding,
+            for (fd, (offset, count)) in file_data.iter().zip(file_offsets.iter()) {
+                db.delete_document(&fd.norm)?;
+                let doc_id = db.insert_document(
+                    &fd.norm,
+                    &fd.hash,
+                    fd.title.as_deref(),
+                    fd.file_size,
                 )?;
+
+                // Files with 0 chunks get a document record only (skip on next run).
+                if *count == 0 {
+                    continue;
+                }
+
+                let chunk_embs = &all_embeddings[*offset..*offset + *count];
+                for (i, (chunk, embedding)) in
+                    fd.chunks.iter().zip(chunk_embs.iter()).enumerate()
+                {
+                    db.insert_chunk(
+                        doc_id,
+                        &chunk.content,
+                        &chunk.heading_context,
+                        chunk.start_byte,
+                        chunk.end_byte,
+                        i,
+                        embedding,
+                    )?;
+                }
             }
             Ok(())
         })();
+
         match write_result {
             Ok(()) => db.commit()?,
             Err(e) => {
@@ -313,9 +361,23 @@ impl Indexer {
                 return Err(e);
             }
         }
+        write_spinner.finish_and_clear();
 
-        pb.set_message(display.to_string());
-        Ok(total_chunks)
+        // Populate report from collected file data.
+        for fd in &file_data {
+            report.total_chunks += fd.chunks.len();
+            if let Ok(meta) = fd.path.metadata() {
+                report.total_bytes += meta.len();
+            }
+            if fd.is_new {
+                report.added.push(fd.path.clone());
+            } else {
+                report.modified.push(fd.path.clone());
+            }
+        }
+
+        report.elapsed = start.elapsed();
+        Ok(report)
     }
 }
 
@@ -715,13 +777,6 @@ fn discover_markdown_files(root: &Path, recursive: bool) -> Vec<PathBuf> {
         }
     }
     files
-}
-
-fn file_sha256(path: &Path) -> std::io::Result<String> {
-    let content = std::fs::read(path)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&content);
-    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Normalise to a forward-slash path string for stable DB storage.

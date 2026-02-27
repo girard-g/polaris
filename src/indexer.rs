@@ -287,13 +287,12 @@ impl Indexer {
             let pb = ProgressBar::new(total_chunks as u64);
             pb.set_style(
                 ProgressStyle::with_template(
-                    "{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} chunks | ETA {eta}",
+                    "[{bar:40.cyan/blue}] {pos}/{len} chunks | ETA {eta}",
                 )
                 .unwrap()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
                 .progress_chars("█▓░"),
             );
-            pb.enable_steady_tick(Duration::from_millis(80));
+            pb.tick(); // render at 0/N immediately, before the first batch
             pb
         } else {
             ProgressBar::hidden()

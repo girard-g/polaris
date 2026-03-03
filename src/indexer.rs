@@ -783,7 +783,7 @@ fn normalise_path(path: &Path) -> Option<String> {
     path.to_str().map(|s| {
         let s = s.replace('\\', "/");
         // Strip a leading "./" so "docs/file.md" and "./docs/file.md" map to the same key.
-        s.strip_prefix("./").map(|s| s.to_string()).unwrap_or(s)
+        s.strip_prefix("./").unwrap_or(&s).to_string()
     })
 }
 

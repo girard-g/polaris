@@ -513,6 +513,12 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
             .map_err(|e| PolarisError::Indexing(format!("watch error: {e}")))?;
     }
 
+    // Pre-canonicalize once so the event loop doesn't call canonicalize() on every batch.
+    let canonical_paths: Vec<PathBuf> = paths
+        .iter()
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+        .collect();
+
     let n = paths.len();
     eprintln!(
         "{}  watching  {}  {}",
@@ -530,7 +536,7 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
                 break;
             }
             Some(events) = rx.recv() => {
-                for root in find_affected_roots(&events, &paths) {
+                for root in find_affected_roots(&events, paths, &canonical_paths) {
                     eprintln!();
                     eprintln!(
                         "{}  re-indexing  {}",
@@ -550,13 +556,13 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
 fn find_affected_roots<'a>(
     events: &[notify_debouncer_mini::DebouncedEvent],
     roots: &'a [PathBuf],
+    canonical_roots: &[PathBuf],
 ) -> Vec<&'a PathBuf> {
     roots
         .iter()
-        .filter(|root| {
-            let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-            events.iter().any(|e| e.path.starts_with(&canonical_root))
-        })
+        .zip(canonical_roots.iter())
+        .filter(|(_, canonical)| events.iter().any(|e| e.path.starts_with(canonical)))
+        .map(|(original, _)| original)
         .collect()
 }
 

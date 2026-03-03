@@ -1,43 +1,52 @@
 # Embedding Engine
 
-## Model
+## Supported Models
 
-Polaris uses the **Nomic Embed Text v1.5** model via [fastembed](https://github.com/Anyscale-AI/fastembed-rs):
+| Model ID | Native dim | Default dim | Download |
+|----------|-----------|-------------|---------|
+| `nomic-embed-text-v1.5` (default) | 768 | 512 | ~137 MB |
+| `mxbai-embed-large-v1` | 1024 | 1024 | ~670 MB |
+| `all-minilm-l6-v2` | 384 | 384 | ~23 MB |
 
-| Property | Value |
-|----------|-------|
-| Model ID | `nomic-embed-text-v1.5` |
-| Backend | ONNX (CPU) |
-| Native dimension | 768 |
-| Default working dim | 512 (Matryoshka truncation) |
-| Download size | ~137 MB |
-| Cache location | `~/.cache/huggingface/` |
+All models run via ONNX on CPU. Model files are cached in `~/.cache/huggingface/`.
 
-The model supports **Matryoshka Representation Learning**, meaning the first N dimensions of the full 768-dim vector are meaningful on their own. Polaris defaults to 512 dimensions, which gives a good balance between search quality and storage size.
+## Matryoshka Truncation
+
+`nomic-embed-text-v1.5` supports Matryoshka Representation Learning — the first N
+dimensions of the full 768-dim vector are independently meaningful.
+Polaris defaults to 512 dims for nomic (good balance of quality vs. storage).
+`mxbai` and `all-minilm` do not support truncation; their native dim is used.
 
 ## Task Prefixes
 
-The Nomic model is trained with task-specific prefixes that improve retrieval quality. Polaris always applies them:
+Each model requires specific prefixes to be prepended before encoding:
 
-| Context | Prefix |
-|---------|--------|
-| Indexing documents | `"search_document: "` |
-| Querying | `"search_query: "` |
+| Model | Document prefix | Query prefix |
+|-------|----------------|--------------|
+| `nomic-embed-text-v1.5` | `search_document: ` | `search_query: ` |
+| `mxbai-embed-large-v1` | _(none)_ | `Represent this sentence for searching relevant passages: ` |
+| `all-minilm-l6-v2` | _(none)_ | _(none)_ |
 
-Omitting these prefixes degrades retrieval quality. Both the document text and the query must use the correct prefix.
+Polaris applies prefixes automatically — no user action required.
+
+## Switching Models
+
+Changing models requires re-indexing from scratch. The database stores the model ID
+in the `metadata` table; opening a database with a mismatched model produces a clear
+error and suggests deleting the database and re-indexing.
 
 ## Embedding Pipeline
 
 ```
 Input text
   │
-  ├─ Prepend prefix ("search_document: " or "search_query: ")
+  ├─ Prepend prefix (model-specific, applied automatically)
   │
   ├─ fastembed batch encode (ONNX CPU inference)
-  │    → raw Vec<f32> of length 768
+  │    → raw Vec<f32> of native length
   │
-  ├─ Truncate to target_dim (e.g. 512)
-  │    → slice first 512 values
+  ├─ Truncate to target_dim (nomic only; others use native dim)
+  │    → slice first N values
   │
   └─ L2 normalize
        norm = √(Σ xᵢ²)
@@ -51,7 +60,7 @@ After normalization, cosine similarity equals the dot product.
 
 ```rust
 // Create engine (loads model, validates dim)
-let engine = EmbeddingEngine::new(target_dim)?;
+let engine = EmbeddingEngine::new(target_dim, model_id)?;
 
 // Embed a batch of document strings (apply doc prefix)
 let embeddings: Vec<Vec<f32>> = engine.embed_documents(&texts)?;
@@ -79,11 +88,3 @@ The lock is acquired only for the duration of the `embed()` call and released im
 ## Batch Size
 
 During indexing, chunks are embedded in batches of **32** (`EMBED_BATCH_SIZE = 32`). This is a memory-efficiency trade-off: larger batches are faster but require more RAM.
-
-## Changing the Model
-
-Changing `model_id` in the config requires:
-1. Deleting or moving the existing database
-2. Re-indexing all documents from scratch
-
-The DB stores the model ID in the `metadata` table but does not currently validate it against the config. A future improvement would be to error on model ID mismatch similarly to how dimension mismatch is handled.

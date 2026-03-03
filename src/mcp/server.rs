@@ -183,8 +183,9 @@ impl PolarisServer {
             };
             match db.get_stats(&config.db_path) {
                 Ok(stats) => format!(
-                    "Documents: {}\nChunks: {}\nDatabase size: {} bytes\nEmbedding dim: {}\nLast indexed: {}",
+                    "Documents: {}\nChunks: {}\nDatabase size: {} bytes\nModel: {}\nEmbedding dim: {}\nLast indexed: {}",
                     stats.doc_count, stats.chunk_count, stats.db_size_bytes,
+                    config.model_id,
                     stats.embedding_dim, stats.last_indexed.unwrap_or_else(|| "never".to_string()),
                 ),
                 Err(e) => format!("Error: {e}"),

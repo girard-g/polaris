@@ -103,7 +103,19 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<()> {
     let mut cfg = PolarisConfig::load(cli.config.as_deref())?;
-    cfg.apply_overrides(cli.db, cli.dim, cli.model);
+    cfg.apply_overrides(cli.db, cli.dim, cli.model.clone());
+
+    // If --model was given without --dim and the current dim exceeds the model's
+    // native maximum, clamp to the native dim so the user doesn't have to
+    // always pair --model with --dim manually.
+    if cli.model.is_some() && cli.dim.is_none() {
+        if let Ok(native) = crate::embedding::native_dim_for(&cfg.model_id) {
+            if cfg.embedding_dim > native {
+                cfg.embedding_dim = native;
+            }
+        }
+    }
+
     cfg.validate()?;
 
     db::register_vec_extension();

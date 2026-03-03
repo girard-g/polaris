@@ -145,7 +145,7 @@ async fn cmd_index(
 
     // Model loading.
     let model_spinner = make_spinner("loading model…");
-    let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim)?);
+    let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
     model_spinner.finish_and_clear();
     eprintln!(
         "{}  model ready  {}",
@@ -239,7 +239,7 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize) -> Result<()>
     }
 
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
-    let engine = EmbeddingEngine::new(cfg.embedding_dim)?;
+    let engine = EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?;
 
     let search = SearchEngine::new(
         &engine,
@@ -286,7 +286,7 @@ async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     let read_db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let write_db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     tracing::info!("Loading embedding model…");
-    let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim)?);
+    let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
 
     let state = PolarisState {
         config: Arc::new(cfg),

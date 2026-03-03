@@ -5,37 +5,82 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
 use crate::error::{PolarisError, Result};
 
-const DOCUMENT_PREFIX: &str = "search_document: ";
-const QUERY_PREFIX: &str = "search_query: ";
+struct ModelInfo {
+    fastembed_model: EmbeddingModel,
+    pub native_dim: usize,
+    document_prefix: &'static str,
+    query_prefix: &'static str,
+}
+
+fn resolve_model(model_id: &str) -> Result<ModelInfo> {
+    match model_id {
+        "nomic-embed-text-v1.5" => Ok(ModelInfo {
+            fastembed_model: EmbeddingModel::NomicEmbedTextV15,
+            native_dim: 768,
+            document_prefix: "search_document: ",
+            query_prefix: "search_query: ",
+        }),
+        "mxbai-embed-large-v1" => Ok(ModelInfo {
+            fastembed_model: EmbeddingModel::MxbaiEmbedLargeV1,
+            native_dim: 1024,
+            document_prefix: "",
+            query_prefix: "Represent this sentence for searching relevant passages: ",
+        }),
+        "all-minilm-l6-v2" => Ok(ModelInfo {
+            fastembed_model: EmbeddingModel::AllMiniLML6V2,
+            native_dim: 384,
+            document_prefix: "",
+            query_prefix: "",
+        }),
+        _ => Err(PolarisError::Config(format!(
+            "Unknown model '{}'. Supported: nomic-embed-text-v1.5, mxbai-embed-large-v1, all-minilm-l6-v2",
+            model_id
+        ))),
+    }
+}
+
+/// Returns the native embedding dimension for a model ID, without loading the model.
+/// Also validates that the model_id is known.
+pub fn native_dim_for(model_id: &str) -> Result<usize> {
+    resolve_model(model_id).map(|m| m.native_dim)
+}
 
 pub struct EmbeddingEngine {
     model: Mutex<TextEmbedding>,
     target_dim: usize,
+    doc_prefix: String,
+    query_prefix: String,
 }
 
 impl EmbeddingEngine {
-    pub fn new(target_dim: usize) -> Result<Self> {
+    pub fn new(target_dim: usize, model_id: &str) -> Result<Self> {
+        let info = resolve_model(model_id)?;
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::NomicEmbedTextV15)
+            InitOptions::new(info.fastembed_model)
                 .with_show_download_progress(true),
         )
         .map_err(|e| PolarisError::Embedding(anyhow::anyhow!("Failed to load model: {e}")))?;
 
-        Ok(Self { model: Mutex::new(model), target_dim })
+        Ok(Self {
+            model: Mutex::new(model),
+            target_dim,
+            doc_prefix: info.document_prefix.to_string(),
+            query_prefix: info.query_prefix.to_string(),
+        })
     }
 
     /// Embed a batch of document texts (adds task prefix, truncates + L2-normalizes).
     pub fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let prefixed: Vec<String> = texts
             .iter()
-            .map(|t| format!("{DOCUMENT_PREFIX}{t}"))
+            .map(|t| format!("{}{t}", self.doc_prefix))
             .collect();
         self.embed_batch(&prefixed)
     }
 
     /// Embed a single query string (adds task prefix, truncates + L2-normalizes).
     pub fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
-        let prefixed = format!("{QUERY_PREFIX}{query}");
+        let prefixed = format!("{}{query}", self.query_prefix);
         let mut results = self.embed_batch(&[prefixed])?;
         results
             .pop()

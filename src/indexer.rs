@@ -153,10 +153,13 @@ impl Indexer {
             style(discovered.len().to_string()).bold(),
         );
 
-        // 2. Load existing hashes from DB.
+        // 2. Load existing hashes from DB, filtered to documents under this root.
+        let root_norm = normalise_path(root).unwrap_or_default();
+        let root_prefix = format!("{root_norm}/");
         let existing: HashMap<String, String> = db
             .get_all_document_hashes()?
             .into_iter()
+            .filter(|(path, _)| path == &root_norm || path.starts_with(&root_prefix))
             .collect();
 
         // 3. Build normalised-path set for detecting removals.
@@ -777,7 +780,11 @@ fn discover_markdown_files(root: &Path, recursive: bool) -> Vec<PathBuf> {
 
 /// Normalise to a forward-slash path string for stable DB storage.
 fn normalise_path(path: &Path) -> Option<String> {
-    path.to_str().map(|s| s.replace('\\', "/"))
+    path.to_str().map(|s| {
+        let s = s.replace('\\', "/");
+        // Strip a leading "./" so "docs/file.md" and "./docs/file.md" map to the same key.
+        s.strip_prefix("./").map(|s| s.to_string()).unwrap_or(s)
+    })
 }
 
 /// Extract the first H1 title from markdown content.

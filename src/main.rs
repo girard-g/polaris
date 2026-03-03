@@ -45,6 +45,10 @@ struct Cli {
     #[arg(long, global = true)]
     db: Option<PathBuf>,
 
+    /// Embedding model to use [nomic-embed-text-v1.5 (default), mxbai-embed-large-v1, all-minilm-l6-v2]
+    #[arg(long, global = true)]
+    model: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -99,7 +103,7 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<()> {
     let mut cfg = PolarisConfig::load(cli.config.as_deref())?;
-    cfg.apply_overrides(cli.db, cli.dim);
+    cfg.apply_overrides(cli.db, cli.dim, cli.model);
     cfg.validate()?;
 
     db::register_vec_extension();

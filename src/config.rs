@@ -178,12 +178,16 @@ impl PolarisConfig {
         &mut self,
         db_path: Option<PathBuf>,
         embedding_dim: Option<usize>,
+        model_id: Option<String>,
     ) {
         if let Some(p) = db_path {
             self.db_path = p;
         }
         if let Some(d) = embedding_dim {
             self.embedding_dim = d;
+        }
+        if let Some(m) = model_id {
+            self.model_id = m;
         }
     }
 }
@@ -250,7 +254,7 @@ mod tests {
     #[test]
     fn apply_overrides_with_some_values() {
         let mut cfg = PolarisConfig::default();
-        cfg.apply_overrides(Some(PathBuf::from("override.db")), Some(384));
+        cfg.apply_overrides(Some(PathBuf::from("override.db")), Some(384), None);
         assert_eq!(cfg.db_path, PathBuf::from("override.db"));
         assert_eq!(cfg.embedding_dim, 384);
     }
@@ -258,7 +262,7 @@ mod tests {
     #[test]
     fn apply_overrides_with_none_unchanged() {
         let mut cfg = PolarisConfig::default();
-        cfg.apply_overrides(None, None);
+        cfg.apply_overrides(None, None, None);
         assert_eq!(cfg.db_path, PathBuf::from("polaris.db"));
         assert_eq!(cfg.embedding_dim, 512);
     }

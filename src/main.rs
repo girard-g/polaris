@@ -18,7 +18,7 @@ use config::PolarisConfig;
 use db::{Database, SearchResult};
 use embedding::EmbeddingEngine;
 use error::{PolarisError, Result};
-use indexer::Indexer;
+use indexer::{IndexReport, Indexer};
 use mcp::{PolarisServer, PolarisState};
 use search::SearchEngine;
 
@@ -81,6 +81,15 @@ enum Command {
 
     /// Show index statistics
     Status,
+
+    /// Watch paths and automatically re-index on changes
+    Watch {
+        /// One or more paths to watch (files or directories)
+        paths: Vec<PathBuf>,
+        /// Do not recurse into subdirectories
+        #[arg(long)]
+        no_recursive: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +136,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Search { query, top_k } => cmd_search(cfg, &query, top_k).await,
         Command::Serve => cmd_serve(cfg).await,
         Command::Status => cmd_status(cfg).await,
+        Command::Watch { paths, no_recursive } => {
+            cmd_watch(cfg, &paths, !no_recursive).await
+        }
     }
 }
 
@@ -416,6 +428,205 @@ async fn cmd_status(cfg: PolarisConfig) -> Result<()> {
     println!();
 
     Ok(())
+}
+
+async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Result<()> {
+    use notify_debouncer_mini::notify::RecursiveMode;
+    use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
+
+    // Validate paths up front.
+    for path in paths {
+        if !path.exists() {
+            return Err(PolarisError::Indexing(format!(
+                "path not found: {}",
+                path.display()
+            )));
+        }
+    }
+
+    // Keep original strings for display, then canonicalize so that
+    // starts_with comparisons work against absolute inotify event paths.
+    let paths_display = paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let paths: Vec<PathBuf> = paths
+        .iter()
+        .map(|p| p.canonicalize().map_err(PolarisError::Io))
+        .collect::<Result<_>>()?;
+
+    eprintln!();
+    eprintln!(
+        "{}  {}  {}",
+        style("polaris").cyan().bold(),
+        style("·").dim(),
+        style(format!("watch  {paths_display}")).bold(),
+    );
+    eprintln!();
+
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+
+    let model_spinner = make_spinner("loading model…");
+    let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
+    model_spinner.finish_and_clear();
+    eprintln!(
+        "{}  model ready  {}",
+        style("✓").green().bold(),
+        style(&cfg.model_id).dim(),
+    );
+    eprintln!();
+
+    let indexer = Indexer::new(
+        engine,
+        cfg.max_chunk_tokens,
+        cfg.chunk_overlap_chars,
+        cfg.max_file_size,
+    );
+
+    // Initial index for every path.
+    for path in &paths {
+        eprintln!(
+            "{}  initial index  {}",
+            style("◆").cyan().bold(),
+            style(path.display().to_string()).bold(),
+        );
+        let report = indexer.index_path(&db, path, recursive, false)?;
+        print_watch_report(&report);
+    }
+
+    // Set up the debounced watcher with a tokio mpsc channel.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut debouncer = new_debouncer(
+        std::time::Duration::from_millis(500),
+        move |res: DebounceEventResult| {
+            if let Ok(events) = res {
+                let _ = tx.send(events);
+            }
+        },
+    )
+    .map_err(|e| PolarisError::Indexing(format!("watcher error: {e}")))?;
+
+    let mode = if recursive {
+        RecursiveMode::Recursive
+    } else {
+        RecursiveMode::NonRecursive
+    };
+    for path in &paths {
+        debouncer
+            .watcher()
+            .watch(path, mode)
+            .map_err(|e| PolarisError::Indexing(format!("watch error: {e}")))?;
+    }
+
+    let n = paths.len();
+    eprintln!(
+        "{}  watching  {}  {}",
+        style("◆").cyan().bold(),
+        style(format!("{n} path{}", if n == 1 { "" } else { "s" })).bold(),
+        style("· Ctrl+C to stop").dim(),
+    );
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!();
+                eprintln!("{}  stopped", style("◆").cyan().bold());
+                eprintln!();
+                break;
+            }
+            Some(events) = rx.recv() => {
+                for root in find_affected_roots(&events, &paths) {
+                    eprintln!();
+                    eprintln!(
+                        "{}  re-indexing  {}",
+                        style("◆").cyan().bold(),
+                        style(root.display().to_string()).bold(),
+                    );
+                    let report = indexer.index_path(&db, root, recursive, false)?;
+                    print_watch_report(&report);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn find_affected_roots<'a>(
+    events: &[notify_debouncer_mini::DebouncedEvent],
+    roots: &'a [PathBuf],
+) -> Vec<&'a PathBuf> {
+    roots
+        .iter()
+        .filter(|root| events.iter().any(|e| e.path.starts_with(root)))
+        .collect()
+}
+
+fn print_watch_report(report: &IndexReport) {
+    let no_changes = report.added.is_empty()
+        && report.modified.is_empty()
+        && report.removed.is_empty();
+
+    if no_changes {
+        eprintln!(
+            "{}  no changes  {}",
+            style("✓").green().bold(),
+            style(format!("{} unchanged", report.unchanged.len())).dim(),
+        );
+    } else {
+        let elapsed = report.elapsed.as_secs_f64();
+        let size_kb = report.total_bytes as f64 / 1024.0;
+        eprintln!(
+            "{}  indexed in {:.1}s  {}  {}",
+            style("✓").green().bold(),
+            elapsed,
+            style("·").dim(),
+            style(format!("{} chunks  {:.1} KB", report.total_chunks, size_kb)).dim(),
+        );
+        eprintln!();
+
+        let mut parts: Vec<String> = Vec::new();
+        if !report.added.is_empty() {
+            parts.push(format!(
+                "{}  {}",
+                style("+").green(),
+                style(format!("{} added", report.added.len())).green()
+            ));
+        }
+        if !report.modified.is_empty() {
+            parts.push(format!(
+                "{}  {}",
+                style("~").yellow(),
+                style(format!("{} modified", report.modified.len())).yellow()
+            ));
+        }
+        if !report.removed.is_empty() {
+            parts.push(format!(
+                "{}  {}",
+                style("-").red(),
+                style(format!("{} removed", report.removed.len())).red()
+            ));
+        }
+        if !report.unchanged.is_empty() {
+            parts.push(format!(
+                "{}",
+                style(format!("{} unchanged", report.unchanged.len())).dim()
+            ));
+        }
+        eprintln!("  {}", parts.join("   "));
+    }
+
+    for (p, err) in &report.errors {
+        eprintln!(
+            "  {}  {}  {}",
+            style("⚠").yellow(),
+            style(p.display().to_string()).dim(),
+            err,
+        );
+    }
+
+    eprintln!();
 }
 
 // ---------------------------------------------------------------------------

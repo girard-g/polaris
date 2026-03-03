@@ -8,6 +8,7 @@ The primary use case is feeding coding agents (e.g. Claude Code) with relevant d
 
 - **Single binary, zero runtime deps** — SQLite is bundled; the embedding model is downloaded once and cached locally
 - **Incremental indexing** — SHA256 hashes detect changes; only modified files are re-embedded
+- **File watching** — `polaris watch` auto re-indexes on change with 500 ms debounce
 - **Heading-aware chunking** — Markdown structure is preserved in chunks for better retrieval
 - **Hybrid search** — BM25 full-text search fused with vector KNN via RRF; MMR reranking for diversity
 - **MCP native** — Runs as a stdio MCP server so any compatible agent can call `search`, `index`, and `status`
@@ -16,7 +17,6 @@ The primary use case is feeding coding agents (e.g. Claude Code) with relevant d
 
 - Multi-user or networked deployments
 - Support for non-markdown formats (PDF, HTML, code files)
-- Real-time file watching
 - Cloud or remote vector stores
 
 ## High-Level Architecture
@@ -25,7 +25,8 @@ The primary use case is feeding coding agents (e.g. Claude Code) with relevant d
 ┌──────────────────────────────────────────────────────────┐
 │  CLI (clap)         │  MCP Server (rmcp 0.16 / stdio)    │
 │  index / search /   │  tools: search, index, status      │
-│  serve / status     │                                    │
+│  serve / status /   │                                    │
+│  watch              │                                    │
 └─────────┬───────────┴──────────────┬─────────────────────┘
           │                          │
           ▼                          ▼
@@ -61,6 +62,7 @@ The primary use case is feeding coding agents (e.g. Claude Code) with relevant d
 | Async runtime | tokio | 1 |
 | Error types | thiserror | 2 |
 | Progress UI | indicatif | 0.17 |
+| File watching | notify-debouncer-mini | 0.4 |
 
 ## Quick Start
 

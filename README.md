@@ -7,7 +7,8 @@ Lightweight RAG system for coding agents. Index your project docs, search them s
 ```bash
 polaris index ./docs
 polaris search "how does chunking work"
-polaris serve   # stdio MCP server for Claude Code
+polaris watch ./docs        # auto re-index on file changes
+polaris serve               # stdio MCP server for Claude Code
 ```
 
 ## How It Works
@@ -38,6 +39,16 @@ polaris index ./docs --no-recursive # top-level only
 ```
 
 Only `.md` files are indexed. Unchanged files (same SHA256) are skipped automatically.
+
+### Watch
+
+```bash
+polaris watch ./docs                # watch and auto re-index on changes
+polaris watch ./docs ./notes        # multiple paths
+polaris watch ./docs --no-recursive # top-level only
+```
+
+Runs an initial index on start, then re-indexes affected paths automatically within ~500 ms of a file change. Ctrl+C to stop.
 
 ### Search
 
@@ -106,7 +117,6 @@ CLI overrides: `polaris --dim 384 --db /tmp/test.db search "query"`
 
 - **Markdown only** — only `.md` files are indexed; `.txt`, `.rst`, code files, and PDFs are ignored
 - **Single-user** — all tool calls are serialized through a single DB mutex; not designed for concurrent MCP sessions
-- **Manual re-indexing** — no file watching; run `polaris index` again to pick up changes
 - **Approximate chunk offsets** — `start_byte`/`end_byte` metadata is approximate and not verified post-split
 
 ## Tech Stack

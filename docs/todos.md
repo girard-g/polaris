@@ -12,9 +12,9 @@ All three tool handlers now offload blocking work via `tokio::task::spawn_blocki
 
 The `Arc<Mutex<Database>>` design serializes all tool calls through a single mutex. This is fine for single-user local use, but would bottleneck under concurrent MCP sessions.
 
-### No file watching
+### ~~No file watching~~ ✓ Done
 
-Polaris does not watch directories for changes. Users must manually call `polaris index` or trigger the `index` MCP tool to pick up new/modified files.
+`polaris watch` monitors paths with a 500 ms debounce and re-indexes automatically on change. Paths are canonicalized to absolute form at startup so that inotify event paths (always absolute on Linux) match correctly — relative paths like `./docs` work as expected.
 
 ### No non-markdown formats
 
@@ -57,13 +57,9 @@ Result: for a 5k-doc corpus (~50k chunks), this eliminates 5k redundant file rea
 
 Features and fixes targeted for the next release, in rough priority order.
 
-### Watch mode
+### ~~Watch mode~~ ✓ Done
 
-```bash
-polaris watch ./docs
-```
-
-Use `notify` crate to re-index files on change automatically. Addresses the "no file watching" known limitation.
+`polaris watch ./docs` — uses `notify-debouncer-mini` (500 ms debounce) to re-index on file changes. Supports multiple paths and `--no-recursive`. Initial index runs on start.
 
 ### ~~Configurable models~~ ✓ Done
 

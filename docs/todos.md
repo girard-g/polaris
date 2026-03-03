@@ -57,6 +57,17 @@ Result: for a 5k-doc corpus (~50k chunks), this eliminates 5k redundant file rea
 
 Features and fixes targeted for the next release, in rough priority order.
 
+### ~~Path normalisation (`./` stripping)~~ ✓ Done
+
+`normalise_path()` now strips a leading `./` in addition to converting backslashes.
+This means `docs/file.md` and `./docs/file.md` map to the same DB key, so
+`polaris index docs` and `polaris index ./docs` (and `polaris watch`) no longer
+re-index unchanged files after the first run.
+
+**Side effect:** existing databases whose paths were stored with a `./` prefix will see a
+one-time full re-index on the first run after the update; subsequent runs skip unchanged
+files correctly.
+
 ### ~~Watch mode~~ ✓ Done
 
 `polaris watch ./docs` — uses `notify-debouncer-mini` (500 ms debounce) to re-index on file changes. Supports multiple paths and `--no-recursive`. Initial index runs on start.

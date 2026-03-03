@@ -444,17 +444,11 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
         }
     }
 
-    // Keep original strings for display, then canonicalize so that
-    // starts_with comparisons work against absolute inotify event paths.
     let paths_display = paths
         .iter()
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    let paths: Vec<PathBuf> = paths
-        .iter()
-        .map(|p| p.canonicalize().map_err(PolarisError::Io))
-        .collect::<Result<_>>()?;
 
     eprintln!();
     eprintln!(
@@ -485,7 +479,7 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
     );
 
     // Initial index for every path.
-    for path in &paths {
+    for path in paths {
         eprintln!(
             "{}  initial index  {}",
             style("◆").cyan().bold(),
@@ -512,7 +506,7 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
     } else {
         RecursiveMode::NonRecursive
     };
-    for path in &paths {
+    for path in paths {
         debouncer
             .watcher()
             .watch(path, mode)
@@ -559,7 +553,10 @@ fn find_affected_roots<'a>(
 ) -> Vec<&'a PathBuf> {
     roots
         .iter()
-        .filter(|root| events.iter().any(|e| e.path.starts_with(root)))
+        .filter(|root| {
+            let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            events.iter().any(|e| e.path.starts_with(&canonical_root))
+        })
         .collect()
 }
 

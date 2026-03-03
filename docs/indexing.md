@@ -41,7 +41,12 @@ For large corpora (5k+ documents), the pipeline uses a **three-phase design** th
 
 ## File Discovery
 
-`walkdir` traverses the path recursively (default) or at depth 1 (`--no-recursive`). Only files with the `.md` extension are returned. Paths are forward-slash normalized on all platforms.
+`walkdir` traverses the path recursively (default) or at depth 1 (`--no-recursive`). Only files with the `.md` extension are returned. Paths are normalized via `normalise_path()`:
+
+- Backslashes are converted to forward slashes (Windows compatibility).
+- A leading `./` is stripped so `docs/file.md` and `./docs/file.md` produce the same DB key.
+
+This ensures that `polaris index docs` and `polaris index ./docs` (or `polaris watch ./docs`) always agree on stored paths, preventing spurious re-indexing of unchanged files.
 
 ## Change Detection
 
@@ -61,7 +66,7 @@ Use `--force` to bypass hash comparison and re-index everything.
 ```rust
 struct FileData {
     path: PathBuf,
-    norm: String,      // forward-slash normalized path (DB key)
+    norm: String,      // canonical path (forward-slash, no leading "./") — DB key
     hash: String,      // SHA256 hex
     file_size: i64,    // bytes
     title: Option<String>,

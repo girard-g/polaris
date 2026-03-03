@@ -10,7 +10,7 @@ db_path = "polaris.db"
 
 # Embedding vector dimension
 # Must match the dimension already stored in the DB (checked on open)
-# Nomic v1.5 supports Matryoshka truncation: valid range is 64–768
+# Valid range: 64 to the model's native dimension (see "Supported Models" below)
 embedding_dim = 512
 
 # Maximum chunk size in approximate tokens (1 token ≈ 4 chars)
@@ -55,7 +55,7 @@ Config is resolved in this order (first match wins):
 | Field | Default | Constraints | Notes |
 |-------|---------|-------------|-------|
 | `db_path` | `"polaris.db"` | — | Relative to CWD |
-| `embedding_dim` | `512` | `[64, 768]` | Matryoshka truncation from 768 |
+| `embedding_dim` | `512` | `[64, native_dim]` | Matryoshka truncation; upper bound depends on model |
 | `max_chunk_tokens` | `450` | `> 0` | ≈ 1800 chars |
 | `chunk_overlap_chars` | `200` | `< max_chunk_tokens * 4` | Chars of overlap |
 | `model_id` | `"nomic-embed-text-v1.5"` | — | Validated on open; changing requires re-index |
@@ -69,7 +69,7 @@ Config is resolved in this order (first match wins):
 Config values are validated at startup (after loading the file and applying any CLI overrides). Invalid values produce a clear error and halt the process before any DB or model is opened:
 
 ```
-Error: Config error: embedding_dim must be in [64, 768], got 32
+Error: Config error: embedding_dim must be in [64, 768] for model 'nomic-embed-text-v1.5', got 32
 Error: Config error: max_chunk_tokens must be greater than 0
 Error: Config error: chunk_overlap_chars (2000) must be less than max_chunk_tokens * 4 (1800)
 ```
@@ -104,8 +104,20 @@ config has 'bge-small-en' — delete the database and re-index to switch models
 
 In both cases, resolution is the same: delete (or move) the existing database and re-index.
 
+## Supported Models
+
+| `model_id` | Native dim | Recommended `embedding_dim` | Download size |
+|---|---|---|---|
+| `nomic-embed-text-v1.5` (default) | 768 | 512 | ~137 MB |
+| `mxbai-embed-large-v1` | 1024 | 1024 | ~670 MB |
+| `all-minilm-l6-v2` | 384 | 384 | ~23 MB |
+
+`embedding_dim` may be set to any value in `[64, native_dim]`. Matryoshka truncation is applied automatically — lower dimensions trade recall for speed and storage. For `mxbai-embed-large-v1` and `all-minilm-l6-v2`, which do not have Matryoshka training, truncation is still applied but quality may degrade more steeply with smaller dimensions.
+
+Changing `model_id` requires deleting the database and re-indexing.
+
 ## Model Caching
 
-The fastembed model is downloaded on first use to `~/.cache/huggingface/`. Subsequent runs reuse the cached ONNX files. Download size is approximately 137 MB for `nomic-embed-text-v1.5`.
+The fastembed model is downloaded on first use to `~/.cache/huggingface/`. Subsequent runs reuse the cached ONNX files.
 
 Download progress is shown in the terminal when the model is not yet cached.

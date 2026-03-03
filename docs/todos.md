@@ -65,9 +65,9 @@ polaris watch ./docs
 
 Use `notify` crate to re-index files on change automatically. Addresses the "no file watching" known limitation.
 
-### Configurable models
+### ~~Configurable models~~ ✓ Done
 
-Honor the `model_id` config field at runtime. Currently `nomic-embed-text-v1.5` is always used regardless of config. Support at minimum one alternative (e.g. BGE-small, E5-small) to let users trade speed for quality.
+`model_id` is now wired through to fastembed model selection. Supported: `nomic-embed-text-v1.5` (768-dim), `mxbai-embed-large-v1` (1024-dim), `all-minilm-l6-v2` (384-dim). Config validation enforces the correct `embedding_dim` range per model.
 
 ### CLI `--output json`
 

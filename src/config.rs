@@ -150,10 +150,12 @@ impl PolarisConfig {
 
     /// Validate config values, returning a descriptive error if any are out of range.
     pub fn validate(&self) -> Result<()> {
-        if self.embedding_dim < 64 || self.embedding_dim > 768 {
+        let native_dim = crate::embedding::native_dim_for(&self.model_id)?;
+
+        if self.embedding_dim < 64 || self.embedding_dim > native_dim {
             return Err(PolarisError::Config(format!(
-                "embedding_dim must be in [64, 768], got {}",
-                self.embedding_dim
+                "embedding_dim must be in [64, {}] for model '{}', got {}",
+                native_dim, self.model_id, self.embedding_dim
             )));
         }
         if self.max_chunk_tokens == 0 {
@@ -276,7 +278,7 @@ mod tests {
 
     #[test]
     fn validate_embedding_dim_too_large() {
-        let mut cfg = PolarisConfig::default();
+        let mut cfg = PolarisConfig::default(); // nomic, native_dim=768
         cfg.embedding_dim = 769;
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("embedding_dim"), "{err}");
@@ -284,11 +286,30 @@ mod tests {
 
     #[test]
     fn validate_embedding_dim_boundary_values() {
-        let mut cfg = PolarisConfig::default();
+        let mut cfg = PolarisConfig::default(); // nomic, native_dim=768
         cfg.embedding_dim = 64;
         cfg.validate().unwrap();
         cfg.embedding_dim = 768;
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_mxbai_accepts_up_to_1024() {
+        let mut cfg = PolarisConfig::default();
+        cfg.model_id = "mxbai-embed-large-v1".to_string();
+        cfg.embedding_dim = 1024;
+        cfg.validate().unwrap();
+        cfg.embedding_dim = 1025;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("embedding_dim"), "{err}");
+    }
+
+    #[test]
+    fn validate_unknown_model_id_errors() {
+        let mut cfg = PolarisConfig::default();
+        cfg.model_id = "bad-model".to_string();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("bad-model"), "{err}");
     }
 
     #[test]

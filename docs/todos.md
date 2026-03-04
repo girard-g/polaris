@@ -151,6 +151,33 @@ Browser-based admin and user interface, served on the same HTTPS port, bundled i
 - macOS: launchd plist example
 - Windows: PowerShell `New-Service` example
 
+### User lifecycle
+
+- Management DB schema (`users` table: cn, groups, serial, issued_at, expires_at, revoked) in `<data_dir>/polaris-mgmt.db`
+- Populate row when `polaris user invite` token is consumed (during `polaris connect --setup`)
+- Per-request revocation check against management DB (in addition to TLS handshake; no CA key required)
+- `polaris user list [--expiring <duration>]` — tabular output with color-coded status
+- `polaris user revoke <cn> [--delete-namespace]` — marks revoked in DB; HTTP 403 on subsequent requests
+- `polaris user renew <cn> [--revoke-old]` — generates new enrollment token pre-filled from management DB
+- Web UI: cert expiry column (green/amber/red) + Renew button in Users & Certs page
+
+### Remote indexing
+
+- `POST /api/index` HTTP endpoint — `multipart/form-data` (namespace + files), mTLS authenticated, write-permission checked against `namespaces.toml`
+- `polaris index --remote <url> --namespace <ns> <path>` — CI/CD-friendly one-liner; uses client mTLS cert from config dir; prints added/modified/removed stats
+
+### Observability
+
+- `[observability]` config section (`metrics`, `metrics_auth`, `log_format`)
+- `/metrics` Prometheus endpoint — per-namespace document/chunk/byte gauges; request counter and duration histogram; embedding duration histogram; active connections gauge
+- JSON log format via `log_format = "json"` — newline-delimited JSON, compatible with Loki/Elasticsearch/Splunk/CloudWatch
+
+### Docker
+
+- Multi-stage Dockerfile (rust:1.83-bookworm builder → debian:bookworm-slim runtime)
+- `docker-compose.yml` with read-only config mount (`/etc/polaris`) + persistent data volume (`polaris-data`)
+- GHCR image publishing (`ghcr.io/<org>/polaris:latest`)
+
 ---
 
 ## Long-Term / Speculative

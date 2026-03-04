@@ -121,6 +121,11 @@ data_dir          = "/var/lib/polaris"
 
 [web_ui]
 enabled = true
+
+# [observability]
+# metrics      = false   # expose /metrics endpoint
+# metrics_auth = false   # require client cert for /metrics
+# log_format   = "text"  # "text" or "json"
 ```
 
 `/etc/polaris/namespaces.toml`:
@@ -160,6 +165,14 @@ New-Service -Name "Polaris" `
   -BinaryPathName "C:\polaris\polaris.exe serve-https --config C:\polaris\polaris.toml" `
   -StartupType Automatic
 Start-Service Polaris
+```
+
+**Docker:**
+
+```bash
+polaris namespace create shared   # run once to init the data volume
+
+docker compose up -d
 ```
 
 **Smoke test (all platforms):**
@@ -398,6 +411,83 @@ Packages the client cert + key + CA cert into a PKCS#12 file for browser import.
 
 ---
 
+## User Lifecycle Management
+
+Certs expire and team members leave. This section covers how admins keep the user roster up to date without touching openssl.
+
+### Management DB
+
+Polaris maintains a `users` table in a management database at `<data_dir>/polaris-mgmt.db`:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| cn | TEXT | username (PK) |
+| groups | TEXT | comma-separated group names |
+| serial | INTEGER | cert serial number |
+| issued_at | TEXT | ISO 8601 |
+| expires_at | TEXT | ISO 8601 |
+| revoked | BOOLEAN | default false |
+
+The row is created when a `polaris user invite` token is consumed during `polaris connect --setup`. Revocation is checked per-request against this table (in addition to the TLS handshake), so blocking a user does not require CA private-key access or CRL generation.
+
+---
+
+### `polaris user list [--expiring <duration>]`
+
+```
+CN       Groups              Issued      Expires     Status
+admin    admin               2026-01-01  2027-01-01  ok
+alice    frontend,backend    2026-03-01  2027-03-01  ok (364d)
+bob      backend             2026-02-01  2026-04-01  EXPIRING (28d)
+carol    frontend            2025-12-01  2026-02-01  EXPIRED
+```
+
+`--expiring 30d` filters to certs expiring within 30 days — useful in cron jobs or alerting scripts.
+
+---
+
+### `polaris user revoke <cn>`
+
+1. Marks the user as revoked in the management DB
+2. Subsequent requests from that CN are rejected with HTTP 403, even if the TLS handshake succeeds (i.e., the cert is still technically valid)
+3. Optionally deletes the `user/<cn>` namespace (flag: `--delete-namespace`)
+
+Output:
+
+```
+Revoked alice. Certificate serial 42 is now blocked.
+Use 'polaris user renew alice' to issue a new cert if needed.
+```
+
+---
+
+### `polaris user renew <cn>`
+
+Generates a new enrollment token for an existing user, pre-filling CN and groups from the management DB:
+
+```
+Renewal token for alice (groups: frontend, backend):
+
+  Token:   b7d2e9f3...
+  Expires: 2026-03-05 10:00 UTC
+  Command: polaris connect --setup https://polaris.company.internal:8443 --token b7d2e9f3...
+
+Old cert remains valid until expiry unless you also revoke it:
+  polaris user revoke alice --before-renew
+```
+
+Flag `--revoke-old` revokes the current cert immediately when the renewal token is issued.
+
+---
+
+### Web UI addition
+
+The Admin UI "Users & Certs" page gains:
+- **Renew** button — equivalent to `polaris user renew`, prints the enrollment command inline
+- **Cert expiry column** — color-coded: green (> 30 days), amber (≤ 30 days), red (expired or revoked)
+
+---
+
 ## Permission Config: `namespaces.toml`
 
 Fine-grained read/write control is defined in `namespaces.toml`, which Polaris watches and hot-reloads (no restart needed).
@@ -534,6 +624,55 @@ Returns per-namespace document/chunk counts when multi-tenancy is enabled.
 
 ---
 
+## Remote Indexing
+
+The MCP `index` tool works for interactive sessions, but CI/CD pipelines need a way to push docs without an MCP agent session.
+
+### New HTTP endpoint: `POST /api/index`
+
+```
+/api/index      → Remote indexing (mTLS authenticated, write-permission checked)
+```
+
+Request: `multipart/form-data` with:
+- `namespace` (text field) — target namespace
+- `file` (file field, repeatable) — one field per file
+
+Response: JSON
+
+```json
+{"added": 12, "modified": 3, "removed": 0, "skipped": 1}
+```
+
+Auth: same mTLS as the MCP endpoint. Write permission is checked against `namespaces.toml` before any files are processed.
+
+---
+
+### `polaris index --remote <url> --namespace <ns> <path>`
+
+```bash
+# Push ./docs to group/frontend on the remote server
+polaris index --remote https://polaris.company.internal:8443 \
+  --namespace group/frontend \
+  ./docs
+```
+
+1. Reads files from `<path>` locally (same discovery logic as local `polaris index`)
+2. POSTs them to `POST /api/index` using the client mTLS cert from the config dir
+3. Prints the server's response stats
+
+Output:
+
+```
+Uploading docs/ → group/frontend on polaris.company.internal:8443
+  47 files (2.3 MB)
+Done: 47 added, 0 modified, 0 removed
+```
+
+This is the CI/CD-friendly path: a GitHub Actions step, Makefile target, or git hook can push docs to the appropriate namespace without an MCP agent session.
+
+---
+
 ## Deployment Example
 
 ### Filesystem Layout
@@ -576,6 +715,44 @@ ReadWritePaths=/var/lib/polaris
 WantedBy=multi-user.target
 ```
 
+### Dockerfile (multi-stage)
+
+```dockerfile
+FROM rust:1.83-bookworm AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release --bin polaris
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/polaris /usr/local/bin/polaris
+EXPOSE 8443
+ENTRYPOINT ["polaris", "serve-https", "--config", "/etc/polaris/polaris.toml"]
+```
+
+### docker-compose.yml
+
+```yaml
+services:
+  polaris:
+    image: polaris:latest
+    ports:
+      - "8443:8443"
+    volumes:
+      - /etc/polaris:/etc/polaris:ro    # certs + config (read-only mount)
+      - polaris-data:/var/lib/polaris   # persistent data
+    restart: unless-stopped
+
+volumes:
+  polaris-data:
+```
+
+**Notes:**
+- The same PKI setup (Steps 1–3 of the walkthrough) applies unchanged — only Step 5 differs
+- `polaris-data` volume survives container restarts and upgrades
+- To upgrade: `docker pull polaris:latest && docker compose up -d`
+- Pre-built images are published to GHCR: `ghcr.io/<org>/polaris:latest`
+
 ### Claude Code client config (per-user)
 
 ```json
@@ -608,6 +785,7 @@ Polaris v3 serves a browser-based admin and user interface on the **same port** 
 /ui/admin/      → Admin dashboard (SAN must include DNS:group.admin)
 /enroll/<token> → One-time enrollment endpoint (unauthenticated, token-gated)
 /health         → Health check (unauthenticated, returns JSON)
+/metrics        → Prometheus metrics (unauthenticated by default, see Observability)
 ```
 
 ### Authentication
@@ -639,6 +817,50 @@ For browser access, users export their client cert as PKCS#12 after running `pol
 [web_ui]
 enabled     = true        # default true when [multi_tenant] enabled = true
 path_prefix = ""          # set to "/polaris" for reverse-proxy deployments
+```
+
+---
+
+## Observability
+
+### Prometheus `/metrics` endpoint
+
+When `metrics = true`, Polaris exposes a `/metrics` endpoint in Prometheus text exposition format:
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `polaris_requests_total` | counter | namespace, method, status |
+| `polaris_request_duration_seconds` | histogram | namespace, method |
+| `polaris_namespace_documents_total` | gauge | namespace |
+| `polaris_namespace_chunks_total` | gauge | namespace |
+| `polaris_namespace_db_bytes` | gauge | namespace |
+| `polaris_active_connections` | gauge | — |
+| `polaris_embedding_duration_seconds` | histogram | — |
+
+Default: unauthenticated (standard for internal Prometheus scraping behind a firewall). Set `metrics_auth = true` to require a valid client cert.
+
+---
+
+### JSON log format
+
+With `log_format = "json"`, structured log lines are emitted as newline-delimited JSON:
+
+```json
+{"ts":"2026-03-04T10:00:00Z","level":"INFO","target":"polaris::auth","msg":"request authenticated","cn":"alice","groups":["frontend","backend"]}
+{"ts":"2026-03-04T10:00:01Z","level":"INFO","target":"polaris::search","msg":"fan-out","ns":["shared","group/frontend"],"query":"..."}
+```
+
+Compatible with Loki, Elasticsearch, Splunk, and CloudWatch out of the box.
+
+---
+
+### Config
+
+```toml
+[observability]
+metrics      = false        # expose /metrics endpoint (default false)
+metrics_auth = false        # require client cert for /metrics
+log_format   = "text"       # "text" (default) or "json"
 ```
 
 ---

@@ -18,6 +18,234 @@ For personal/per-project use, run the standard `polaris serve` (stdio MCP). No T
 
 ---
 
+## First Deployment Walkthrough
+
+This walkthrough takes a sysadmin from zero to a running multi-tenant Polaris instance. Steps 1–5 are done by the admin on the server. Steps 6–8 are repeated for each new user.
+
+### Cross-platform notes
+
+The **server** is typically deployed on Linux. The **client** (`polaris connect --setup`, `polaris cert export`) works on Linux, macOS, and Windows.
+
+**Config directories used by `polaris connect --setup`:**
+
+| OS | Default config dir |
+|----|--------------------|
+| Linux | `~/.config/polaris/` |
+| macOS | `~/Library/Application Support/polaris/` |
+| Windows | `%APPDATA%\polaris\` |
+
+The printed Claude Code snippet always uses the correct absolute path for the current OS.
+
+**openssl on macOS:** The system `openssl` is actually LibreSSL with different flag behavior. Use `brew install openssl` and reference it explicitly (`$(brew --prefix openssl)/bin/openssl`) for server-side CA/cert generation.
+
+**openssl on Windows:** Use Git for Windows (includes openssl), or install via `winget install ShiningLight.OpenSSL`. Commands are the same but paths use backslashes.
+
+---
+
+### Step 1 — Create system user and directories (Linux)
+
+```bash
+sudo useradd -r -s /bin/false -d /var/lib/polaris polaris
+sudo mkdir -p /var/lib/polaris/{group,user}
+sudo mkdir -p /etc/polaris
+sudo chown -R polaris:polaris /var/lib/polaris /etc/polaris
+sudo chmod 700 /etc/polaris
+```
+
+For macOS (launchd) or Windows (Windows Service), the data dir and config dir are set in `polaris.toml` — no system user is strictly required for small teams.
+
+---
+
+### Step 2 — Generate PKI (CA + server cert only)
+
+```bash
+cd /etc/polaris
+
+# Internal CA (10 years)
+sudo openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
+  -keyout ca.key -out ca.crt \
+  -subj "/CN=Polaris Internal CA/O=My Company"
+
+# Server cert
+sudo openssl req -newkey rsa:2048 -nodes -keyout server.key \
+  -subj "/CN=polaris.company.internal" -out server.csr
+sudo openssl x509 -req -days 365 -CA ca.crt -CAkey ca.key \
+  -CAcreateserial -in server.csr -out server.crt
+```
+
+> **Note:** Client certs are never generated manually. Use `polaris user invite` instead (see [Automated User Enrollment](#automated-user-enrollment)).
+
+---
+
+### Step 3 — Bootstrap the first admin cert (one-time, for the sysadmin)
+
+Because the server isn't running yet, the first admin cert must be generated manually:
+
+```bash
+cat > /tmp/admin-ext.cnf <<'EOF'
+[SAN]
+subjectAltName=DNS:group.admin
+EOF
+
+openssl req -newkey rsa:2048 -nodes -keyout ~/admin.key \
+  -subj "/CN=admin" -out admin.csr
+openssl x509 -req -days 365 -CA /etc/polaris/ca.crt -CAkey /etc/polaris/ca.key \
+  -CAcreateserial -in admin.csr -out ~/admin.crt \
+  -extfile /tmp/admin-ext.cnf -extensions SAN
+
+# Copy to local polaris config dir (adjust path per OS)
+mkdir -p ~/.config/polaris          # Linux
+cp ~/admin.crt ~/.config/polaris/client.crt
+cp ~/admin.key ~/.config/polaris/client.key
+cp /etc/polaris/ca.crt ~/.config/polaris/ca.crt
+```
+
+This is the **only time** openssl is used for a client cert. All subsequent user certs use the automated enrollment flow.
+
+---
+
+### Step 4 — Write `polaris.toml` and `namespaces.toml`
+
+`/etc/polaris/polaris.toml`:
+
+```toml
+[tls]
+cert = "/etc/polaris/server.crt"
+key  = "/etc/polaris/server.key"
+ca   = "/etc/polaris/ca.crt"
+
+[multi_tenant]
+enabled           = true
+namespaces_config = "/etc/polaris/namespaces.toml"
+data_dir          = "/var/lib/polaris"
+
+[web_ui]
+enabled = true
+```
+
+`/etc/polaris/namespaces.toml`:
+
+```toml
+[namespace."shared"]
+writers = ["group.admin"]
+
+[namespace."user.*"]
+writers = ["self"]
+```
+
+---
+
+### Step 5 — Create initial namespaces and start the server
+
+**Linux (systemd):**
+
+```bash
+polaris namespace create shared
+sudo systemctl enable --now polaris
+```
+
+**macOS (launchd):**
+
+```bash
+polaris namespace create shared
+sudo cp polaris.plist /Library/LaunchDaemons/com.polaris.server.plist
+sudo launchctl load /Library/LaunchDaemons/com.polaris.server.plist
+```
+
+**Windows (PowerShell, as admin):**
+
+```powershell
+polaris.exe namespace create shared
+New-Service -Name "Polaris" `
+  -BinaryPathName "C:\polaris\polaris.exe serve-https --config C:\polaris\polaris.toml" `
+  -StartupType Automatic
+Start-Service Polaris
+```
+
+**Smoke test (all platforms):**
+
+```bash
+curl --cert ~/.config/polaris/client.crt --key ~/.config/polaris/client.key \
+     --cacert ~/.config/polaris/ca.crt \
+     https://polaris.company.internal:8443/health
+# → {"status":"ok"}
+```
+
+---
+
+### Step 6 — Admin invites a user
+
+```bash
+polaris user invite alice --groups frontend,backend
+```
+
+Output:
+
+```
+Invite token for alice (groups: frontend, backend):
+
+  Token:   a3f8c2d1...
+  Expires: 2026-03-05 10:00 UTC
+  Command: polaris connect --setup https://polaris.company.internal:8443 --token a3f8c2d1...
+
+Share the token with alice. It can be used once and expires in 24h.
+```
+
+Copy the printed command and send it to alice (Slack, email, etc.).
+
+---
+
+### Step 7 — User sets up their client (Linux / macOS / Windows)
+
+Alice runs on her own machine:
+
+```bash
+polaris connect --setup https://polaris.company.internal:8443 --token a3f8c2d1...
+```
+
+Polaris generates a key locally, sends a CSR to the server, receives and saves the signed cert, then prints:
+
+```
+Setup complete. Add this to your Claude Code config:
+
+{
+  "mcpServers": {
+    "polaris": {
+      "command": "polaris",
+      "args": ["connect", "https://polaris.company.internal:8443"],
+      "env": {
+        "POLARIS_CLIENT_CERT": "/home/alice/.config/polaris/client.crt",
+        "POLARIS_CLIENT_KEY":  "/home/alice/.config/polaris/client.key",
+        "POLARIS_CA_CERT":     "/home/alice/.config/polaris/ca.crt"
+      }
+    }
+  }
+}
+```
+
+Alice copies the JSON snippet into her Claude Code config. Done.
+
+---
+
+### Step 8 — User accesses the Web UI (optional)
+
+Export the cert as PKCS#12 (no openssl needed):
+
+```bash
+polaris cert export --format p12 --out polaris.p12
+```
+
+Import in browser:
+
+- **Firefox** (all platforms): Settings → Privacy → Certificates → Your Certificates → Import
+- **Chrome/Edge on macOS**: Double-click `polaris.p12` → Keychain Access imports it automatically
+- **Chrome/Edge on Windows**: Double-click `polaris.p12` → Certificate Import Wizard
+- **Chrome/Edge on Linux**: Settings → Privacy → Manage Certificates → Your Certificates → Import
+
+Navigate to `https://polaris.company.internal:8443/ui/`. The browser will prompt to select the client cert.
+
+---
+
 ## Namespace Model
 
 Documents are stored in isolated SQLite databases, one per namespace. Three tiers:
@@ -93,6 +321,80 @@ openssl x509 -req -days 365 -CA ca.crt -CAkey ca.key \
 ```
 
 The server validates client certs against the CA at the TLS handshake. Requests with no valid client cert are rejected before any application logic runs.
+
+---
+
+## Automated User Enrollment
+
+The manual openssl flow (generate key → generate CSR → sign cert → distribute files) is error-prone for end users. Polaris v3 provides a two-command enrollment flow that keeps the private key on the user's machine.
+
+### Flow overview
+
+```
+Admin                                    Server                     User (Alice)
+  │                                         │                           │
+  │  polaris user invite alice              │                           │
+  │  --groups frontend,backend              │                           │
+  ├────────────────────────────────────────►│                           │
+  │◄── one-time token (expires in 24h) ─────┤                           │
+  │                                         │                           │
+  │  (shares token with alice out-of-band)  │                           │
+  │                                         │                           │
+  │                                         │  polaris connect --setup  │
+  │                                         │  https://server:8443      │
+  │                                         │  --token <token>          │
+  │                                         │◄──────────────────────────┤
+  │                                         │  (alice's CSR posted)     │
+  │                                         ├──► signed cert + CA cert ─►│
+  │                                         │                           │
+  │                                         │   saves to ~/.config/polaris/
+  │                                         │   prints Claude Code snippet
+```
+
+**Key security property:** Alice's private key is generated locally by `polaris connect --setup`. Only the CSR (public key + CN + SANs) is sent to the server. The private key never leaves Alice's machine.
+
+---
+
+### `polaris user invite <cn> --groups <g1,g2> [--expires 24h]`
+
+Creates a pending enrollment entry on the server and prints a one-time token:
+
+```
+Invite token for alice (groups: frontend, backend):
+
+  Token:   a3f8c2d1...
+  Expires: 2026-03-05 10:00 UTC
+  Command: polaris connect --setup https://polaris.company.internal:8443 --token a3f8c2d1...
+
+Share the token with alice. It can be used once and expires in 24h.
+```
+
+The admin can also generate tokens from the Web UI: `/ui/admin/` → Users → "Invite user" button, which displays the token and copy-paste command inline.
+
+---
+
+### `polaris connect --setup <url> --token <token>`
+
+Run by the user on their own machine:
+
+1. Generates a 2048-bit RSA key locally (saved to the OS-appropriate config dir)
+2. Posts a CSR to `/enroll/<token>` on the server
+3. Server validates the token, signs the CSR with the CA, returns cert + CA cert
+4. Saves `client.crt` and `ca.crt` to the config dir
+5. Marks the token as used (one-time, cannot be reused)
+6. Prints the Claude Code config snippet to stdout
+
+---
+
+### `polaris connect <url>`
+
+Used for subsequent connections after setup. Reads certs from the config dir and connects to the MCP-over-HTTPS server. This replaces the stdio `polaris serve` for multi-tenant deployments.
+
+---
+
+### `polaris cert export --format p12 --out <file>`
+
+Packages the client cert + key + CA cert into a PKCS#12 file for browser import. Prompts for a passphrase. No openssl knowledge required.
 
 ---
 
@@ -290,6 +592,53 @@ WantedBy=multi-user.target
     }
   }
 }
+```
+
+---
+
+## Web UI
+
+Polaris v3 serves a browser-based admin and user interface on the **same port** as the MCP endpoint. Static assets are embedded in the binary at compile time via `rust-embed` — no separate web server, no separate deployment step.
+
+### Routes
+
+```
+/mcp            → MCP-over-HTTPS (unchanged)
+/ui/            → User dashboard (any authenticated user)
+/ui/admin/      → Admin dashboard (SAN must include DNS:group.admin)
+/enroll/<token> → One-time enrollment endpoint (unauthenticated, token-gated)
+/health         → Health check (unauthenticated, returns JSON)
+```
+
+### Authentication
+
+The same mTLS handshake that guards the MCP endpoint also gates the Web UI. The browser presents the client cert; Polaris reads the CN (username) and SAN (groups) from the validated cert on every request.
+
+Requests to `/ui/admin/` that lack `DNS:group.admin` in the SAN receive HTTP 403.
+
+For browser access, users export their client cert as PKCS#12 after running `polaris connect --setup` (see `polaris cert export` above) and import it in the browser once.
+
+### Admin UI
+
+| Page | Content |
+|------|---------|
+| Namespaces | List all namespaces + DB size; create / delete; visual `namespaces.toml` editor |
+| Users & Certs | List active users by CN + groups; "Invite user" button (generates enrollment token); revoke (appends to CRL) |
+| Monitoring | Per-namespace doc/chunk counts; embedding model info; recent request log |
+
+### User UI
+
+| Page | Content |
+|------|---------|
+| Search tester | Query box → results with scores, provenance, source file |
+| My namespaces | List of accessible namespaces; file count; expandable file list |
+
+### Config
+
+```toml
+[web_ui]
+enabled     = true        # default true when [multi_tenant] enabled = true
+path_prefix = ""          # set to "/polaris" for reverse-proxy deployments
 ```
 
 ---

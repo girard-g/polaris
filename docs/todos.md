@@ -123,6 +123,34 @@ Summary of work items:
 - Path traversal protection on namespace names
 - Audit logging for authenticated requests
 
+### Automated user enrollment
+
+Two-command flow so users never touch openssl after the initial admin bootstrap:
+
+- Pending enrollment store (in-memory or SQLite table) for one-time tokens
+- `/enroll/<token>` HTTP endpoint (unauthenticated, token-gated)
+- `polaris user invite <cn> --groups <g1,g2> [--expires 24h]` — creates token, prints invite command
+- `polaris connect --setup <url> --token <token>` — generates key locally, posts CSR, saves cert files, prints Claude Code snippet; OS-aware config dir
+- `polaris connect <url>` — subsequent MCP-over-HTTPS client mode (reads certs from config dir)
+- `polaris cert export --format p12 --out <file>` — PKCS#12 wrapper for browser import; no openssl required
+- Cross-platform config dir resolution: Linux `~/.config/polaris/`, macOS `~/Library/Application Support/polaris/`, Windows `%APPDATA%\polaris\`
+
+### Web UI
+
+Browser-based admin and user interface, served on the same HTTPS port, bundled into the binary:
+
+- `rust-embed` static asset bundling (compile-time embedding of HTML/CSS/JS)
+- Route handler for `/ui/`, `/ui/admin/`, `/enroll/<token>`, `/health` with SAN-based access control
+- Admin UI: namespaces page (list, create, delete, namespaces.toml editor); users/certs page (list by CN+groups, invite button, revoke); monitoring page (per-namespace counts, embedding model info, recent request log)
+- User UI: search tester page (query box → results with scores, provenance, source file); namespace browser page (accessible namespaces, file count, expandable file list)
+- `[web_ui]` config section (`enabled`, `path_prefix` for reverse-proxy deployments)
+
+### Service / deployment
+
+- Linux: systemd unit (already in docs)
+- macOS: launchd plist example
+- Windows: PowerShell `New-Service` example
+
 ---
 
 ## Long-Term / Speculative

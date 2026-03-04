@@ -12,6 +12,7 @@ The primary use case is feeding coding agents (e.g. Claude Code) with relevant d
 - **Heading-aware chunking** — Markdown structure is preserved in chunks for better retrieval
 - **Hybrid search** — BM25 full-text search fused with vector KNN via RRF; MMR reranking for diversity
 - **MCP native** — Runs as a stdio MCP server so any compatible agent can call `search`, `index`, and `status`
+- **Web UI (v3 enterprise)** — browser-based admin and user interface, served on the same HTTPS port as the MCP endpoint, bundled into the binary via `rust-embed`
 
 ## Non-Goals
 

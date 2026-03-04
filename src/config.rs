@@ -49,6 +49,10 @@ pub struct PolarisConfig {
     /// Maximum file size in bytes that the indexer will process (larger files are skipped)
     #[serde(default = "default_max_file_size")]
     pub max_file_size: u64,
+
+    /// Additional database paths for multi-DB search (read-only)
+    #[serde(default)]
+    pub extra_db_paths: Vec<PathBuf>,
 }
 
 fn default_db_path() -> PathBuf {
@@ -109,6 +113,7 @@ impl Default for PolarisConfig {
             rrf_k: default_rrf_k(),
             max_top_k: default_max_top_k(),
             max_file_size: default_max_file_size(),
+            extra_db_paths: Vec::new(),
         }
     }
 }

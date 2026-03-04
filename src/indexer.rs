@@ -120,6 +120,8 @@ impl Indexer {
     /// Index all `.md` files under `root` (recursively unless `recursive==false`).
     ///
     /// When `force` is true, all files are re-indexed regardless of hash.
+    /// When `dry_run` is true, no writes are made to the database.
+    /// `on_progress` is an optional callback invoked with (fraction 0.0–1.0, message).
     ///
     /// Three-phase pipeline for large corpora:
     ///   Phase A — parallel collect: read once, hash from bytes, chunk (rayon)
@@ -131,27 +133,24 @@ impl Indexer {
         root: &Path,
         recursive: bool,
         force: bool,
+        dry_run: bool,
+        on_progress: Option<Box<dyn Fn(f32, &str) + Send + Sync>>,
     ) -> Result<IndexReport> {
         let mut report = IndexReport::new();
         let start = Instant::now();
 
         // 1. Discover .md files (with a spinner).
-        let discover_spinner = ProgressBar::new_spinner();
-        discover_spinner.set_style(
-            ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                .unwrap()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
-        );
-        discover_spinner.set_message("Discovering markdown files…");
-        discover_spinner.enable_steady_tick(Duration::from_millis(80));
-
+        let discover_spinner = make_spinner_or_hidden("Discovering markdown files…", on_progress.is_some());
         let discovered = discover_markdown_files(root, recursive);
         discover_spinner.finish_and_clear();
-        eprintln!(
-            "{}  {} files found",
-            style("✓").green().bold(),
-            style(discovered.len().to_string()).bold(),
-        );
+        match &on_progress {
+            None => eprintln!(
+                "{}  {} files found",
+                style("✓").green().bold(),
+                style(discovered.len().to_string()).bold(),
+            ),
+            Some(cb) => cb(0.0, "Scanning files…"),
+        }
 
         // 2. Load existing hashes from DB, filtered to documents under this root.
         let root_norm = normalise_path(root).unwrap_or_default();
@@ -171,23 +170,20 @@ impl Indexer {
         // 4. Handle removals.
         for db_path in existing.keys() {
             if !discovered_paths.contains(db_path.as_str()) {
-                match db.delete_document(db_path) {
-                    Ok(_) => report.removed.push(PathBuf::from(db_path)),
-                    Err(e) => report.errors.push((PathBuf::from(db_path), e.to_string())),
+                if dry_run {
+                    report.removed.push(PathBuf::from(db_path));
+                } else {
+                    match db.delete_document(db_path) {
+                        Ok(_) => report.removed.push(PathBuf::from(db_path)),
+                        Err(e) => report.errors.push((PathBuf::from(db_path), e.to_string())),
+                    }
                 }
             }
         }
 
         // ── Phase A: Parallel collect ─────────────────────────────────────
         // Read each file exactly once: hash from in-memory bytes, chunk in parallel.
-        let collect_spinner = ProgressBar::new_spinner();
-        collect_spinner.set_style(
-            ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                .unwrap()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
-        );
-        collect_spinner.set_message("Reading & chunking files…");
-        collect_spinner.enable_steady_tick(Duration::from_millis(80));
+        let collect_spinner = make_spinner_or_hidden("Reading & chunking files…", on_progress.is_some());
 
         // Capture config values so they can be moved into the rayon closure.
         let max_chunk_chars = self.max_chunk_tokens * 4;
@@ -245,7 +241,11 @@ impl Indexer {
 
                 let file_size = content.len() as i64;
                 let title = extract_title(&content);
-                let chunks = chunk_markdown(&content, max_chunk_chars, overlap);
+                let chunks = if dry_run {
+                    vec![]
+                } else {
+                    chunk_markdown(&content, max_chunk_chars, overlap)
+                };
 
                 CollectResult::ToIndex(FileData {
                     path: path.clone(),
@@ -271,6 +271,23 @@ impl Indexer {
             }
         }
 
+        if let Some(ref cb) = on_progress {
+            cb(0.2, &format!("{} files to embed", file_data.len()));
+        }
+
+        // For dry_run: populate report from collected file data and return early.
+        if dry_run {
+            for fd in &file_data {
+                if fd.is_new {
+                    report.added.push(fd.path.clone());
+                } else {
+                    report.modified.push(fd.path.clone());
+                }
+            }
+            report.elapsed = start.elapsed();
+            return Ok(report);
+        }
+
         if file_data.is_empty() {
             report.elapsed = start.elapsed();
             return Ok(report);
@@ -288,9 +305,12 @@ impl Indexer {
         }
 
         let total_chunks = all_texts.len();
+        let total_batches = total_chunks.div_ceil(EMBED_BATCH_SIZE);
 
         // Chunks-level progress bar — this is the slow phase.
-        let embed_pb = if total_chunks > 0 {
+        let embed_pb = if on_progress.is_some() || total_chunks == 0 {
+            ProgressBar::hidden()
+        } else {
             let pb = ProgressBar::new(total_chunks as u64);
             pb.set_style(
                 ProgressStyle::with_template(
@@ -301,30 +321,27 @@ impl Indexer {
             );
             pb.tick(); // render at 0/N immediately, before the first batch
             pb
-        } else {
-            ProgressBar::hidden()
         };
 
         let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(total_chunks);
-        for batch_start in (0..total_chunks).step_by(EMBED_BATCH_SIZE) {
+        for (batch_idx, batch_start) in (0..total_chunks).step_by(EMBED_BATCH_SIZE).enumerate() {
             let batch_end = (batch_start + EMBED_BATCH_SIZE).min(total_chunks);
             let batch_emb =
                 self.embedding_engine.embed_documents(&all_texts[batch_start..batch_end])?;
             all_embeddings.extend(batch_emb);
             embed_pb.set_position(all_embeddings.len() as u64);
+            if let Some(ref cb) = on_progress {
+                cb(
+                    0.2 + 0.6 * (all_embeddings.len() as f32 / total_chunks.max(1) as f32),
+                    &format!("Embedding batch {}/{}", batch_idx + 1, total_batches),
+                );
+            }
         }
         embed_pb.finish_and_clear();
 
         // ── Phase C: Single-transaction write ─────────────────────────────
         // One BEGIN / COMMIT for all files — avoids 5k write barriers.
-        let write_spinner = ProgressBar::new_spinner();
-        write_spinner.set_style(
-            ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                .unwrap()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
-        );
-        write_spinner.set_message("Writing to database…");
-        write_spinner.enable_steady_tick(Duration::from_millis(80));
+        let write_spinner = make_spinner_or_hidden("Writing to database…", on_progress.is_some());
 
         db.begin()?;
         let write_result = (|| -> Result<()> {
@@ -380,6 +397,10 @@ impl Indexer {
             } else {
                 report.modified.push(fd.path.clone());
             }
+        }
+
+        if let Some(ref cb) = on_progress {
+            cb(1.0, "Done");
         }
 
         report.elapsed = start.elapsed();
@@ -778,8 +799,27 @@ fn discover_markdown_files(root: &Path, recursive: bool) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Returns a configured spinner, or a hidden no-op bar when `silent` is true.
+///
+/// Used throughout `index_path` to suppress terminal spinners in MCP/callback mode.
+fn make_spinner_or_hidden(msg: &str, silent: bool) -> ProgressBar {
+    if silent {
+        ProgressBar::hidden()
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .unwrap()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
+        );
+        pb.set_message(msg.to_string());
+        pb.enable_steady_tick(Duration::from_millis(80));
+        pb
+    }
+}
+
 /// Normalise to a forward-slash path string for stable DB storage.
-fn normalise_path(path: &Path) -> Option<String> {
+pub fn normalise_path(path: &Path) -> Option<String> {
     path.to_str().map(|s| {
         let s = s.replace('\\', "/");
         // Strip a leading "./" so "docs/file.md" and "./docs/file.md" map to the same key.

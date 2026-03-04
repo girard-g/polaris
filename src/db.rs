@@ -38,12 +38,16 @@ pub struct ChunkRecord {
 }
 
 /// Returned by `search_knn`.
+#[derive(serde::Serialize)]
 pub struct SearchResult {
     pub chunk_id: i64,
     pub content: String,
     pub heading_context: String,
     pub file_path: String,
     pub score: f32,
+    /// When results come from a multi-DB search, this identifies the source database file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_db: Option<String>,
 }
 
 /// Like `SearchResult` but also carries the stored embedding (for MMR reranking).
@@ -64,6 +68,7 @@ impl SearchResultWithEmbedding {
             heading_context: self.heading_context,
             file_path: self.file_path,
             score: self.score,
+            source_db: None,
         }
     }
 }
@@ -495,6 +500,7 @@ impl Database {
                     content: r.get(2)?,
                     heading_context: r.get(3)?,
                     file_path: r.get(4)?,
+                    source_db: None,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -704,6 +710,31 @@ impl Database {
             db_size_bytes,
             embedding_dim: self.embedding_dim,
         })
+    }
+
+    /// Fetch all chunks for a given document path (for the `polaris chunks` viewer).
+    pub fn get_chunks_for_document(&self, path: &str) -> Result<Vec<ChunkRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.document_id, c.content, c.heading_context, c.start_byte, c.end_byte, c.chunk_index
+             FROM chunks c
+             JOIN documents d ON c.document_id = d.id
+             WHERE d.path = ?1
+             ORDER BY c.chunk_index",
+        )?;
+        let chunks = stmt
+            .query_map(params![path], |r| {
+                Ok(ChunkRecord {
+                    id: r.get(0)?,
+                    document_id: r.get(1)?,
+                    content: r.get(2)?,
+                    heading_context: r.get(3)?,
+                    start_byte: r.get::<_, i64>(4)? as usize,
+                    end_byte: r.get::<_, i64>(5)? as usize,
+                    chunk_index: r.get::<_, i64>(6)? as usize,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(chunks)
     }
 }
 

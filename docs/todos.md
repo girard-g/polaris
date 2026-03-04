@@ -76,15 +76,21 @@ files correctly.
 
 `model_id` is now wired through to fastembed model selection. Supported: `nomic-embed-text-v1.5` (768-dim), `mxbai-embed-large-v1` (1024-dim), `all-minilm-l6-v2` (384-dim). Config validation enforces the correct `embedding_dim` range per model.
 
-### CLI `--output json`
+### ~~CLI `--output json`~~ ✓ Done
 
-Return search results as JSON for scripting:
+Return results as JSON for scripting. Applies to `polaris search` and `polaris status`:
 
 ```bash
 polaris search "query" --output json | jq '.[0].content'
+polaris status --output json | jq '.documents'
 ```
 
-### Chunk viewer
+`polaris status` JSON shape:
+```json
+{"documents": 24, "chunks": 312, "db_bytes": 1468006, "embedding_dim": 512, "last_indexed": "2025-02-26T14:23:45Z"}
+```
+
+### ~~Chunk viewer~~ ✓ Done
 
 ```bash
 polaris chunks docs/guide.md
@@ -92,11 +98,30 @@ polaris chunks docs/guide.md
 
 Show how a specific file was chunked, with heading contexts and byte offsets. Useful for debugging retrieval quality.
 
-### Multi-database support
+### ~~`polaris index --dry-run`~~ ✓ Done
+
+Preview what would change without writing to the database:
+
+```bash
+polaris index ./docs --dry-run
+```
+
+Output:
+```
+Dry run — no changes written
+  + 3 would be added
+  ~ 1 would be modified
+  - 2 would be removed
+  = 41 unchanged
+```
+
+Exit code 0 when no changes would occur, 1 when changes are pending — useful as a "docs are up to date" CI check.
+
+### ~~Multi-database support~~ ✓ Done
 
 Allow querying across multiple `.db` files without merging them. Useful for keeping project docs separate from library docs.
 
-### Progress in MCP `index` tool
+### ~~Progress in MCP `index` tool~~ ✓ Done
 
 The `index` MCP tool currently returns a summary after completion. Real-time progress (via MCP progress notifications) would improve the UX for large indexing runs.
 

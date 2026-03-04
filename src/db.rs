@@ -1252,4 +1252,64 @@ mod tests {
         // The chunk most aligned with [1,0,0,0] should come first.
         assert_eq!(results[0].content, "chunk alpha");
     }
+
+    // -----------------------------------------------------------------------
+    // get_chunks_for_document (v2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_chunks_returns_empty_for_unknown_path() {
+        let db = setup();
+        let chunks = db.get_chunks_for_document("no/such/file.md").unwrap();
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn get_chunks_returns_all_chunks_in_order() {
+        let db = setup();
+        let doc_id = db.insert_document("multi.md", "hash", None, 0).unwrap();
+        db.insert_chunk(doc_id, "first chunk", "Section A", 0, 11, 0, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        db.insert_chunk(doc_id, "second chunk", "Section B", 11, 23, 1, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+
+        let chunks = db.get_chunks_for_document("multi.md").unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert_eq!(chunks[0].content, "first chunk");
+        assert_eq!(chunks[0].heading_context, "Section A");
+        assert_eq!(chunks[1].chunk_index, 1);
+        assert_eq!(chunks[1].content, "second chunk");
+    }
+
+    // -----------------------------------------------------------------------
+    // SearchResult JSON serialization (v2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn search_result_serializes_without_source_db_when_none() {
+        let r = SearchResult {
+            chunk_id: 1,
+            content: "hello".into(),
+            heading_context: "".into(),
+            file_path: "docs/x.md".into(),
+            score: 0.9,
+            source_db: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("source_db"), "source_db should be omitted when None");
+    }
+
+    #[test]
+    fn search_result_serializes_with_source_db_when_some() {
+        let r = SearchResult {
+            chunk_id: 1,
+            content: "hello".into(),
+            heading_context: "".into(),
+            file_path: "docs/x.md".into(),
+            score: 0.9,
+            source_db: Some("other.db".into()),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("other.db"), "source_db value should appear in JSON");
+        assert!(json.contains("source_db"), "source_db key should appear when Some");
+    }
 }

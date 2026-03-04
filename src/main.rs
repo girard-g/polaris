@@ -215,22 +215,20 @@ async fn cmd_index(
 
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
 
-    // Model loading.
-    let model_spinner = make_spinner("loading model…");
-    let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
-    model_spinner.finish_and_clear();
-    eprintln!(
-        "{}  model ready  {}",
-        style("✓").green().bold(),
-        style(&cfg.model_id).dim(),
-    );
-
-    let indexer = Indexer::new(
-        engine,
-        cfg.max_chunk_tokens,
-        cfg.chunk_overlap_chars,
-        cfg.max_file_size,
-    );
+    let indexer = if dry_run {
+        Indexer::new_dry_run(cfg.max_chunk_tokens, cfg.chunk_overlap_chars, cfg.max_file_size)
+    } else {
+        // Model loading (skipped for dry-run since embeddings are never computed).
+        let model_spinner = make_spinner("loading model…");
+        let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
+        model_spinner.finish_and_clear();
+        eprintln!(
+            "{}  model ready  {}",
+            style("✓").green().bold(),
+            style(&cfg.model_id).dim(),
+        );
+        Indexer::new(engine, cfg.max_chunk_tokens, cfg.chunk_overlap_chars, cfg.max_file_size)
+    };
 
     let report = indexer.index_path(&db, path, recursive, force, dry_run, None)?;
 
@@ -665,6 +663,8 @@ async fn cmd_chunks(cfg: PolarisConfig, path: &PathBuf) -> Result<()> {
 async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Result<()> {
     use notify_debouncer_mini::notify::RecursiveMode;
     use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
+
+    warn_extra_dbs_ignored(&cfg);
 
     // Validate paths up front.
     for path in paths {

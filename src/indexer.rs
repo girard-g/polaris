@@ -96,7 +96,7 @@ struct FileData {
 // ---------------------------------------------------------------------------
 
 pub struct Indexer {
-    embedding_engine: Arc<EmbeddingEngine>,
+    embedding_engine: Option<Arc<EmbeddingEngine>>,
     max_chunk_tokens: usize,
     chunk_overlap_chars: usize,
     max_file_size: u64,
@@ -110,7 +110,17 @@ impl Indexer {
         max_file_size: u64,
     ) -> Self {
         Self {
-            embedding_engine,
+            embedding_engine: Some(embedding_engine),
+            max_chunk_tokens,
+            chunk_overlap_chars,
+            max_file_size,
+        }
+    }
+
+    /// Construct an indexer for dry-run mode (no embedding engine needed).
+    pub fn new_dry_run(max_chunk_tokens: usize, chunk_overlap_chars: usize, max_file_size: u64) -> Self {
+        Self {
+            embedding_engine: None,
             max_chunk_tokens,
             chunk_overlap_chars,
             max_file_size,
@@ -326,8 +336,13 @@ impl Indexer {
         let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(total_chunks);
         for (batch_idx, batch_start) in (0..total_chunks).step_by(EMBED_BATCH_SIZE).enumerate() {
             let batch_end = (batch_start + EMBED_BATCH_SIZE).min(total_chunks);
-            let batch_emb =
-                self.embedding_engine.embed_documents(&all_texts[batch_start..batch_end])?;
+            let batch_emb = self
+                .embedding_engine
+                .as_ref()
+                .ok_or_else(|| crate::error::PolarisError::Indexing(
+                    "embedding engine required for non-dry-run indexing".into(),
+                ))?
+                .embed_documents(&all_texts[batch_start..batch_end])?;
             all_embeddings.extend(batch_emb);
             embed_pb.set_position(all_embeddings.len() as u64);
             if let Some(ref cb) = on_progress {
@@ -1040,5 +1055,25 @@ mod tests {
             assert!(chunk.end_byte <= doc_len, "end_byte out of bounds");
             assert!(chunk.start_byte <= chunk.end_byte, "start_byte > end_byte");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // IndexReport (v2 dry-run)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn index_report_counts_are_correct() {
+        let report = IndexReport {
+            added: vec!["a.md".into(), "b.md".into()],
+            modified: vec!["c.md".into()],
+            removed: vec![],
+            unchanged: vec!["d.md".into(), "e.md".into(), "f.md".into(), "g.md".into(), "h.md".into()],
+            errors: vec![],
+            total_chunks: 0,
+            total_bytes: 0,
+            elapsed: std::time::Duration::ZERO,
+        };
+        assert_eq!(report.added.len() + report.modified.len() + report.removed.len(), 3);
+        assert_eq!(report.unchanged.len(), 5);
     }
 }

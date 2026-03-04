@@ -8,7 +8,7 @@ These flags are accepted before any subcommand:
 |------|------|-------------|
 | `--config <PATH>` | PathBuf | Explicit config file path |
 | `--dim <N>` | usize | Override `embedding_dim` from config |
-| `--db <PATH>` | PathBuf | Override `db_path` from config |
+| `--db <PATH>` | PathBuf | Override `db_path` from config. Repeat to search multiple databases: `--db primary.db --db extra.db` |
 | `--model <ID>` | String | Override embedding model (e.g. `mxbai-embed-large-v1`) |
 
 ## Commands
@@ -31,6 +31,7 @@ polaris index README.md             # single file
 |------|---------|-------------|
 | `--no-recursive` | false | Disable recursive directory traversal |
 | `--force` | false | Re-index all files even if hash is unchanged |
+| `--dry-run` | false | Preview changes without writing to the database. Exits 1 if changes are pending. |
 
 **Behaviour:**
 
@@ -70,6 +71,7 @@ polaris search "how to configure timeout" --top-k 10
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-k, --top-k <N>` | 5 | Number of results to return |
+| `--output <FORMAT>` | plain | Output format: `plain` or `json` |
 
 **Output:**
 
@@ -169,7 +171,14 @@ Print statistics about the current index.
 
 ```bash
 polaris status
+polaris status --output json
 ```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output <FORMAT>` | plain | Output format: `plain` or `json` |
 
 **Output:**
 
@@ -180,6 +189,18 @@ Database size: 1.4 MB
 Embedding dim: 512
 Last indexed: 2025-02-26T14:23:45Z
 ```
+
+### `polaris chunks <path>`
+
+Show how a file was chunked — heading contexts, byte offsets, and content previews.
+
+```bash
+polaris chunks docs/guide.md
+```
+
+Useful for diagnosing retrieval quality. The path must match the normalised form stored in the index (e.g. `docs/guide.md`, not `./docs/guide.md`).
+
+---
 
 ## Environment Variables
 

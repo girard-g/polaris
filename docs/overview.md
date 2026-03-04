@@ -15,7 +15,7 @@ The primary use case is feeding coding agents (e.g. Claude Code) with relevant d
 
 ## Non-Goals
 
-- Multi-user or networked deployments
+- Multi-user or networked deployments in the default mode (an opt-in enterprise/team server mode with namespace isolation and mTLS is planned for v3 — see [multi-tenant.md](multi-tenant.md))
 - Support for non-markdown formats (PDF, HTML, code files)
 - Cloud or remote vector stores
 

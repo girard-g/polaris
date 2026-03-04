@@ -102,6 +102,29 @@ The `index` MCP tool currently returns a summary after completion. Real-time pro
 
 ---
 
+## v3 Todo List
+
+Features planned for v3, in rough priority order.
+
+### Multi-tenant deployment
+
+Optional company/team server mode with document segregation by user and group. Full design in [multi-tenant.md](multi-tenant.md).
+
+Summary of work items:
+- `[multi_tenant]` and `[tls]` config sections
+- Per-namespace SQLite files under a configurable `data_dir`
+- mTLS server (`polaris serve-https`) with client-cert authentication
+- CN/SAN extraction to derive username and group membership
+- `namespaces.toml` permission config with hot-reload
+- `polaris namespace create/list/delete` subcommands
+- `index` MCP tool gains optional `namespace` parameter
+- `search` fans out to all accessible namespaces, merges via RRF, adds `provenance` field
+- `status` reports per-namespace counts
+- Path traversal protection on namespace names
+- Audit logging for authenticated requests
+
+---
+
 ## Long-Term / Speculative
 
 ### Packaging

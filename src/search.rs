@@ -251,6 +251,7 @@ mod tests {
             heading_context: heading_context.to_string(),
             file_path: file_path.to_string(),
             score,
+            source_db: None,
         }
     }
 

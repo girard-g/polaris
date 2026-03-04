@@ -2,11 +2,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use rmcp::{
-    ServerHandler, ServiceExt,
+    Peer, RoleServer, ServerHandler, ServiceExt,
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::{
-        Implementation, ServerCapabilities, ServerInfo, ToolsCapability,
+        Implementation, Meta, ProgressNotificationParam, ServerCapabilities, ServerInfo, ToolsCapability,
     },
     tool, tool_handler, tool_router,
     transport::stdio,
@@ -126,7 +126,12 @@ impl PolarisServer {
         name = "index",
         description = "Index markdown files from a path. Supports recursive directory indexing and incremental updates."
     )]
-    async fn index(&self, Parameters(params): Parameters<IndexParams>) -> String {
+    async fn index(
+        &self,
+        Parameters(params): Parameters<IndexParams>,
+        peer: Peer<RoleServer>,
+        meta: Meta,
+    ) -> String {
         let path = PathBuf::from(&params.path);
         let recursive = params.recursive.unwrap_or(true);
         let force = params.force.unwrap_or(false);
@@ -137,6 +142,28 @@ impl PolarisServer {
         if !path.exists() {
             return format!("Error: path not found: {}", params.path);
         }
+
+        let progress_token = meta.get_progress_token();
+        let handle = tokio::runtime::Handle::current();
+
+        let on_progress: Option<Box<dyn Fn(f32, &str) + Send + Sync>> =
+            if let Some(token) = progress_token {
+                Some(Box::new(move |fraction: f32, message: &str| {
+                    let token = token.clone();
+                    let peer = peer.clone();
+                    let msg = message.to_string();
+                    handle.block_on(async move {
+                        let _ = peer.notify_progress(ProgressNotificationParam {
+                            progress_token: token,
+                            progress: (fraction * 100.0) as f64,
+                            total: Some(100.0),
+                            message: Some(msg),
+                        }).await;
+                    });
+                }))
+            } else {
+                None
+            };
 
         let result = tokio::task::spawn_blocking(move || {
             let indexer = Indexer::new(
@@ -149,7 +176,7 @@ impl PolarisServer {
                 Ok(d) => d,
                 Err(e) => return e,
             };
-            match indexer.index_path(&db, &path, recursive, force) {
+            match indexer.index_path(&db, &path, recursive, force, false, on_progress) {
                 Ok(report) => {
                     let mut out = report.summary();
                     if !report.errors.is_empty() {

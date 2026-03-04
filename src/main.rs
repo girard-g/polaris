@@ -9,7 +9,7 @@ mod search;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing_subscriber::EnvFilter;
@@ -18,9 +18,15 @@ use config::PolarisConfig;
 use db::{Database, SearchResult};
 use embedding::EmbeddingEngine;
 use error::{PolarisError, Result};
-use indexer::{IndexReport, Indexer};
+use indexer::{IndexReport, Indexer, normalise_path};
 use mcp::{PolarisServer, PolarisState};
 use search::SearchEngine;
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+enum OutputFormat {
+    Plain,
+    Json,
+}
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -41,9 +47,9 @@ struct Cli {
     #[arg(long, global = true)]
     dim: Option<usize>,
 
-    /// Override database path
-    #[arg(long, global = true)]
-    db: Option<PathBuf>,
+    /// Override database path (repeat to search multiple databases)
+    #[arg(long, global = true, action = ArgAction::Append)]
+    db: Vec<PathBuf>,
 
     /// Embedding model to use [nomic-embed-text-v1.5 (default), mxbai-embed-large-v1, all-minilm-l6-v2]
     #[arg(long, global = true)]
@@ -65,6 +71,9 @@ enum Command {
         /// Re-index all files even if unchanged
         #[arg(long)]
         force: bool,
+        /// Preview changes without writing to database
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Search the indexed documentation
@@ -74,13 +83,20 @@ enum Command {
         /// Number of results to return
         #[arg(short = 'k', long, default_value = "5")]
         top_k: usize,
+        /// Output format
+        #[arg(long, value_enum, default_value = "plain")]
+        output: OutputFormat,
     },
 
     /// Start the MCP server over stdio
     Serve,
 
     /// Show index statistics
-    Status,
+    Status {
+        /// Output format
+        #[arg(long, value_enum, default_value = "plain")]
+        output: OutputFormat,
+    },
 
     /// Watch paths and automatically re-index on changes
     Watch {
@@ -89,6 +105,12 @@ enum Command {
         /// Do not recurse into subdirectories
         #[arg(long)]
         no_recursive: bool,
+    },
+
+    /// Show how a file was chunked (for debugging retrieval quality)
+    Chunks {
+        /// Path to the indexed file
+        path: PathBuf,
     },
 }
 
@@ -112,7 +134,14 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<()> {
     let mut cfg = PolarisConfig::load(cli.config.as_deref())?;
-    cfg.apply_overrides(cli.db, cli.dim, cli.model.clone());
+
+    let mut dbs = cli.db.into_iter();
+    let primary_db = dbs.next();
+    let extra_dbs: Vec<PathBuf> = dbs.collect();
+    cfg.apply_overrides(primary_db, cli.dim, cli.model.clone());
+    if !extra_dbs.is_empty() {
+        cfg.extra_db_paths = extra_dbs;
+    }
 
     // If --model was given without --dim and the current dim exceeds the model's
     // native maximum, clamp to the native dim so the user doesn't have to
@@ -130,15 +159,16 @@ async fn run(cli: Cli) -> Result<()> {
     db::register_vec_extension();
 
     match cli.command {
-        Command::Index { path, no_recursive, force } => {
-            cmd_index(cfg, &path, !no_recursive, force).await
+        Command::Index { path, no_recursive, force, dry_run } => {
+            cmd_index(cfg, &path, !no_recursive, force, dry_run).await
         }
-        Command::Search { query, top_k } => cmd_search(cfg, &query, top_k).await,
+        Command::Search { query, top_k, output } => cmd_search(cfg, &query, top_k, output).await,
         Command::Serve => cmd_serve(cfg).await,
-        Command::Status => cmd_status(cfg).await,
+        Command::Status { output } => cmd_status(cfg, output).await,
         Command::Watch { paths, no_recursive } => {
             cmd_watch(cfg, &paths, !no_recursive).await
         }
+        Command::Chunks { path } => cmd_chunks(cfg, &path).await,
     }
 }
 
@@ -146,12 +176,26 @@ async fn run(cli: Cli) -> Result<()> {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// Emit a warning when extra `--db` flags are supplied to a write-only command.
+fn warn_extra_dbs_ignored(cfg: &PolarisConfig) {
+    if !cfg.extra_db_paths.is_empty() {
+        eprintln!(
+            "  {}  multiple --db flags ignored for this command; using {}",
+            style("⚠").yellow(),
+            cfg.db_path.display(),
+        );
+    }
+}
+
 async fn cmd_index(
     cfg: PolarisConfig,
     path: &std::path::Path,
     recursive: bool,
     force: bool,
+    dry_run: bool,
 ) -> Result<()> {
+    warn_extra_dbs_ignored(&cfg);
+
     if !path.exists() {
         return Err(PolarisError::Indexing(format!(
             "path not found: {}",
@@ -188,7 +232,34 @@ async fn cmd_index(
         cfg.max_file_size,
     );
 
-    let report = indexer.index_path(&db, path, recursive, force)?;
+    let report = indexer.index_path(&db, path, recursive, force, dry_run, None)?;
+
+    // Dry-run summary — print what would change and exit.
+    if dry_run {
+        let added = report.added.len();
+        let modified = report.modified.len();
+        let removed = report.removed.len();
+        let unchanged = report.unchanged.len();
+        let has_changes = added + modified + removed > 0;
+
+        eprintln!("Dry run — no changes written");
+        if added > 0 {
+            eprintln!("  {}  {} would be added", style("+").green(), added);
+        }
+        if modified > 0 {
+            eprintln!("  {}  {} would be modified", style("~").yellow(), modified);
+        }
+        if removed > 0 {
+            eprintln!("  {}  {} would be removed", style("-").red(), removed);
+        }
+        eprintln!("  {}  {} unchanged", style("=").dim(), unchanged);
+        eprintln!();
+
+        if has_changes {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     // Summary.
     eprintln!();
@@ -258,47 +329,106 @@ async fn cmd_index(
     Ok(())
 }
 
-async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize) -> Result<()> {
-    if !cfg.db_path.exists() {
-        return Err(PolarisError::Indexing(format!(
-            "no index at {}  —  run `polaris index <path>` first",
-            cfg.db_path.display()
-        )));
+async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: OutputFormat) -> Result<()> {
+    let is_multi_db = !cfg.extra_db_paths.is_empty();
+
+    let all_db_paths: Vec<PathBuf> = std::iter::once(cfg.db_path.clone())
+        .chain(cfg.extra_db_paths.iter().cloned())
+        .collect();
+
+    // Check all DBs exist.
+    for db_path in &all_db_paths {
+        if !db_path.exists() {
+            return Err(PolarisError::Indexing(format!(
+                "no index at {}  —  run `polaris index <path>` first",
+                db_path.display()
+            )));
+        }
     }
 
-    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let engine = EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?;
 
-    let search = SearchEngine::new(
-        &engine,
-        &db,
-        cfg.mmr_lambda,
-        cfg.mmr_candidate_multiplier,
-        cfg.heading_boost,
-        cfg.rrf_k,
-    );
-    let results = search.search(query, top_k)?;
+    let results = if is_multi_db {
+        let mut all_results: Vec<SearchResult> = Vec::new();
+        for db_path in &all_db_paths {
+            let db = Database::open(db_path, cfg.embedding_dim, &cfg.model_id)?;
+            let search = SearchEngine::new(
+                &engine,
+                &db,
+                cfg.mmr_lambda,
+                cfg.mmr_candidate_multiplier,
+                cfg.heading_boost,
+                cfg.rrf_k,
+            );
+            let db_name = db_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let mut db_results = search.search(query, top_k)?;
+            for r in &mut db_results {
+                r.source_db = Some(db_name.clone());
+            }
+            all_results.extend(db_results);
+        }
+        // Sort by score desc, take top_k.
+        all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        all_results.truncate(top_k);
+        // Re-normalize so max score = 1.0.
+        if let Some(max_score) = all_results.first().map(|r| r.score) {
+            if max_score > 0.0 {
+                for r in &mut all_results {
+                    r.score /= max_score;
+                }
+            }
+        }
+        all_results
+    } else {
+        let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+        let search = SearchEngine::new(
+            &engine,
+            &db,
+            cfg.mmr_lambda,
+            cfg.mmr_candidate_multiplier,
+            cfg.heading_boost,
+            cfg.rrf_k,
+        );
+        search.search(query, top_k)?
+    };
+
+    if output == OutputFormat::Json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&results)
+                .unwrap_or_else(|e| format!("[{{\"error\": \"{e}}}\"]"))
+        );
+        return Ok(());
+    }
 
     if results.is_empty() {
-        let stats = db.get_stats(&cfg.db_path)?;
-        if stats.doc_count == 0 {
-            eprintln!(
-                "{}  index is empty  —  run {} to add documents",
-                style("○").dim(),
-                style("polaris index <path>").cyan(),
-            );
-        } else {
-            println!("{} results for \"{}\"", style("0").bold(), style(query).dim());
-            println!();
-            println!("  {}", style("no matches found").dim());
-            println!();
-            println!(
-                "  {}  try broader terms or re-index with {}",
-                style("tip:").dim(),
-                style("polaris index <path>").cyan(),
-            );
-            println!();
+        // For single DB: check if it's empty to give a better hint.
+        if !is_multi_db {
+            let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+            let stats = db.get_stats(&cfg.db_path)?;
+            if stats.doc_count == 0 {
+                eprintln!(
+                    "{}  index is empty  —  run {} to add documents",
+                    style("○").dim(),
+                    style("polaris index <path>").cyan(),
+                );
+                return Ok(());
+            }
         }
+        println!("{} results for \"{}\"", style("0").bold(), style(query).dim());
+        println!();
+        println!("  {}", style("no matches found").dim());
+        println!();
+        println!(
+            "  {}  try broader terms or re-index with {}",
+            style("tip:").dim(),
+            style("polaris index <path>").cyan(),
+        );
+        println!();
         return Ok(());
     }
 
@@ -329,36 +459,64 @@ async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_status(cfg: PolarisConfig) -> Result<()> {
-    println!();
-    println!(
-        "{}  {}",
-        style("polaris").cyan().bold(),
-        style("· status").dim(),
-    );
-    println!();
+async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
+    warn_extra_dbs_ignored(&cfg);
+
+    if output == OutputFormat::Plain {
+        println!();
+        println!(
+            "{}  {}",
+            style("polaris").cyan().bold(),
+            style("· status").dim(),
+        );
+        println!();
+    }
 
     // Label column width (pad before styling to avoid ANSI-offset issues).
     let w = 10usize;
 
     if !cfg.db_path.exists() {
-        println!(
-            "  {}  {}",
-            style(format!("{:<w$}", "database")).dim(),
-            cfg.db_path.display(),
-        );
-        println!();
-        println!(
-            "  {}  not initialized  —  run {} to get started",
-            style("⚠").yellow(),
-            style("polaris index <path>").cyan(),
-        );
-        println!();
+        if output == OutputFormat::Json {
+            println!("{{\"error\": \"not initialized\"}}");
+        } else {
+            println!(
+                "  {}  {}",
+                style(format!("{:<w$}", "database")).dim(),
+                cfg.db_path.display(),
+            );
+            println!();
+            println!(
+                "  {}  not initialized  —  run {} to get started",
+                style("⚠").yellow(),
+                style("polaris index <path>").cyan(),
+            );
+            println!();
+        }
         return Ok(());
     }
 
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let stats = db.get_stats(&cfg.db_path)?;
+
+    if output == OutputFormat::Json {
+        #[derive(serde::Serialize)]
+        struct StatusJson {
+            documents: usize,
+            chunks: usize,
+            db_bytes: u64,
+            embedding_dim: usize,
+            last_indexed: Option<String>,
+        }
+        let json = StatusJson {
+            documents: stats.doc_count,
+            chunks: stats.chunk_count,
+            db_bytes: stats.db_size_bytes,
+            embedding_dim: stats.embedding_dim,
+            last_indexed: stats.last_indexed.clone(),
+        };
+        println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        return Ok(());
+    }
 
     let avg_chunks = if stats.doc_count > 0 {
         format!("{:.1}", stats.chunk_count as f64 / stats.doc_count as f64)
@@ -430,6 +588,80 @@ async fn cmd_status(cfg: PolarisConfig) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_chunks(cfg: PolarisConfig, path: &PathBuf) -> Result<()> {
+    warn_extra_dbs_ignored(&cfg);
+
+    if !cfg.db_path.exists() {
+        return Err(PolarisError::Indexing(format!(
+            "no index at {}  —  run `polaris index <path>` first",
+            cfg.db_path.display()
+        )));
+    }
+
+    let norm = normalise_path(path).ok_or_else(|| {
+        PolarisError::Indexing(format!("invalid path: {}", path.display()))
+    })?;
+
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+    let chunks = db.get_chunks_for_document(&norm)?;
+
+    if chunks.is_empty() {
+        eprintln!(
+            "  {}  no chunks found for {}",
+            style("○").dim(),
+            style(&norm).bold(),
+        );
+        eprintln!(
+            "  {}  run {} to index it first",
+            style("tip:").dim(),
+            style("polaris index <path>").cyan(),
+        );
+        eprintln!();
+        return Ok(());
+    }
+
+    println!();
+    println!(
+        "{}  {}  {}",
+        style("polaris").cyan().bold(),
+        style("· chunks").dim(),
+        style(&norm).bold(),
+    );
+    println!();
+
+    for chunk in &chunks {
+        // Heading context display.
+        let ctx = if chunk.heading_context.is_empty() {
+            style("(no heading)".to_string()).dim().to_string()
+        } else {
+            style(chunk.heading_context.clone()).dim().to_string()
+        };
+
+        println!(
+            "  {}  │  {}      bytes {}–{}",
+            style(format!("chunk {}", chunk.chunk_index)).bold(),
+            ctx,
+            chunk.start_byte,
+            chunk.end_byte,
+        );
+
+        // Show first 3 lines of content (single pass).
+        let all_lines: Vec<&str> = chunk.content.lines().collect();
+        for line in all_lines.iter().take(3) {
+            println!("     {}", style(line).dim());
+        }
+        if all_lines.len() > 3 {
+            println!(
+                "     {}",
+                style(format!("… {} more lines", all_lines.len() - 3)).dim()
+            );
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
 async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Result<()> {
     use notify_debouncer_mini::notify::RecursiveMode;
     use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
@@ -485,7 +717,7 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
             style("◆").cyan().bold(),
             style(path.display().to_string()).bold(),
         );
-        let report = indexer.index_path(&db, path, recursive, false)?;
+        let report = indexer.index_path(&db, path, recursive, false, false, None)?;
         print_watch_report(&report);
     }
 
@@ -543,7 +775,7 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
                         style("◆").cyan().bold(),
                         style(root.display().to_string()).bold(),
                     );
-                    let report = indexer.index_path(&db, root, recursive, false)?;
+                    let report = indexer.index_path(&db, root, recursive, false, false, None)?;
                     print_watch_report(&report);
                 }
             }
@@ -689,6 +921,11 @@ fn format_results_terminal(results: &[SearchResult], query: &str) -> String {
             style(i + 1).bold(),
             style(&r.file_path).dim(),
         );
+
+        // Source database (multi-DB mode only).
+        if let Some(ref db_name) = r.source_db {
+            let _ = writeln!(out, "     {}", style(format!("[{}]", db_name)).dim());
+        }
 
         // Heading breadcrumb (optional).
         if !r.heading_context.is_empty() {

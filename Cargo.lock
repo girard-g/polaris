@@ -2220,20 +2220,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "polaris"
-version = "0.1.0"
+name = "polaris-cli"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
  "console",
+ "indicatif",
+ "notify-debouncer-mini",
+ "polaris-core",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "polaris-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
  "dirs 5.0.1",
  "fastembed",
  "hex",
- "indicatif",
- "notify-debouncer-mini",
  "pulldown-cmark",
  "rayon",
- "rmcp",
  "rusqlite",
  "schemars",
  "serde",
@@ -2242,10 +2258,8 @@ dependencies = [
  "sqlite-vec",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
  "walkdir",
  "zerocopy 0.7.35",
 ]

@@ -24,6 +24,7 @@ fn bank_set_search_returns_attributed_results() {
             index_path: dir_a.join(".polaris/index.db"),
             embedding_dim: 64,
             model_id: "nomic-embed-text-v1.5".to_string(),
+            ..Default::default()
         },
         embed.clone(),
     ).unwrap();
@@ -35,6 +36,7 @@ fn bank_set_search_returns_attributed_results() {
             index_path: dir_b.join(".polaris/index.db"),
             embedding_dim: 64,
             model_id: "nomic-embed-text-v1.5".to_string(),
+            ..Default::default()
         },
         embed.clone(),
     ).unwrap();

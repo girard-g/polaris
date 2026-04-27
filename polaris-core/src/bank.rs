@@ -12,6 +12,9 @@ use crate::indexer::{IndexReport, Indexer};
 use crate::search::SearchEngine;
 
 /// Configuration for opening a single bank.
+///
+/// All tuning parameters have sensible defaults matching the historical Polaris
+/// CLI defaults. Use `..Default::default()` to fill in only what differs.
 #[derive(Debug, Clone)]
 pub struct BankConfig {
     /// Root of the indexed corpus on disk (e.g. a git working tree).
@@ -22,6 +25,39 @@ pub struct BankConfig {
     pub embedding_dim: usize,
     /// Embedding model id (e.g. "nomic-embed-text-v1.5").
     pub model_id: String,
+    // ── Tuning parameters ─────────────────────────────────────────────────
+    /// Maximum chunk size in approximate tokens (chars / 4).
+    pub max_chunk_tokens: usize,
+    /// Overlap in characters between adjacent non-heading chunks.
+    pub chunk_overlap_chars: usize,
+    /// Maximum file size in bytes; larger files are skipped by the indexer.
+    pub max_file_size: u64,
+    /// MMR lambda: 0.0 = pure diversity, 1.0 = pure relevance.
+    pub mmr_lambda: f32,
+    /// Fetch `top_k * mmr_candidate_multiplier` candidates before MMR reranking.
+    pub mmr_candidate_multiplier: usize,
+    /// Additive score boost for heading matches (0.0 disables).
+    pub heading_boost: f32,
+    /// RRF k constant for Reciprocal Rank Fusion.
+    pub rrf_k: usize,
+}
+
+impl Default for BankConfig {
+    fn default() -> Self {
+        Self {
+            repo_root: PathBuf::new(),
+            index_path: PathBuf::new(),
+            embedding_dim: 512,
+            model_id: "nomic-embed-text-v1.5".to_string(),
+            max_chunk_tokens: 450,
+            chunk_overlap_chars: 200,
+            max_file_size: 10 * 1024 * 1024, // 10 MiB — matches PolarisConfig default
+            mmr_lambda: 0.7,
+            mmr_candidate_multiplier: 3,
+            heading_boost: 0.05,
+            rrf_k: 60,
+        }
+    }
 }
 
 /// A single bank: one indexed corpus with its own SQLite index.
@@ -63,27 +99,22 @@ impl Bank {
 
         let db = Database::open(&cfg.index_path, cfg.embedding_dim, &cfg.model_id)?;
 
-        // Default chunking parameters mirror the historical CLI defaults.
-        let max_chunk_tokens: usize = 450;
-        let chunk_overlap_chars: usize = 200;
-        let max_file_size: u64 = 5 * 1024 * 1024; // 5 MiB
-
         let indexer = Indexer::new(
             embed.0.clone(),
-            max_chunk_tokens,
-            chunk_overlap_chars,
-            max_file_size,
+            cfg.max_chunk_tokens,
+            cfg.chunk_overlap_chars,
+            cfg.max_file_size,
         );
 
         Ok(Self {
             inner: std::sync::Arc::new(BankInner {
                 db: Mutex::new(db),
                 indexer,
+                mmr_lambda: cfg.mmr_lambda,
+                mmr_candidate_multiplier: cfg.mmr_candidate_multiplier,
+                heading_boost: cfg.heading_boost,
+                rrf_k: cfg.rrf_k,
                 config: cfg,
-                mmr_lambda: 0.7,
-                mmr_candidate_multiplier: 3,
-                heading_boost: 0.05,
-                rrf_k: 60,
             }),
         })
     }
@@ -98,6 +129,27 @@ impl Bank {
             opts.force,
             opts.dry_run,
             None,
+        )
+    }
+
+    /// Index a path with a progress callback.
+    ///
+    /// The callback receives `(fraction, message)` where `fraction` is in `[0, 1]`.
+    /// Used by the MCP `index` tool to stream progress notifications to the client.
+    pub fn index_path_with_progress(
+        &self,
+        path: &Path,
+        opts: IndexOpts,
+        on_progress: Box<dyn Fn(f32, &str) + Send + Sync>,
+    ) -> Result<IndexReport> {
+        let db = self.inner.db.lock().expect("bank db poisoned");
+        self.inner.indexer.index_path(
+            &db,
+            path,
+            opts.recursive,
+            opts.force,
+            opts.dry_run,
+            Some(on_progress),
         )
     }
 

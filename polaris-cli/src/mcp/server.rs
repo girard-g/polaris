@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rmcp::{
     Peer, RoleServer, ServerHandler, ServiceExt,
@@ -13,10 +13,7 @@ use rmcp::{
 };
 
 use polaris_core::config::PolarisConfig;
-use polaris_core::db::Database;
-use polaris_core::embedding::EmbeddingEngine;
 use polaris_core::error::PolarisError;
-use polaris_core::indexer::Indexer;
 use polaris_core::search::SearchEngine;
 
 use super::types::{IndexParams, SearchParams, StatusParams};
@@ -27,17 +24,13 @@ use super::types::{IndexParams, SearchParams, StatusParams};
 
 /// Shared state for the MCP server.
 ///
-/// Two separate SQLite connections to the same file are used so that
-/// read operations (search, status) and write operations (index) can proceed
-/// concurrently under WAL mode without mutual serialisation.
+/// `Bank` is cheaply cloneable (`Arc<BankInner>` internally) and serialises
+/// concurrent access through its internal `Mutex<Database>`. MCP tool calls
+/// are typically serial so this single-connection model is acceptable.
 #[derive(Clone)]
 pub struct PolarisState {
     pub config: Arc<PolarisConfig>,
-    pub embedding_engine: Arc<EmbeddingEngine>,
-    /// Connection used exclusively by read operations (search, status).
-    pub read_db: Arc<Mutex<Database>>,
-    /// Connection used exclusively by write operations (index).
-    pub write_db: Arc<Mutex<Database>>,
+    pub bank: polaris_core::Bank,
 }
 
 // ---------------------------------------------------------------------------
@@ -75,16 +68,6 @@ impl PolarisServer {
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Acquire a `Mutex` lock and return the guard, or format an error string on
-/// poison. Used to deduplicate the lock-or-error pattern across tool handlers.
-fn lock_db(db: &std::sync::Mutex<Database>) -> std::result::Result<std::sync::MutexGuard<'_, Database>, String> {
-    db.lock().map_err(|e| format!("Error: failed to lock database: {e}"))
-}
-
-// ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
 
@@ -99,20 +82,10 @@ impl PolarisServer {
         let config = Arc::clone(&self.state.config);
         let top_k = (params.top_k.unwrap_or(5) as usize).min(config.max_top_k);
         let query = params.query;
-        let db = Arc::clone(&self.state.read_db);
-        let engine = Arc::clone(&self.state.embedding_engine);
+        let bank = self.state.bank.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            let db = match lock_db(&db) {
-                Ok(d) => d,
-                Err(e) => return e,
-            };
-            let search = SearchEngine::new(
-                &engine, &db,
-                config.mmr_lambda, config.mmr_candidate_multiplier,
-                config.heading_boost, config.rrf_k,
-            );
-            match search.search(&query, top_k) {
+            match bank.search(&query, polaris_core::SearchOpts { top_k }) {
                 Ok(results) => SearchEngine::format_results(&results),
                 Err(e) => format!("Error: {e}"),
             }
@@ -135,9 +108,7 @@ impl PolarisServer {
         let path = PathBuf::from(&params.path);
         let recursive = params.recursive.unwrap_or(true);
         let force = params.force.unwrap_or(false);
-        let db = Arc::clone(&self.state.write_db);
-        let engine = Arc::clone(&self.state.embedding_engine);
-        let config = Arc::clone(&self.state.config);
+        let bank = self.state.bank.clone();
 
         if !path.exists() {
             return format!("Error: path not found: {}", params.path);
@@ -165,18 +136,14 @@ impl PolarisServer {
                 None
             };
 
+        let opts = polaris_core::IndexOpts { recursive, force, dry_run: false };
+
         let result = tokio::task::spawn_blocking(move || {
-            let indexer = Indexer::new(
-                engine,
-                config.max_chunk_tokens,
-                config.chunk_overlap_chars,
-                config.max_file_size,
-            );
-            let db = match lock_db(&db) {
-                Ok(d) => d,
-                Err(e) => return e,
+            let index_result = match on_progress {
+                Some(cb) => bank.index_path_with_progress(&path, opts, cb),
+                None => bank.index_path(&path, opts),
             };
-            match indexer.index_path(&db, &path, recursive, force, false, on_progress) {
+            match index_result {
                 Ok(report) => {
                     let mut out = report.summary();
                     if !report.errors.is_empty() {
@@ -200,15 +167,11 @@ impl PolarisServer {
         description = "Returns statistics about the current index: document count, chunk count, database size, and embedding configuration."
     )]
     async fn status(&self, _params: Parameters<StatusParams>) -> String {
-        let db = Arc::clone(&self.state.read_db);
         let config = Arc::clone(&self.state.config);
+        let bank = self.state.bank.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            let db = match lock_db(&db) {
-                Ok(d) => d,
-                Err(e) => return e,
-            };
-            match db.get_stats(&config.db_path) {
+            match bank.stats() {
                 Ok(stats) => format!(
                     "Documents: {}\nChunks: {}\nDatabase size: {} bytes\nModel: {}\nEmbedding dim: {}\nLast indexed: {}",
                     stats.doc_count, stats.chunk_count, stats.db_size_bytes,

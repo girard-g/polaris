@@ -2,18 +2,17 @@ mod mcp;
 mod tui;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use clap::{ArgAction, Parser, Subcommand};
 use console::style;
 use tracing_subscriber::EnvFilter;
 
 use polaris_core::config::PolarisConfig;
-use polaris_core::db::{self, Database, SearchResult};
+use polaris_core::db::{self, Database};
 use polaris_core::embedding::EmbeddingEngine;
 use polaris_core::error::{PolarisError, Result};
 use polaris_core::indexer::{IndexReport, Indexer, normalise_path};
-use polaris_core::search::SearchEngine;
 use mcp::{PolarisServer, PolarisState};
 use tui::{format_results_terminal, make_spinner};
 
@@ -329,7 +328,6 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: Outpu
         .chain(cfg.extra_db_paths.iter().cloned())
         .collect();
 
-    // Check all DBs exist.
     for db_path in &all_db_paths {
         if !db_path.exists() {
             return Err(PolarisError::Indexing(format!(
@@ -339,55 +337,33 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: Outpu
         }
     }
 
-    let engine = EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?;
+    let embed = polaris_core::SharedEmbedding::load(&cfg.model_id, cfg.embedding_dim)?;
+    let mut set = polaris_core::BankSet::new(embed.clone());
 
-    let results = if is_multi_db {
-        let mut all_results: Vec<SearchResult> = Vec::new();
-        for db_path in &all_db_paths {
-            let db = Database::open(db_path, cfg.embedding_dim, &cfg.model_id)?;
-            let search = SearchEngine::new(
-                &engine,
-                &db,
-                cfg.mmr_lambda,
-                cfg.mmr_candidate_multiplier,
-                cfg.heading_boost,
-                cfg.rrf_k,
-            );
-            let db_name = db_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-            let mut db_results = search.search(query, top_k)?;
-            for r in &mut db_results {
-                r.source_db = Some(db_name.clone());
-            }
-            all_results.extend(db_results);
-        }
-        // Sort by score desc, take top_k.
-        all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        all_results.truncate(top_k);
-        // Re-normalize so max score = 1.0.
-        if let Some(max_score) = all_results.first().map(|r| r.score) {
-            if max_score > 0.0 {
-                for r in &mut all_results {
-                    r.score /= max_score;
-                }
-            }
-        }
-        all_results
-    } else {
-        let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
-        let search = SearchEngine::new(
-            &engine,
-            &db,
-            cfg.mmr_lambda,
-            cfg.mmr_candidate_multiplier,
-            cfg.heading_boost,
-            cfg.rrf_k,
-        );
-        search.search(query, top_k)?
-    };
+    for db_path in &all_db_paths {
+        let bank_cfg = polaris_core::BankConfig {
+            repo_root: db_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf(),
+            index_path: db_path.clone(),
+            embedding_dim: cfg.embedding_dim,
+            model_id: cfg.model_id.clone(),
+            max_chunk_tokens: cfg.max_chunk_tokens,
+            chunk_overlap_chars: cfg.chunk_overlap_chars,
+            max_file_size: cfg.max_file_size,
+            mmr_lambda: cfg.mmr_lambda,
+            mmr_candidate_multiplier: cfg.mmr_candidate_multiplier,
+            heading_boost: cfg.heading_boost,
+            rrf_k: cfg.rrf_k,
+        };
+        let bank = polaris_core::Bank::open(bank_cfg, embed.clone())?;
+        let label = db_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        set.mount(bank, label);
+    }
+
+    let results = set.search(query, polaris_core::SearchOpts { top_k })?;
 
     if output == OutputFormat::Json {
         println!(
@@ -434,16 +410,30 @@ async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     tracing::info!("Database: {}", cfg.db_path.display());
     tracing::info!("Embedding dim: {}", cfg.embedding_dim);
 
-    let read_db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
-    let write_db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     tracing::info!("Loading embedding model…");
-    let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
+    let embed = polaris_core::SharedEmbedding::load(&cfg.model_id, cfg.embedding_dim)?;
+
+    let bank_cfg = polaris_core::BankConfig {
+        repo_root: cfg.db_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf(),
+        index_path: cfg.db_path.clone(),
+        embedding_dim: cfg.embedding_dim,
+        model_id: cfg.model_id.clone(),
+        max_chunk_tokens: cfg.max_chunk_tokens,
+        chunk_overlap_chars: cfg.chunk_overlap_chars,
+        max_file_size: cfg.max_file_size,
+        mmr_lambda: cfg.mmr_lambda,
+        mmr_candidate_multiplier: cfg.mmr_candidate_multiplier,
+        heading_boost: cfg.heading_boost,
+        rrf_k: cfg.rrf_k,
+    };
+    let bank = polaris_core::Bank::open(bank_cfg, embed.clone())?;
 
     let state = PolarisState {
         config: Arc::new(cfg),
-        embedding_engine: engine,
-        read_db: Arc::new(Mutex::new(read_db)),
-        write_db: Arc::new(Mutex::new(write_db)),
+        bank,
     };
 
     let server = PolarisServer::new(state);

@@ -28,6 +28,7 @@ fn bank_open_index_search_roundtrip() {
         index_path: tmp.path().join(".polaris/index.db"),
         embedding_dim: 64,
         model_id: "nomic-embed-text-v1.5".to_string(),
+        ..Default::default()
     };
 
     let bank = Bank::open(cfg, embed).expect("open bank");

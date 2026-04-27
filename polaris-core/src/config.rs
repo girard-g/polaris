@@ -197,6 +197,32 @@ impl PolarisConfig {
     }
 }
 
+/// Options for `Bank::index_path` and `Bank::index_diff`.
+#[derive(Debug, Clone)]
+pub struct IndexOpts {
+    pub recursive: bool,
+    pub force: bool,
+    pub dry_run: bool,
+}
+
+impl Default for IndexOpts {
+    fn default() -> Self {
+        Self { recursive: true, force: false, dry_run: false }
+    }
+}
+
+/// Options for `Bank::search` and `BankSet::search`.
+#[derive(Debug, Clone)]
+pub struct SearchOpts {
+    pub top_k: usize,
+}
+
+impl Default for SearchOpts {
+    fn default() -> Self {
+        Self { top_k: 5 }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -355,5 +381,23 @@ mod tests {
         assert_eq!(cfg.embedding_dim, 64);
         assert_eq!(cfg.model_id, "test-model");
         assert_eq!(cfg.db_path, PathBuf::from("polaris.db")); // default
+    }
+}
+
+#[cfg(test)]
+mod opts_tests {
+    use super::*;
+
+    #[test]
+    fn index_opts_defaults_are_sensible() {
+        let opts = IndexOpts::default();
+        assert!(opts.recursive);
+        assert!(!opts.force);
+        assert!(!opts.dry_run);
+    }
+
+    #[test]
+    fn search_opts_defaults_to_top_5() {
+        assert_eq!(SearchOpts::default().top_k, 5);
     }
 }

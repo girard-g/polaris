@@ -117,6 +117,19 @@ impl Indexer {
         }
     }
 
+    /// Borrow the embedding engine.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the indexer was constructed via [`Indexer::new_dry_run`] (which has no
+    /// engine). `Bank` always uses [`Indexer::new`] so this never panics through the Bank API.
+    pub fn embedding_engine(&self) -> &EmbeddingEngine {
+        self.embedding_engine
+            .as_ref()
+            .expect("Indexer::embedding_engine called on dry-run indexer")
+            .as_ref()
+    }
+
     /// Construct an indexer for dry-run mode (no embedding engine needed).
     pub fn new_dry_run(max_chunk_tokens: usize, chunk_overlap_chars: usize, max_file_size: u64) -> Self {
         Self {

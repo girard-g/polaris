@@ -30,7 +30,40 @@ impl<'a> SearchEngine<'a> {
     /// Search for the `top_k` most relevant chunks for `query`.
     ///
     /// Pipeline: vector KNN + BM25 → RRF fusion → heading boost → MMR rerank.
+    /// Scores are normalized to [0, 1] within this result set (top result = 1.0).
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
+        let scored = self.search_scored(query, top_k)?;
+        let max_score = scored.iter().map(|(s, _)| *s).fold(0.0_f32, f32::max);
+        Ok(scored
+            .into_iter()
+            .map(|(s, mut c)| {
+                c.score = if max_score > 0.0 { s / max_score } else { 0.0 };
+                c.into_search_result()
+            })
+            .collect())
+    }
+
+    /// Like [`search`], but returns raw (unnormalized) RRF scores alongside results.
+    ///
+    /// Used by [`crate::bank::BankSet`] to fuse results from multiple banks before
+    /// applying a single cross-bank normalization pass.
+    pub fn search_raw(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
+        let scored = self.search_scored(query, top_k)?;
+        Ok(scored
+            .into_iter()
+            .map(|(s, mut c)| {
+                c.score = s;
+                c.into_search_result()
+            })
+            .collect())
+    }
+
+    /// Core retrieval pipeline returning `(raw_score, result)` pairs without normalization.
+    fn search_scored(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<(f32, SearchResultWithEmbedding)>> {
         let query_embedding = self.embedding_engine.embed_query(query)?;
         let candidate_count = top_k * self.candidate_multiplier;
 
@@ -80,20 +113,7 @@ impl<'a> SearchEngine<'a> {
             .collect();
 
         // 6. MMR reranking.
-        let selected = mmr_rerank(boosted, top_k, self.mmr_lambda);
-
-        // 7. Normalize scores to [0, 1] by dividing by the maximum score.
-        //    The top result always gets 1.000; others are proportional.
-        let max_score = selected.iter().map(|(s, _)| *s).fold(0.0_f32, f32::max);
-
-        // 8. Store the normalised score in the `score` field for display.
-        Ok(selected
-            .into_iter()
-            .map(|(s, mut c)| {
-                c.score = if max_score > 0.0 { s / max_score } else { 0.0 };
-                c.into_search_result()
-            })
-            .collect())
+        Ok(mmr_rerank(boosted, top_k, self.mmr_lambda))
     }
 
     /// Format search results as a markdown string (for CLI / MCP output).

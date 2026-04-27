@@ -19,6 +19,31 @@ Polaris indexes markdown files as vector embeddings (via a local ONNX model) and
 query → vector KNN + BM25 → RRF fusion → heading boost → MMR rerank → top-k results
 ```
 
+## Library Use
+
+Polaris's retrieval pipeline is also available as a Rust library (`polaris-core`):
+
+```rust
+use polaris_core::{Bank, BankConfig, IndexOpts, SearchOpts, SharedEmbedding};
+
+let embed = SharedEmbedding::load("nomic-embed-text-v1.5", 512)?;
+let bank = Bank::open(BankConfig {
+    repo_root: "./docs".into(),
+    index_path: "./docs/.polaris/index.db".into(),
+    embedding_dim: 512,
+    model_id: "nomic-embed-text-v1.5".into(),
+    ..Default::default()
+}, embed)?;
+
+bank.index_path(std::path::Path::new("./docs"), IndexOpts::default())?;
+let results = bank.search("how does chunking work", SearchOpts { top_k: 5 })?;
+```
+
+For multi-bank searches with score fusion, use `BankSet`. For incremental
+updates after a git pull, use `Bank::index_diff(&changed, &removed)`.
+
+See [`docs/superpowers/specs/2026-04-26-polaris-core-crate-extraction.md`](docs/superpowers/specs/2026-04-26-polaris-core-crate-extraction.md) for design rationale.
+
 ## Install
 
 ```bash

@@ -102,17 +102,33 @@ impl Bank {
     }
 
     /// Search this bank.
+    ///
+    /// Scores are normalized to [0, 1] within this result set (top result = 1.0).
     pub fn search(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
         let db = self.inner.db.lock().expect("bank db poisoned");
-        let engine = SearchEngine::new(
+        let engine = self.engine(&db);
+        engine.search(query, opts.top_k)
+    }
+
+    /// Like [`search`], but returns raw (unnormalized) RRF scores.
+    ///
+    /// Used by [`BankSet`] to fuse results from multiple banks with a single
+    /// cross-bank normalization pass instead of per-bank normalization.
+    pub(crate) fn search_raw(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
+        let db = self.inner.db.lock().expect("bank db poisoned");
+        let engine = self.engine(&db);
+        engine.search_raw(query, opts.top_k)
+    }
+
+    fn engine<'a>(&'a self, db: &'a Database) -> SearchEngine<'a> {
+        SearchEngine::new(
             self.inner.indexer.embedding_engine(),
-            &db,
+            db,
             self.inner.mmr_lambda,
             self.inner.mmr_candidate_multiplier,
             self.inner.heading_boost,
             self.inner.rrf_k,
-        );
-        engine.search(query, opts.top_k)
+        )
     }
 
     /// Index statistics.
@@ -185,5 +201,71 @@ impl Bank {
     /// Configured repo root.
     pub fn repo_root(&self) -> &Path {
         &self.inner.config.repo_root
+    }
+}
+
+/// A set of banks searched as one fused result.
+pub struct BankSet {
+    embed: SharedEmbedding,
+    banks: Vec<(String, Bank)>,
+}
+
+impl BankSet {
+    pub fn new(embed: SharedEmbedding) -> Self {
+        Self { embed, banks: Vec::new() }
+    }
+
+    pub fn mount(&mut self, bank: Bank, label: String) {
+        self.banks.push((label, bank));
+    }
+
+    pub fn unmount(&mut self, label: &str) -> Option<Bank> {
+        if let Some(pos) = self.banks.iter().position(|(l, _)| l == label) {
+            Some(self.banks.remove(pos).1)
+        } else {
+            None
+        }
+    }
+
+    pub fn labels(&self) -> Vec<&str> {
+        self.banks.iter().map(|(l, _)| l.as_str()).collect()
+    }
+
+    /// Search across all mounted banks. Per-bank results are tagged with
+    /// `source_db = label`, fused by score, truncated to `top_k`, and renormalized.
+    pub fn search(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
+        let mut all_results: Vec<SearchResult> = Vec::new();
+
+        for (label, bank) in &self.banks {
+            // Use raw (unnormalized) scores so that cross-bank comparison is
+            // meaningful. Per-bank normalization would collapse every bank's top
+            // result to 1.0, making the merged sort arbitrary.
+            let mut results = bank.search_raw(query, opts.clone())?;
+            for r in &mut results {
+                r.source_db = Some(label.clone());
+            }
+            all_results.extend(results);
+        }
+
+        // Sort by score descending, take top_k.
+        all_results.sort_by(|a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_results.truncate(opts.top_k);
+
+        // Renormalize so max score = 1.0 across the merged result set.
+        if let Some(max_score) = all_results.first().map(|r| r.score) {
+            if max_score > 0.0 {
+                for r in &mut all_results {
+                    r.score /= max_score;
+                }
+            }
+        }
+
+        // Avoid `embed` field warning; the SharedEmbedding is held so the
+        // model stays loaded for as long as the set exists.
+        let _ = &self.embed;
+
+        Ok(all_results)
     }
 }

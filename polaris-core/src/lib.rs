@@ -11,7 +11,7 @@ pub mod error;
 pub mod indexer;
 pub mod search;
 
-pub use bank::{Bank, BankConfig};
+pub use bank::{Bank, BankConfig, BankSet};
 pub use config::{IndexOpts, PolarisConfig, SearchOpts};
 pub use db::{ChunkRecord, Database, DbStats, SearchResult, register_vec_extension};
 pub use embedding::{EmbeddingEngine, SharedEmbedding, native_dim_for};

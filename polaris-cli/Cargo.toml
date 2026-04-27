@@ -1,0 +1,40 @@
+[package]
+name = "polaris-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Lightweight RAG CLI + MCP server (Polaris)"
+license = "MIT"
+
+[[bin]]
+name = "polaris"
+path = "src/main.rs"
+
+[dependencies]
+polaris-core = { path = "../polaris-core" }
+
+# CLI-specific
+clap = { version = "4", features = ["derive"] }
+console = "0.15"
+indicatif = "0.17"
+
+# MCP server
+rmcp = { version = "0.16", features = ["server", "transport-io"] }
+schemars = "1"
+
+# Watcher (CLI-only in Phase 1)
+notify-debouncer-mini = "0.4"
+
+# Async + logging
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Pulled through but already present transitively via polaris-core
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

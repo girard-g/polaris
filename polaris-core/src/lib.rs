@@ -12,7 +12,7 @@ pub mod search;
 
 pub use config::PolarisConfig;
 pub use db::{Database, SearchResult, register_vec_extension};
-pub use embedding::{EmbeddingEngine, native_dim_for};
+pub use embedding::{EmbeddingEngine, SharedEmbedding, native_dim_for};
 pub use error::{PolarisError, Result};
 pub use indexer::{Chunk, IndexReport, Indexer, normalise_path};
 pub use search::SearchEngine;

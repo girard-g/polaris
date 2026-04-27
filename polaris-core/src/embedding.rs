@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
@@ -120,6 +120,42 @@ fn truncate_and_normalize(mut embedding: Vec<f32>, dim: usize) -> Vec<f32> {
     }
 
     embedding
+}
+
+/// Shared, cheap-to-clone handle to an `EmbeddingEngine`.
+///
+/// Loading the underlying ONNX model is expensive (~140 MB resident).
+/// `SharedEmbedding` ensures the model is loaded once and shared across
+/// all consumers (typically multiple `Bank` instances).
+#[derive(Clone)]
+pub struct SharedEmbedding(pub(crate) Arc<EmbeddingEngine>);
+
+impl SharedEmbedding {
+    /// Load an embedding model. The first call for a given (model, dim) pair
+    /// downloads and caches the model; subsequent calls reuse the cache.
+    pub fn load(model_id: &str, dim: usize) -> crate::Result<Self> {
+        let engine = EmbeddingEngine::new(dim, model_id)?;
+        Ok(Self(Arc::new(engine)))
+    }
+
+    /// Borrow the inner engine.
+    pub fn engine(&self) -> &EmbeddingEngine {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+mod shared_embedding_tests {
+    use super::*;
+
+    #[test]
+    fn shared_embedding_clone_does_not_reload() {
+        // Loading the model is expensive; cloning a SharedEmbedding must be cheap.
+        let a = SharedEmbedding::load("nomic-embed-text-v1.5", 64).expect("load");
+        let b = a.clone();
+        // Both handles should refer to the same Arc<EmbeddingEngine>.
+        assert!(Arc::ptr_eq(&a.0, &b.0));
+    }
 }
 
 #[cfg(test)]

@@ -2245,9 +2245,11 @@ name = "polaris-core"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "console",
  "dirs 5.0.1",
  "fastembed",
  "hex",
+ "indicatif",
  "pulldown-cmark",
  "rayon",
  "rusqlite",

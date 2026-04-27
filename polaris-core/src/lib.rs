@@ -3,10 +3,12 @@
 //! See `docs/superpowers/specs/2026-04-26-polaris-core-crate-extraction.md`
 //! for design rationale.
 
+pub mod config;
 pub mod db;
 pub mod embedding;
 pub mod error;
 
+pub use config::PolarisConfig;
 pub use db::{Database, SearchResult, register_vec_extension};
 pub use embedding::{EmbeddingEngine, native_dim_for};
 pub use error::{PolarisError, Result};

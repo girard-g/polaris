@@ -12,12 +12,12 @@ use rmcp::{
     transport::stdio,
 };
 
-use crate::config::PolarisConfig;
-use crate::db::Database;
-use crate::embedding::EmbeddingEngine;
-use crate::error::PolarisError;
-use crate::indexer::Indexer;
-use crate::search::SearchEngine;
+use polaris_core::config::PolarisConfig;
+use polaris_core::db::Database;
+use polaris_core::embedding::EmbeddingEngine;
+use polaris_core::error::PolarisError;
+use polaris_core::indexer::Indexer;
+use polaris_core::search::SearchEngine;
 
 use super::types::{IndexParams, SearchParams, StatusParams};
 

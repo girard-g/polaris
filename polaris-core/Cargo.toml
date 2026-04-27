@@ -1,0 +1,33 @@
+[package]
+name = "polaris-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Lightweight RAG retrieval pipeline (library)"
+license = "MIT"
+
+[lib]
+name = "polaris_core"
+path = "src/lib.rs"
+
+[dependencies]
+fastembed = "5"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sqlite-vec = "0.1"
+zerocopy = { version = "0.7", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+schemars = "1"
+pulldown-cmark = "0.12"
+walkdir = "2"
+sha2 = "0.10"
+hex = "0.4"
+dirs = "5"
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+rayon = "1"
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

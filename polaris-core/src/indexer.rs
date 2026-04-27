@@ -29,8 +29,8 @@ pub struct IndexReport {
     pub elapsed: Duration,
 }
 
-impl IndexReport {
-    fn new() -> Self {
+impl Default for IndexReport {
+    fn default() -> Self {
         Self {
             added: Vec::new(),
             modified: Vec::new(),
@@ -42,7 +42,9 @@ impl IndexReport {
             elapsed: Duration::ZERO,
         }
     }
+}
 
+impl IndexReport {
     pub fn summary(&self) -> String {
         let changed = self.added.len() + self.modified.len();
         let mut lines = vec![format!(
@@ -140,69 +142,29 @@ impl Indexer {
         }
     }
 
-    /// Index all `.md` files under `root` (recursively unless `recursive==false`).
+    /// Index a precomputed list of files. Skips discovery (caller supplies
+    /// the path list) and removal-detection (caller's responsibility).
     ///
-    /// When `force` is true, all files are re-indexed regardless of hash.
-    /// When `dry_run` is true, no writes are made to the database.
-    /// `on_progress` is an optional callback invoked with (fraction 0.0–1.0, message).
-    ///
-    /// Three-phase pipeline for large corpora:
-    ///   Phase A — parallel collect: read once, hash from bytes, chunk (rayon)
-    ///   Phase B — cross-file embedding: flat batch across all files (full EMBED_BATCH_SIZE batches)
-    ///   Phase C — single-transaction write: one BEGIN/COMMIT for all files
-    pub fn index_path(
+    /// Runs the same Phase A (parallel hash+chunk) → Phase B (cross-file
+    /// batched embedding) → Phase C (single-transaction write) pipeline as
+    /// `index_path`, preserving batching efficiency.
+    pub(crate) fn index_files(
         &self,
         db: &Database,
-        root: &Path,
-        recursive: bool,
+        paths: &[PathBuf],
         force: bool,
         dry_run: bool,
         on_progress: Option<Box<dyn Fn(f32, &str) + Send + Sync>>,
     ) -> Result<IndexReport> {
-        let mut report = IndexReport::new();
+        let mut report = IndexReport::default();
         let start = Instant::now();
 
-        // 1. Discover .md files (with a spinner).
-        let discover_spinner = make_spinner_or_hidden("Discovering markdown files…", on_progress.is_some());
-        let discovered = discover_markdown_files(root, recursive);
-        discover_spinner.finish_and_clear();
-        match &on_progress {
-            None => eprintln!(
-                "{}  {} files found",
-                style("✓").green().bold(),
-                style(discovered.len().to_string()).bold(),
-            ),
-            Some(cb) => cb(0.0, "Scanning files…"),
-        }
-
-        // 2. Load existing hashes from DB, filtered to documents under this root.
-        let root_norm = normalise_path(root).unwrap_or_default();
-        let root_prefix = format!("{root_norm}/");
+        // Load ALL existing hashes from DB (no root-prefix filter — caller is
+        // responsible for supplying only the paths they want processed).
         let existing: HashMap<String, String> = db
             .get_all_document_hashes()?
             .into_iter()
-            .filter(|(path, _)| path == &root_norm || path.starts_with(&root_prefix))
             .collect();
-
-        // 3. Build normalised-path set for detecting removals.
-        let discovered_paths: std::collections::HashSet<String> = discovered
-            .iter()
-            .filter_map(|p| normalise_path(p))
-            .collect();
-
-        // 4. Handle removals.
-        for db_path in existing.keys() {
-            if !discovered_paths.contains(db_path.as_str()) {
-                if dry_run {
-                    report.removed.push(PathBuf::from(db_path));
-                } else {
-                    match db.delete_document(db_path) {
-                        Ok(_) => report.removed.push(PathBuf::from(db_path)),
-                        Err(e) => report.errors.push((PathBuf::from(db_path), e.to_string())),
-                    }
-                }
-            }
-        }
 
         // ── Phase A: Parallel collect ─────────────────────────────────────
         // Read each file exactly once: hash from in-memory bytes, chunk in parallel.
@@ -219,7 +181,7 @@ impl Indexer {
             Error(PathBuf, String),
         }
 
-        let collect_results: Vec<CollectResult> = discovered
+        let collect_results: Vec<CollectResult> = paths
             .par_iter()
             .map(|path| {
                 let norm = match normalise_path(path) {
@@ -432,6 +394,81 @@ impl Indexer {
         }
 
         report.elapsed = start.elapsed();
+        Ok(report)
+    }
+
+    /// Index all `.md` files under `root` (recursively unless `recursive==false`).
+    ///
+    /// When `force` is true, all files are re-indexed regardless of hash.
+    /// When `dry_run` is true, no writes are made to the database.
+    /// `on_progress` is an optional callback invoked with (fraction 0.0–1.0, message).
+    ///
+    /// Three-phase pipeline for large corpora:
+    ///   Phase A — parallel collect: read once, hash from bytes, chunk (rayon)
+    ///   Phase B — cross-file embedding: flat batch across all files (full EMBED_BATCH_SIZE batches)
+    ///   Phase C — single-transaction write: one BEGIN/COMMIT for all files
+    pub fn index_path(
+        &self,
+        db: &Database,
+        root: &Path,
+        recursive: bool,
+        force: bool,
+        dry_run: bool,
+        on_progress: Option<Box<dyn Fn(f32, &str) + Send + Sync>>,
+    ) -> Result<IndexReport> {
+        let start = Instant::now();
+
+        // 1. Discover .md files (with a spinner).
+        let discover_spinner = make_spinner_or_hidden("Discovering markdown files…", on_progress.is_some());
+        let discovered = discover_markdown_files(root, recursive);
+        discover_spinner.finish_and_clear();
+        match &on_progress {
+            None => eprintln!(
+                "{}  {} files found",
+                style("✓").green().bold(),
+                style(discovered.len().to_string()).bold(),
+            ),
+            Some(cb) => cb(0.0, "Scanning files…"),
+        }
+
+        // 2. Load existing hashes from DB, filtered to documents under this root.
+        let root_norm = normalise_path(root).unwrap_or_default();
+        let root_prefix = format!("{root_norm}/");
+        let existing: HashMap<String, String> = db
+            .get_all_document_hashes()?
+            .into_iter()
+            .filter(|(path, _)| path == &root_norm || path.starts_with(&root_prefix))
+            .collect();
+
+        // 3. Build normalised-path set for detecting removals.
+        let discovered_paths: std::collections::HashSet<String> = discovered
+            .iter()
+            .filter_map(|p| normalise_path(p))
+            .collect();
+
+        // 4. Handle removals (before delegating to index_files so the DB is clean).
+        let mut removal_report = IndexReport::default();
+        for db_path in existing.keys() {
+            if !discovered_paths.contains(db_path.as_str()) {
+                if dry_run {
+                    removal_report.removed.push(PathBuf::from(db_path));
+                } else {
+                    match db.delete_document(db_path) {
+                        Ok(_) => removal_report.removed.push(PathBuf::from(db_path)),
+                        Err(e) => removal_report.errors.push((PathBuf::from(db_path), e.to_string())),
+                    }
+                }
+            }
+        }
+
+        // 5. Delegate Phase A → B → C to index_files.
+        let mut report = self.index_files(db, &discovered, force, dry_run, on_progress)?;
+
+        // 6. Merge removals into the final report.
+        report.removed = removal_report.removed;
+        report.errors.extend(removal_report.errors);
+        report.elapsed = start.elapsed();
+
         Ok(report)
     }
 }

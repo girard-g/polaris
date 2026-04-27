@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::config::{IndexOpts, SearchOpts};
 use crate::db::{ChunkRecord, Database, DbStats, SearchResult};
@@ -130,6 +131,55 @@ impl Bank {
             PolarisError::Indexing(format!("invalid path: {}", rel_path.display()))
         })?;
         db.get_chunks_for_document(&norm)
+    }
+
+    /// Index a precomputed delta (typically from a git diff).
+    ///
+    /// `changed` paths are added or modified; `removed` paths are deleted from the index.
+    /// The caller is responsible for filtering paths (e.g. to `.md` files only).
+    /// Skips the filesystem walk performed by [`Bank::index_path`]; used by git-driven
+    /// sync to avoid re-walking the whole corpus on each pull.
+    pub fn index_diff(
+        &self,
+        changed: &[PathBuf],
+        removed: &[PathBuf],
+    ) -> Result<IndexReport> {
+        let started = Instant::now();
+        let db = self.inner.db.lock().expect("bank db poisoned");
+        let mut report = IndexReport::default();
+
+        // 1. Removals: delete each document (cascades chunks + FTS + vec_chunks).
+        for path in removed {
+            let norm = match crate::indexer::normalise_path(path) {
+                Some(n) => n,
+                None => {
+                    report.errors.push((
+                        path.clone(),
+                        format!("non-UTF-8 path: {}", path.display()),
+                    ));
+                    continue;
+                }
+            };
+            match db.delete_document(&norm) {
+                Ok(_) => report.removed.push(path.clone()),
+                Err(e) => report.errors.push((path.clone(), e.to_string())),
+            }
+        }
+
+        // 2. Changed files: delegate to index_files (preserves cross-file batching).
+        if !changed.is_empty() {
+            let sub = self.inner.indexer.index_files(&db, changed, false, false, None)?;
+            // Merge sub-report, preserving our own `removed` list.
+            report.added.extend(sub.added);
+            report.modified.extend(sub.modified);
+            report.unchanged.extend(sub.unchanged);
+            report.errors.extend(sub.errors);
+            report.total_chunks += sub.total_chunks;
+            report.total_bytes += sub.total_bytes;
+        }
+
+        report.elapsed = started.elapsed();
+        Ok(report)
     }
 
     /// Configured repo root.

@@ -4,7 +4,9 @@
 //! for design rationale.
 
 pub mod db;
+pub mod embedding;
 pub mod error;
 
 pub use db::{Database, SearchResult, register_vec_extension};
+pub use embedding::{EmbeddingEngine, native_dim_for};
 pub use error::{PolarisError, Result};

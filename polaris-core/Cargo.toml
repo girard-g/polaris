@@ -27,6 +27,8 @@ dirs = "5"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 rayon = "1"
+console = "0.15"
+indicatif = "0.17"
 tracing = { workspace = true }
 
 [dev-dependencies]

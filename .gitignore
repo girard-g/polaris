@@ -4,3 +4,4 @@ polaris.db-shm
 polaris.db-wal
 .fastembed_cache/
 .mcp.json
+docs/superpowers/

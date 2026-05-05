@@ -149,6 +149,7 @@ mod shared_embedding_tests {
     use super::*;
 
     #[test]
+    #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
     fn shared_embedding_clone_does_not_reload() {
         // Loading the model is expensive; cloning a SharedEmbedding must be cheap.
         let a = SharedEmbedding::load("nomic-embed-text-v1.5", 64).expect("load");

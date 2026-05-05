@@ -3,6 +3,7 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+#[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
 fn index_diff_handles_added_modified_removed() {
     let tmp = TempDir::new().unwrap();
     let docs = tmp.path().join("docs");

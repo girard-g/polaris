@@ -42,8 +42,6 @@ let results = bank.search("how does chunking work", SearchOpts { top_k: 5 })?;
 For multi-bank searches with score fusion, use `BankSet`. For incremental
 updates after a git pull, use `Bank::index_diff(&changed, &removed)`.
 
-See [`docs/superpowers/specs/2026-04-26-polaris-core-crate-extraction.md`](docs/superpowers/specs/2026-04-26-polaris-core-crate-extraction.md) for design rationale.
-
 ## Install
 
 ```bash

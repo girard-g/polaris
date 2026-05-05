@@ -17,6 +17,7 @@ fn make_fixture(dir: &std::path::Path) {
 }
 
 #[test]
+#[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
 fn bank_open_index_search_roundtrip() {
     let tmp = TempDir::new().unwrap();
     make_fixture(tmp.path());

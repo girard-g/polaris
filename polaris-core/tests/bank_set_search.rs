@@ -3,6 +3,7 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+#[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
 fn bank_set_search_returns_attributed_results() {
     let tmp = TempDir::new().unwrap();
 

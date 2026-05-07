@@ -194,6 +194,90 @@ pub fn ensure_gitignore_entries(existing: Option<&str>) -> GitignoreReport {
     }
 }
 
+/// Compute the agent-instruction-file update for one of `CLAUDE.md` /
+/// `AGENTS.md` / `GEMINI.md`.
+///
+/// `existing` is the current file content, or `None` if the file is absent.
+///
+/// Marker matching is substring-based on the literal strings
+/// `<!-- polaris:begin -->` and `<!-- polaris:end -->` (case-sensitive).
+/// On a malformed marker layout the function returns `Err(PolarisError::Setup(_))`
+/// — the caller is expected to abort the run and let the user fix the file.
+pub fn merge_agent_instructions(existing: Option<&str>) -> Result<AgentReport> {
+    const BEGIN: &str = "<!-- polaris:begin -->";
+    const END: &str = "<!-- polaris:end -->";
+
+    let Some(text) = existing else {
+        return Ok(AgentReport {
+            new_content: Some(POLARIS_BLOCK.to_string()),
+            action: AgentAction::Created,
+        });
+    };
+
+    let begin_count = text.matches(BEGIN).count();
+    let end_count = text.matches(END).count();
+
+    match (begin_count, end_count) {
+        (0, 0) => {
+            // No markers — append the block after exactly one blank line.
+            let mut new_content = String::with_capacity(text.len() + POLARIS_BLOCK.len() + 2);
+            new_content.push_str(text);
+            if !new_content.ends_with('\n') {
+                new_content.push('\n');
+            }
+            new_content.push('\n');
+            new_content.push_str(POLARIS_BLOCK);
+            Ok(AgentReport {
+                new_content: Some(new_content),
+                action: AgentAction::Updated,
+            })
+        }
+        (1, 1) => {
+            let begin = text.find(BEGIN).expect("count == 1");
+            let end = text.find(END).expect("count == 1");
+            if end < begin {
+                return Err(PolarisError::Setup(
+                    "polaris:end appears before polaris:begin; refusing to auto-repair".into(),
+                ));
+            }
+            // Replace [begin .. after-end-marker) with POLARIS_BLOCK. Consume one
+            // trailing newline if present so the replacement's own trailing
+            // newline doesn't double up — keeps the round-trip Unchanged-stable.
+            let mut block_end = end + END.len();
+            if text[block_end..].starts_with('\n') {
+                block_end += 1;
+            }
+            let mut new_content = String::with_capacity(text.len() + POLARIS_BLOCK.len());
+            new_content.push_str(&text[..begin]);
+            new_content.push_str(POLARIS_BLOCK);
+            new_content.push_str(&text[block_end..]);
+            if new_content == text {
+                return Ok(AgentReport {
+                    new_content: None,
+                    action: AgentAction::Unchanged,
+                });
+            }
+            Ok(AgentReport {
+                new_content: Some(new_content),
+                action: AgentAction::Updated,
+            })
+        }
+        (b, _) if b > 1 => Err(PolarisError::Setup(format!(
+            "found {b} polaris:begin markers; refusing to auto-repair"
+        ))),
+        (_, e) if e > 1 => Err(PolarisError::Setup(format!(
+            "found {e} polaris:end markers; refusing to auto-repair"
+        ))),
+        (1, 0) => Err(PolarisError::Setup(
+            "polaris:begin marker is unclosed; refusing to auto-repair".into(),
+        )),
+        (0, 1) => Err(PolarisError::Setup(
+            "polaris:end marker has no matching polaris:begin; refusing to auto-repair".into(),
+        )),
+        _ => unreachable!("all (begin_count, end_count) cases covered above"),
+    }
+}
+
 /// Entry point for the `setup` command.
 pub fn run(path: &Path) -> Result<()> {
     use console::style;
@@ -352,6 +436,105 @@ mod tests {
         let existing = "# polaris.db\n";
         let report = ensure_gitignore_entries(Some(existing));
         assert!(report.added.contains(&"polaris.db"));
+    }
+
+    #[test]
+    fn agent_block_creates_when_absent() {
+        let report = merge_agent_instructions(None).unwrap();
+        assert_eq!(report.action, AgentAction::Created);
+        let content = report.new_content.expect("should write new file");
+        assert_eq!(content, POLARIS_BLOCK);
+    }
+
+    #[test]
+    fn agent_block_appends_when_no_marker() {
+        let existing = "# Project rules\n\nWe use Rust 2024 edition.\n";
+        let report = merge_agent_instructions(Some(existing)).unwrap();
+        assert_eq!(report.action, AgentAction::Updated);
+        let content = report.new_content.expect("should rewrite");
+        // Original content preserved verbatim at the top.
+        assert!(content.starts_with(existing));
+        // Exactly one blank line between original content and the block.
+        let suffix = &content[existing.len()..];
+        assert_eq!(suffix, format!("\n{POLARIS_BLOCK}"));
+    }
+
+    #[test]
+    fn agent_block_appends_when_no_marker_and_no_trailing_newline() {
+        let existing = "# Rules"; // no trailing newline
+        let report = merge_agent_instructions(Some(existing)).unwrap();
+        let content = report.new_content.expect("should rewrite");
+        // Normalised to end in newline before the blank-line separator.
+        assert_eq!(content, format!("# Rules\n\n{POLARIS_BLOCK}"));
+    }
+
+    #[test]
+    fn agent_block_replaces_stale_marker() {
+        let existing = "\
+# Project rules
+
+<!-- polaris:begin -->
+old stale instructions
+<!-- polaris:end -->
+
+## More rules
+end of file
+";
+        let report = merge_agent_instructions(Some(existing)).unwrap();
+        assert_eq!(report.action, AgentAction::Updated);
+        let content = report.new_content.expect("should rewrite");
+        // Content above the markers is preserved.
+        assert!(content.starts_with("# Project rules\n\n"));
+        // Canonical block replaces the marker range.
+        assert!(content.contains(POLARIS_BLOCK.trim_end_matches('\n')));
+        // Content below the markers is preserved.
+        assert!(content.ends_with("## More rules\nend of file\n"));
+        // Stale text is gone.
+        assert!(!content.contains("old stale instructions"));
+    }
+
+    #[test]
+    fn agent_block_unchanged_when_current() {
+        let existing = format!("# Header\n\n{POLARIS_BLOCK}");
+        let report = merge_agent_instructions(Some(&existing)).unwrap();
+        assert_eq!(report.action, AgentAction::Unchanged);
+        assert!(report.new_content.is_none());
+    }
+
+    #[test]
+    fn agent_block_errors_on_two_begin_markers() {
+        let existing = "\
+<!-- polaris:begin -->
+first
+<!-- polaris:end -->
+
+<!-- polaris:begin -->
+second
+<!-- polaris:end -->
+";
+        let result = merge_agent_instructions(Some(existing));
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
+    }
+
+    #[test]
+    fn agent_block_errors_on_orphan_end_marker() {
+        let existing = "trailing junk\n<!-- polaris:end -->\n";
+        let result = merge_agent_instructions(Some(existing));
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
+    }
+
+    #[test]
+    fn agent_block_errors_on_unclosed_marker() {
+        let existing = "<!-- polaris:begin -->\noops no end\n";
+        let result = merge_agent_instructions(Some(existing));
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
+    }
+
+    #[test]
+    fn agent_block_errors_when_end_appears_before_begin() {
+        let existing = "<!-- polaris:end -->\nstuff\n<!-- polaris:begin -->\n";
+        let result = merge_agent_instructions(Some(existing));
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
     use std::path::PathBuf;

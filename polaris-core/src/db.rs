@@ -6,12 +6,39 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{PolarisError, Result};
 
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 
 pub struct Database {
     conn: Connection,
     embedding_dim: usize,
     pub model_id: String,
+}
+
+/// Source tag for a `search_log` row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogSource {
+    Cli,
+    Mcp,
+}
+
+impl LogSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LogSource::Cli => "cli",
+            LogSource::Mcp => "mcp",
+        }
+    }
+}
+
+impl std::str::FromStr for LogSource {
+    type Err = ();
+    fn from_str(s: &str) -> std::result::Result<Self, ()> {
+        match s {
+            "cli" => Ok(LogSource::Cli),
+            "mcp" => Ok(LogSource::Mcp),
+            _ => Err(()),
+        }
+    }
 }
 
 /// A document row as stored in the `documents` table.
@@ -229,6 +256,19 @@ impl Database {
         if version.as_deref() == Some("1") {
             self.migrate_v1_to_v2()?;
         }
+
+        let version: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if version.as_deref() == Some("2") {
+            self.migrate_v2_to_v3()?;
+        }
         Ok(())
     }
 
@@ -248,6 +288,26 @@ impl Database {
         // Update schema version.
         self.conn.execute(
             "UPDATE metadata SET value='2' WHERE key='schema_version'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn migrate_v2_to_v3(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS search_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts              INTEGER NOT NULL,
+                source          TEXT    NOT NULL,
+                query           TEXT    NOT NULL,
+                top_k           INTEGER NOT NULL,
+                result_bytes    INTEGER NOT NULL,
+                baseline_bytes  INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_search_log_ts ON search_log(ts);",
+        )?;
+        self.conn.execute(
+            "UPDATE metadata SET value='3' WHERE key='schema_version'",
             [],
         )?;
         Ok(())
@@ -283,6 +343,18 @@ impl Database {
                 content, heading_context,
                 content='chunks', content_rowid='id'
             );
+
+            CREATE TABLE search_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts              INTEGER NOT NULL,
+                source          TEXT    NOT NULL,
+                query           TEXT    NOT NULL,
+                top_k           INTEGER NOT NULL,
+                result_bytes    INTEGER NOT NULL,
+                baseline_bytes  INTEGER NOT NULL
+            );
+
+            CREATE INDEX idx_search_log_ts ON search_log(ts);
         ")?;
 
         // The vec0 table dimension is baked in, so we create it dynamically.
@@ -1208,6 +1280,71 @@ mod tests {
         // After migration, the pre-existing chunk should be findable via BM25.
         let results = db.search_bm25("migration_test_token", 5).unwrap();
         assert_eq!(results.len(), 1, "backfilled chunk should be found after migration");
+    }
+
+    #[test]
+    fn migration_v2_to_v3_creates_search_log() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v2_to_v3.db");
+
+        // Simulate a v2 database: full v2 schema, schema_version='2', no search_log table.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            conn.execute_batch("
+                CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    content_hash TEXT NOT NULL,
+                    title TEXT,
+                    indexed_at TEXT NOT NULL,
+                    file_size INTEGER NOT NULL
+                );
+                CREATE TABLE chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    content TEXT NOT NULL,
+                    heading_context TEXT NOT NULL DEFAULT '',
+                    start_byte INTEGER NOT NULL,
+                    end_byte INTEGER NOT NULL,
+                    chunk_index INTEGER NOT NULL
+                );
+                CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                    content, heading_context,
+                    content='chunks', content_rowid='id'
+                );
+            ").unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE vec_chunks USING vec0(
+                    chunk_id INTEGER PRIMARY KEY,
+                    embedding float[4] distance_metric=cosine
+                );"
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES
+                    ('schema_version', '2'),
+                    ('embedding_dim',  '4'),
+                    ('model_id',       'test')",
+                [],
+            ).unwrap();
+        }
+
+        // Open with our Database — should trigger v2→v3 migration.
+        let db = Database::open(&db_path, 4, "test").unwrap();
+
+        // search_log table should exist after migration.
+        let count: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM search_log", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
+
+        // schema_version metadata should now be '3'.
+        let version: String = db.conn.query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(version, "3");
     }
 
     // -----------------------------------------------------------------------

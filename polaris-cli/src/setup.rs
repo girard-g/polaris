@@ -14,6 +14,21 @@ const GITIGNORE_ENTRIES: &[&str] = &[
     ".mcp.json",
 ];
 
+/// Filenames in the project root that receive the Polaris instruction block,
+/// in the order `setup` processes them.
+const AGENT_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md", "GEMINI.md"];
+
+/// The canonical Polaris MCP instruction block, including its marker pair.
+/// The block ends with a single trailing newline so callers can append it
+/// directly without further normalisation.
+const POLARIS_BLOCK: &str = "\
+<!-- polaris:begin -->
+## Polaris MCP
+
+This project ships a Polaris MCP server (`polaris serve`) that semantic-searches the docs in this repo. Prefer the `polaris.search` tool over grep/read for any question about the project's documentation, behaviour, or architecture — it returns ranked, section-aware chunks and is typically 10-40× cheaper in tokens. Start with top_k=2; raise only if recall is poor. Use `polaris.index` to add or refresh files, `polaris.status` to check index health.
+<!-- polaris:end -->
+";
+
 /// Result of computing a `.gitignore` update.
 #[derive(Debug, PartialEq, Eq)]
 pub struct GitignoreReport {
@@ -43,6 +58,26 @@ pub struct McpReport {
     pub new_content: Option<String>,
     /// Action taken.
     pub action: McpAction,
+}
+
+/// What kind of agent-instruction-file change happened.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AgentAction {
+    /// File didn't exist; we'll create it.
+    Created,
+    /// File existed; the polaris block was added or replaced.
+    Updated,
+    /// File existed and the polaris block already matched; no rewrite needed.
+    Unchanged,
+}
+
+/// Result of computing an agent-instruction-file update.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AgentReport {
+    /// New file content to write, or `None` if no rewrite is needed.
+    pub new_content: Option<String>,
+    /// Action taken.
+    pub action: AgentAction,
 }
 
 /// Compute the .mcp.json update for the polaris entry.

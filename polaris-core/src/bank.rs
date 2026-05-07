@@ -172,6 +172,23 @@ impl Bank {
         engine.search_raw(query, opts.top_k)
     }
 
+    /// Append one row to the search log.
+    ///
+    /// Used by the CLI and MCP server to record per-search counters.
+    /// Library users who do not need savings tracking can ignore this method.
+    pub fn log_search(
+        &self,
+        source: crate::db::LogSource,
+        query: &str,
+        top_k: usize,
+        result_bytes: usize,
+        baseline_bytes: usize,
+        ts: i64,
+    ) -> Result<()> {
+        let db = self.inner.db.lock().expect("bank db poisoned");
+        db.insert_search_log(ts, source, query, top_k, result_bytes, baseline_bytes)
+    }
+
     fn engine<'a>(&'a self, db: &'a Database) -> SearchEngine<'a> {
         SearchEngine::new(
             self.inner.indexer.embedding_engine(),
@@ -319,5 +336,40 @@ impl BankSet {
         let _ = &self.embed;
 
         Ok(all_results)
+    }
+}
+
+#[cfg(test)]
+mod tests_log_search {
+    use super::*;
+    use crate::db::LogSource;
+
+    #[test]
+    #[ignore = "Bank::open requires SharedEmbedding which downloads a ~137 MB ONNX model"]
+    fn bank_log_search_inserts_row_visible_via_aggregate() {
+        crate::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = dir.path().join("bank.db");
+
+        let embed = crate::embedding::SharedEmbedding::load("nomic-embed-text-v1.5", 64).unwrap();
+        let bank = Bank::open(
+            BankConfig {
+                repo_root: dir.path().to_path_buf(),
+                index_path: index_path.clone(),
+                embedding_dim: 64,
+                model_id: "nomic-embed-text-v1.5".into(),
+                ..Default::default()
+            },
+            embed,
+        ).unwrap();
+
+        bank.log_search(LogSource::Cli, "q", 5, 200, 5_000, 1_700_000_000).unwrap();
+
+        // Re-open the underlying DB to check the row landed.
+        let db = crate::db::Database::open(&index_path, 64, "nomic-embed-text-v1.5").unwrap();
+        let agg = db.aggregate_savings().unwrap();
+        assert_eq!(agg.total_searches, 1);
+        assert_eq!(agg.total_result_bytes, 200);
+        assert_eq!(agg.total_baseline_bytes, 5_000);
     }
 }

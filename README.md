@@ -16,6 +16,8 @@ For documentation questions, calling the Polaris MCP `search` tool is dramatical
 
 Estimates use ~4 chars/token. Accuracy actually improves with the focused query: the top-ranked chunk is the canonical *Embedding Pipeline* section instead of the generic overview.
 
+Run `polaris savings` to see your own cumulative number once you've made some queries.
+
 The MCP server's tool descriptions and server `instructions` brief calling agents on these patterns (use specific domain terms, start at `top_k=2`), so a well-behaved client picks them up automatically.
 
 ```bash
@@ -117,6 +119,16 @@ DB size    : 2.2 KB
 Embed dim  : 512
 Last index : 2026-02-26T14:41:28Z
 ```
+
+### Savings
+
+```bash
+polaris savings              # cumulative summary
+polaris savings --history    # per-query log (newest first)
+polaris savings --output json
+```
+
+Reports the cumulative tokens you've saved by going through Polaris instead of `grep + read`. The baseline for each query is the total content of the unique files in the result set — i.e., what an agent without Polaris would have opened after grepping. Tokens are estimated at ~4 chars/token.
 
 ### MCP Server
 

@@ -20,6 +20,9 @@ pub enum PolarisError {
     #[error("MCP error: {0}")]
     Mcp(String),
 
+    #[error("Setup error: {0}")]
+    Setup(String),
+
     #[error("Dimension mismatch: database has dim={db_dim}, config has dim={config_dim}")]
     DimensionMismatch { db_dim: usize, config_dim: usize },
 

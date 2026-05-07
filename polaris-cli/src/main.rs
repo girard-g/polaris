@@ -1,4 +1,5 @@
 mod mcp;
+mod setup;
 mod tui;
 
 use std::path::PathBuf;
@@ -106,6 +107,12 @@ enum Command {
         /// Path to the indexed file
         path: PathBuf,
     },
+
+    /// Configure the current project to use polaris (writes .mcp.json, updates .gitignore)
+    Setup {
+        /// Project directory (defaults to current working directory)
+        path: Option<PathBuf>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +170,10 @@ async fn run(cli: Cli) -> Result<()> {
             cmd_watch(cfg, &paths, !no_recursive).await
         }
         Command::Chunks { path } => cmd_chunks(cfg, &path).await,
+        Command::Setup { path } => {
+            let target = path.unwrap_or_else(|| std::path::PathBuf::from("."));
+            setup::run(&target)
+        }
     }
 }
 

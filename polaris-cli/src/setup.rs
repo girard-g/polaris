@@ -25,6 +25,85 @@ pub struct GitignoreReport {
     pub already_present: Vec<&'static str>,
 }
 
+/// What kind of mcp.json change happened.
+#[derive(Debug, PartialEq, Eq)]
+pub enum McpAction {
+    /// File didn't exist; we'll create it.
+    Created,
+    /// File existed; the polaris entry was added or replaced.
+    Updated,
+    /// File existed and the polaris entry already matched; no rewrite needed.
+    Unchanged,
+}
+
+/// Result of computing an `.mcp.json` update.
+#[derive(Debug, PartialEq, Eq)]
+pub struct McpReport {
+    /// New file content to write, or `None` if no rewrite is needed.
+    pub new_content: Option<String>,
+    /// Action taken.
+    pub action: McpAction,
+}
+
+/// Compute the .mcp.json update for the polaris entry.
+///
+/// `existing` is the current file content (or `None` if absent). `binary_path`
+/// is the absolute path written into `mcpServers.polaris.command`.
+pub fn merge_mcp_json(existing: Option<&str>, binary_path: &Path) -> Result<McpReport> {
+    use serde_json::{json, Map, Value};
+
+    let polaris_entry = json!({
+        "command": binary_path.to_string_lossy(),
+        "args": ["serve"],
+    });
+
+    let (mut root, action) = match existing {
+        None => (Map::new(), McpAction::Created),
+        Some(text) => {
+            let parsed: Value = serde_json::from_str(text)
+                .map_err(|e| PolarisError::Setup(format!("invalid JSON in .mcp.json: {e}")))?;
+            let Value::Object(map) = parsed else {
+                return Err(PolarisError::Setup(
+                    "expected top-level object in .mcp.json".into(),
+                ));
+            };
+            (map, McpAction::Updated)
+        }
+    };
+
+    // Ensure `mcpServers` is an object.
+    let servers_value = root.entry("mcpServers".to_string()).or_insert_with(|| json!({}));
+    let Value::Object(servers) = servers_value else {
+        return Err(PolarisError::Setup(
+            "expected `mcpServers` to be an object".into(),
+        ));
+    };
+    servers.insert("polaris".to_string(), polaris_entry);
+
+    let new_content_str = serde_json::to_string_pretty(&Value::Object(root))
+        .map_err(|e| PolarisError::Setup(format!("failed to serialize .mcp.json: {e}")))?;
+
+    // Decide whether anything actually changed.
+    if let Some(text) = existing {
+        // Normalize both sides via parse → serialize so whitespace/key-order
+        // differences don't trigger spurious rewrites.
+        let normalized_existing = serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|v| serde_json::to_string_pretty(&v).ok());
+        if normalized_existing.as_deref() == Some(new_content_str.as_str()) {
+            return Ok(McpReport {
+                new_content: None,
+                action: McpAction::Unchanged,
+            });
+        }
+    }
+
+    Ok(McpReport {
+        new_content: Some(new_content_str + "\n"),
+        action,
+    })
+}
+
 /// Compute the .gitignore update for the polaris entries.
 ///
 /// `existing` is the current file content, or `None` if the file is absent.
@@ -143,5 +222,83 @@ mod tests {
         let existing = "# polaris.db\n";
         let report = ensure_gitignore_entries(Some(existing));
         assert!(report.added.contains(&"polaris.db"));
+    }
+
+    use std::path::PathBuf;
+
+    fn bin() -> PathBuf {
+        PathBuf::from("/usr/local/bin/polaris")
+    }
+
+    #[test]
+    fn mcp_creates_when_absent() {
+        let report = merge_mcp_json(None, &bin()).unwrap();
+        assert_eq!(report.action, McpAction::Created);
+        let content = report.new_content.expect("should write");
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            parsed["mcpServers"]["polaris"]["command"],
+            "/usr/local/bin/polaris"
+        );
+        assert_eq!(parsed["mcpServers"]["polaris"]["args"], serde_json::json!(["serve"]));
+    }
+
+    #[test]
+    fn mcp_preserves_other_servers() {
+        let existing = r#"{
+  "mcpServers": {
+    "other": { "command": "/usr/bin/other", "args": [] }
+  }
+}"#;
+        let report = merge_mcp_json(Some(existing), &bin()).unwrap();
+        assert_eq!(report.action, McpAction::Updated);
+        let content = report.new_content.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["mcpServers"]["other"]["command"], "/usr/bin/other");
+        assert_eq!(
+            parsed["mcpServers"]["polaris"]["command"],
+            "/usr/local/bin/polaris"
+        );
+    }
+
+    #[test]
+    fn mcp_replaces_stale_polaris_entry() {
+        let existing = r#"{
+  "mcpServers": {
+    "polaris": {
+      "command": "/old/path/polaris",
+      "args": ["serve"]
+    }
+  }
+}"#;
+        let report = merge_mcp_json(Some(existing), &bin()).unwrap();
+        assert_eq!(report.action, McpAction::Updated);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&report.new_content.unwrap()).unwrap();
+        assert_eq!(
+            parsed["mcpServers"]["polaris"]["command"],
+            "/usr/local/bin/polaris"
+        );
+    }
+
+    #[test]
+    fn mcp_unchanged_when_already_current() {
+        // First call to seed the canonical content, then re-run the merge on it.
+        let first = merge_mcp_json(None, &bin()).unwrap().new_content.unwrap();
+        let report = merge_mcp_json(Some(&first), &bin()).unwrap();
+        assert_eq!(report.action, McpAction::Unchanged);
+        assert!(report.new_content.is_none());
+    }
+
+    #[test]
+    fn mcp_errors_on_invalid_json() {
+        let result = merge_mcp_json(Some("not json {"), &bin());
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
+    }
+
+    #[test]
+    fn mcp_errors_when_top_level_is_not_object() {
+        let result = merge_mcp_json(Some("[1, 2, 3]"), &bin());
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 }

@@ -88,17 +88,37 @@ impl PolarisServer {
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let config = Arc::clone(&self.state.config);
         let top_k = (params.top_k.unwrap_or(5) as usize).min(config.max_top_k);
-        let query = params.query;
+        let query = params.query.clone();
         let bank = self.state.bank.clone();
+        let repo_root = bank.repo_root().to_path_buf();
 
-        let result = tokio::task::spawn_blocking(move || {
-            match bank.search(&query, polaris_core::SearchOpts { top_k }) {
-                Ok(results) => SearchEngine::format_results(&results),
-                Err(e) => format!("Error: {e}"),
-            }
+        // Run the synchronous search on a blocking thread; capture the raw result
+        // set so we can feed it both into the formatter (returned to the client)
+        // and into the savings log writer.
+        let bank_for_search = bank.clone();
+        let query_for_search = query.clone();
+        let search_outcome = tokio::task::spawn_blocking(move || {
+            bank_for_search.search(&query_for_search, polaris_core::SearchOpts { top_k })
         }).await;
 
-        result.unwrap_or_else(|e| format!("Error: task failed: {e}"))
+        let results = match search_outcome {
+            Ok(Ok(results)) => results,
+            Ok(Err(e)) => return format!("Error: {e}"),
+            Err(e) => return format!("Error: task failed: {e}"),
+        };
+
+        let formatted = SearchEngine::format_results(&results);
+
+        let _handle = crate::savings::spawn_search_log(
+            bank,
+            repo_root,
+            polaris_core::db::LogSource::Mcp,
+            query,
+            top_k,
+            &results,
+        );
+
+        formatted
     }
 
     /// Index markdown files from a directory or file path.

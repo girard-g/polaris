@@ -209,6 +209,9 @@ pub fn run(path: &Path) -> Result<()> {
                 binary_path.display(),
             );
         }
+        // `Unchanged` is only produced with `new_content: None`, but the
+        // compiler can't prove that — fold the impossible (Some, Unchanged)
+        // case into the no-op arm rather than panicking with unreachable!().
         (None, _) | (Some(_), McpAction::Unchanged) => {
             println!("  {}  .mcp.json already configured", style("✓").green());
         }

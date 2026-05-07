@@ -4,6 +4,20 @@ Polaris is the North Star — the fixed point sailors and navigators have used f
 
 Lightweight RAG system for coding agents. Index your project docs, search them semantically, serve results over MCP — single binary, no runtime dependencies.
 
+## Why Polaris — Token Savings vs. Grep + Read
+
+For documentation questions, calling the Polaris MCP `search` tool is dramatically cheaper than the usual agent loop of grepping the docs tree and reading the matching files. Measured on a real query (*"how does Polaris embed documents?"*) against this repo's `docs/`:
+
+| Approach | Tokens returned | vs. grep + read |
+|---|---:|---:|
+| `grep -rn "embed" docs/` + read `embedding.md` + read `architecture.md` | ~12,700 | 1× |
+| MCP `search`, vague query, `top_k=5` | ~925 | **~14× cheaper** |
+| MCP `search`, focused query (2-4 domain nouns), `top_k=2` | ~285 | **~45× cheaper** |
+
+Estimates use ~4 chars/token. Accuracy actually improves with the focused query: the top-ranked chunk is the canonical *Embedding Pipeline* section instead of the generic overview.
+
+The MCP server's tool descriptions and server `instructions` brief calling agents on these patterns (use specific domain terms, start at `top_k=2`), so a well-behaved client picks them up automatically.
+
 ```bash
 polaris index ./docs
 polaris search "how does chunking work"

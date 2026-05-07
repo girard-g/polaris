@@ -107,6 +107,18 @@ pub struct Bm25Result {
     pub bm25_rank: usize,
 }
 
+/// A single row from the `search_log` table.
+#[derive(Debug, Clone)]
+pub struct SearchLogRow {
+    pub id: i64,
+    pub ts: i64,
+    pub source: LogSource,
+    pub query: String,
+    pub top_k: usize,
+    pub result_bytes: usize,
+    pub baseline_bytes: usize,
+}
+
 /// Database statistics.
 pub struct DbStats {
     pub doc_count: usize,
@@ -784,6 +796,55 @@ impl Database {
         })
     }
 
+    /// Append one row to the `search_log` table.
+    pub fn insert_search_log(
+        &self,
+        ts: i64,
+        source: LogSource,
+        query: &str,
+        top_k: usize,
+        result_bytes: usize,
+        baseline_bytes: usize,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO search_log (ts, source, query, top_k, result_bytes, baseline_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                ts,
+                source.as_str(),
+                query,
+                top_k as i64,
+                result_bytes as i64,
+                baseline_bytes as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Return the most recent `limit` rows from `search_log`, newest first.
+    pub fn recent_search_log(&self, limit: usize) -> Result<Vec<SearchLogRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, source, query, top_k, result_bytes, baseline_bytes
+             FROM search_log
+             ORDER BY ts DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            let source_str: String = r.get(2)?;
+            let source = source_str.parse::<LogSource>().unwrap_or(LogSource::Cli);
+            Ok(SearchLogRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                source,
+                query: r.get(3)?,
+                top_k: r.get::<_, i64>(4)? as usize,
+                result_bytes: r.get::<_, i64>(5)? as usize,
+                baseline_bytes: r.get::<_, i64>(6)? as usize,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
     /// Fetch all chunks for a given document path (for the `polaris chunks` viewer).
     pub fn get_chunks_for_document(&self, path: &str) -> Result<Vec<ChunkRecord>> {
         let mut stmt = self.conn.prepare(
@@ -1448,5 +1509,29 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("other.db"), "source_db value should appear in JSON");
         assert!(json.contains("source_db"), "source_db key should appear when Some");
+    }
+
+    #[test]
+    fn insert_search_log_round_trip() {
+        INIT.call_once(register_vec_extension);
+        let db = Database::open_in_memory(4, "test-model").unwrap();
+
+        db.insert_search_log(
+            1_700_000_000,
+            LogSource::Cli,
+            "how does chunking work",
+            5,
+            300,
+            9_400,
+        ).unwrap();
+
+        let rows = db.recent_search_log(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, LogSource::Cli);
+        assert_eq!(rows[0].query, "how does chunking work");
+        assert_eq!(rows[0].top_k, 5);
+        assert_eq!(rows[0].result_bytes, 300);
+        assert_eq!(rows[0].baseline_bytes, 9_400);
+        assert_eq!(rows[0].ts, 1_700_000_000);
     }
 }

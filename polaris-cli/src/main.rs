@@ -1,5 +1,6 @@
 mod mcp;
 mod setup;
+mod savings;
 mod tui;
 
 use std::path::PathBuf;

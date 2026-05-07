@@ -119,6 +119,32 @@ pub struct SearchLogRow {
     pub baseline_bytes: usize,
 }
 
+/// Per-source counters in a `SavingsAggregate`.
+#[derive(Debug, Clone, Default)]
+pub struct SavingsCounters {
+    pub searches: usize,
+    pub result_bytes: usize,
+    pub baseline_bytes: usize,
+}
+
+/// Per-source breakdown of `SavingsAggregate`.
+#[derive(Debug, Clone, Default)]
+pub struct SavingsBySource {
+    pub cli: SavingsCounters,
+    pub mcp: SavingsCounters,
+}
+
+/// Cumulative savings counters returned by `Database::aggregate_savings`.
+#[derive(Debug, Clone, Default)]
+pub struct SavingsAggregate {
+    pub total_searches: usize,
+    pub total_result_bytes: usize,
+    pub total_baseline_bytes: usize,
+    /// Unix-seconds timestamp of the earliest logged row, or `None` if empty.
+    pub tracking_since_ts: Option<i64>,
+    pub by_source: SavingsBySource,
+}
+
 /// Database statistics.
 pub struct DbStats {
     pub doc_count: usize,
@@ -845,6 +871,46 @@ impl Database {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
+    /// Aggregate `search_log` into a `SavingsAggregate`.
+    pub fn aggregate_savings(&self) -> Result<SavingsAggregate> {
+        let mut agg = SavingsAggregate::default();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT source, COUNT(*), COALESCE(SUM(result_bytes), 0), COALESCE(SUM(baseline_bytes), 0)
+             FROM search_log GROUP BY source",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let source: String = r.get(0)?;
+            let count: i64 = r.get(1)?;
+            let res: i64 = r.get(2)?;
+            let base: i64 = r.get(3)?;
+            Ok((source, count as usize, res as usize, base as usize))
+        })?;
+
+        for row in rows {
+            let (source, count, res, base) = row?;
+            agg.total_searches += count;
+            agg.total_result_bytes += res;
+            agg.total_baseline_bytes += base;
+            let bucket = match source.parse::<LogSource>() {
+                Ok(LogSource::Cli) => &mut agg.by_source.cli,
+                Ok(LogSource::Mcp) => &mut agg.by_source.mcp,
+                Err(()) => continue, // unknown source — skip
+            };
+            bucket.searches = count;
+            bucket.result_bytes = res;
+            bucket.baseline_bytes = base;
+        }
+
+        agg.tracking_since_ts = self
+            .conn
+            .query_row("SELECT MIN(ts) FROM search_log", [], |r| r.get::<_, Option<i64>>(0))
+            .optional()?
+            .flatten();
+
+        Ok(agg)
+    }
+
     /// Fetch all chunks for a given document path (for the `polaris chunks` viewer).
     pub fn get_chunks_for_document(&self, path: &str) -> Result<Vec<ChunkRecord>> {
         let mut stmt = self.conn.prepare(
@@ -1533,5 +1599,40 @@ mod tests {
         assert_eq!(rows[0].result_bytes, 300);
         assert_eq!(rows[0].baseline_bytes, 9_400);
         assert_eq!(rows[0].ts, 1_700_000_000);
+    }
+
+    #[test]
+    fn aggregate_savings_empty_db() {
+        INIT.call_once(register_vec_extension);
+        let db = Database::open_in_memory(4, "test-model").unwrap();
+        let agg = db.aggregate_savings().unwrap();
+        assert_eq!(agg.total_searches, 0);
+        assert_eq!(agg.total_result_bytes, 0);
+        assert_eq!(agg.total_baseline_bytes, 0);
+        assert_eq!(agg.tracking_since_ts, None);
+        assert_eq!(agg.by_source.cli.searches, 0);
+        assert_eq!(agg.by_source.mcp.searches, 0);
+    }
+
+    #[test]
+    fn aggregate_savings_mixed_sources() {
+        INIT.call_once(register_vec_extension);
+        let db = Database::open_in_memory(4, "test-model").unwrap();
+
+        db.insert_search_log(100, LogSource::Cli, "q1", 5, 200, 5_000).unwrap();
+        db.insert_search_log(200, LogSource::Mcp, "q2", 2, 100, 3_000).unwrap();
+        db.insert_search_log(300, LogSource::Mcp, "q3", 3, 150, 4_000).unwrap();
+
+        let agg = db.aggregate_savings().unwrap();
+        assert_eq!(agg.total_searches, 3);
+        assert_eq!(agg.total_result_bytes, 450);
+        assert_eq!(agg.total_baseline_bytes, 12_000);
+        assert_eq!(agg.tracking_since_ts, Some(100));
+        assert_eq!(agg.by_source.cli.searches, 1);
+        assert_eq!(agg.by_source.cli.result_bytes, 200);
+        assert_eq!(agg.by_source.cli.baseline_bytes, 5_000);
+        assert_eq!(agg.by_source.mcp.searches, 2);
+        assert_eq!(agg.by_source.mcp.result_bytes, 250);
+        assert_eq!(agg.by_source.mcp.baseline_bytes, 7_000);
     }
 }

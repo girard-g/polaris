@@ -160,8 +160,100 @@ pub fn ensure_gitignore_entries(existing: Option<&str>) -> GitignoreReport {
 }
 
 /// Entry point for the `setup` command.
-pub fn run(_path: &Path) -> Result<()> {
-    Err(PolarisError::Setup("not yet implemented".into()))
+pub fn run(path: &Path) -> Result<()> {
+    use console::style;
+
+    if !path.exists() {
+        return Err(PolarisError::Setup(format!(
+            "path not found: {}",
+            path.display()
+        )));
+    }
+    if !path.is_dir() {
+        return Err(PolarisError::Setup(format!(
+            "path is not a directory: {}",
+            path.display()
+        )));
+    }
+
+    let binary_path = std::env::current_exe().map_err(|e| {
+        PolarisError::Setup(format!("could not resolve polaris binary path: {e}"))
+    })?;
+
+    println!();
+    println!(
+        "{}  {}",
+        style("polaris").cyan().bold(),
+        style("· setup").dim(),
+    );
+    println!();
+
+    // .mcp.json
+    let mcp_path = path.join(".mcp.json");
+    let existing_mcp = read_optional(&mcp_path)?;
+    let mcp_report = merge_mcp_json(existing_mcp.as_deref(), &binary_path)?;
+    match (&mcp_report.new_content, &mcp_report.action) {
+        (Some(content), McpAction::Created) => {
+            std::fs::write(&mcp_path, content)?;
+            println!(
+                "  {}  Created .mcp.json (polaris → {})",
+                style("✓").green(),
+                binary_path.display(),
+            );
+        }
+        (Some(content), McpAction::Updated) => {
+            std::fs::write(&mcp_path, content)?;
+            println!(
+                "  {}  Updated .mcp.json (polaris → {})",
+                style("✓").green(),
+                binary_path.display(),
+            );
+        }
+        (None, _) | (Some(_), McpAction::Unchanged) => {
+            println!("  {}  .mcp.json already configured", style("✓").green());
+        }
+    }
+
+    // .gitignore
+    let gitignore_path = path.join(".gitignore");
+    let existing_gitignore = read_optional(&gitignore_path)?;
+    let gi_report = ensure_gitignore_entries(existing_gitignore.as_deref());
+    match gi_report.new_content {
+        Some(ref content) if existing_gitignore.is_none() => {
+            std::fs::write(&gitignore_path, content)?;
+            println!(
+                "  {}  Created .gitignore ({} entries)",
+                style("✓").green(),
+                gi_report.added.len(),
+            );
+        }
+        Some(ref content) => {
+            std::fs::write(&gitignore_path, content)?;
+            println!(
+                "  {}  Updated .gitignore (added {}, {} already present)",
+                style("✓").green(),
+                gi_report.added.len(),
+                gi_report.already_present.len(),
+            );
+        }
+        None => {
+            println!(
+                "  {}  .gitignore already up to date",
+                style("✓").green(),
+            );
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+fn read_optional(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(PolarisError::Io(e)),
+    }
 }
 
 #[cfg(test)]
@@ -299,6 +391,53 @@ mod tests {
     #[test]
     fn mcp_errors_when_top_level_is_not_object() {
         let result = merge_mcp_json(Some("[1, 2, 3]"), &bin());
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
+    }
+
+    use tempfile::TempDir;
+
+    #[test]
+    fn run_creates_files_in_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        run(dir.path()).unwrap();
+
+        let mcp = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&mcp).unwrap();
+        assert!(parsed["mcpServers"]["polaris"]["command"].is_string());
+
+        let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        for entry in GITIGNORE_ENTRIES {
+            assert!(gitignore.contains(entry), "missing {entry} in gitignore");
+        }
+    }
+
+    #[test]
+    fn run_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        run(dir.path()).unwrap();
+        let mcp_first = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+        let gi_first = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+
+        run(dir.path()).unwrap();
+        let mcp_second = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+        let gi_second = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+
+        assert_eq!(mcp_first, mcp_second, ".mcp.json should be unchanged on rerun");
+        assert_eq!(gi_first, gi_second, ".gitignore should be unchanged on rerun");
+    }
+
+    #[test]
+    fn run_errors_when_path_missing() {
+        let result = run(Path::new("/this/path/should/not/exist/polaris-test-zzz"));
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
+    }
+
+    #[test]
+    fn run_errors_when_path_is_file() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        let result = run(&file);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 }

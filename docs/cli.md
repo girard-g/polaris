@@ -13,6 +13,43 @@ These flags are accepted before any subcommand:
 
 ## Commands
 
+### `polaris setup [path]`
+
+Configure a project to use Polaris as an MCP server. Writes `.mcp.json` (pointing at the running polaris binary) and ensures the right entries exist in `.gitignore`.
+
+```bash
+polaris setup            # configure current directory
+polaris setup ./my-proj  # configure a specific directory
+```
+
+**Behaviour:**
+
+1. Validates the target path exists and is a directory
+2. Resolves the running binary via `std::env::current_exe()` and writes its absolute path to `.mcp.json` under `mcpServers.polaris`
+3. If `.mcp.json` already exists, parses it and upserts the polaris entry, preserving any other servers
+4. Appends missing entries to `.gitignore` under a `# polaris` comment header (`polaris.db`, `polaris.db-shm`, `polaris.db-wal`, `.fastembed_cache/`, `.mcp.json`)
+5. Idempotent: re-running prints "already configured" / "already up to date" without rewriting files
+
+**Output (first run):**
+
+```
+polaris  · setup
+
+  ✓  Created .mcp.json (polaris → /usr/local/bin/polaris)
+  ✓  Created .gitignore (5 entries)
+```
+
+**Output (rerun):**
+
+```
+polaris  · setup
+
+  ✓  .mcp.json already configured
+  ✓  .gitignore already up to date
+```
+
+---
+
 ### `polaris index <path>`
 
 Index markdown files from a path into the database.

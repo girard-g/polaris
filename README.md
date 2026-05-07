@@ -67,6 +67,15 @@ First search will download the embedding model (~137 MB) to `~/.cache/huggingfac
 
 ## Usage
 
+### Setup
+
+```bash
+polaris setup            # configure current directory
+polaris setup ./my-proj  # configure a specific directory
+```
+
+Creates `.mcp.json` (pointing at the running polaris binary) and adds polaris-related entries to `.gitignore` (`polaris.db*`, `.fastembed_cache/`, `.mcp.json` itself). Idempotent: re-running is safe.
+
 ### Index
 
 ```bash
@@ -115,7 +124,7 @@ Last index : 2026-02-26T14:41:28Z
 polaris serve
 ```
 
-Starts a stdio MCP server. Add to `.mcp.json`:
+Starts a stdio MCP server. Run `polaris setup` once per project to write `.mcp.json` automatically, or add it manually:
 
 ```json
 {

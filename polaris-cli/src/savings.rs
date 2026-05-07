@@ -297,4 +297,38 @@ mod tests {
         assert_eq!(v["source_breakdown"]["mcp"]["searches"], 2);
         assert_eq!(v["tracking_since_ts"], 42);
     }
+
+    #[test]
+    fn savings_run_summary_against_seeded_db() {
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("savings.db");
+
+        {
+            let db = Database::open(&db_path, 4, "test-model").unwrap();
+            db.insert_search_log(1_700_000_000, LogSource::Cli, "q1", 5, 400, 8_000).unwrap();
+            db.insert_search_log(1_700_000_100, LogSource::Mcp, "q2", 2, 200, 4_000).unwrap();
+        }
+
+        // Capture stdout via a pipe-style helper. For simplicity we just call run()
+        // and verify the underlying aggregate; the rendered formatting is covered by
+        // format_summary tests above.
+        run(&db_path, 4, "test-model", false, 20, false).unwrap();
+
+        // Re-open and assert the data is what we expect.
+        let db = Database::open(&db_path, 4, "test-model").unwrap();
+        let agg = db.aggregate_savings().unwrap();
+        assert_eq!(agg.total_searches, 2);
+        assert_eq!(agg.by_source.cli.searches, 1);
+        assert_eq!(agg.by_source.mcp.searches, 1);
+    }
+
+    #[test]
+    fn savings_run_errors_when_db_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.db");
+        let err = run(&missing, 512, "nomic-embed-text-v1.5", false, 20, false).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("no index at"));
+    }
 }

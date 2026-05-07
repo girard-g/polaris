@@ -114,6 +114,19 @@ enum Command {
         /// Project directory (defaults to current working directory)
         path: Option<PathBuf>,
     },
+
+    /// Show cumulative tokens saved using polaris vs grep+read
+    Savings {
+        /// Show per-query history instead of the summary
+        #[arg(long)]
+        history: bool,
+        /// Maximum rows for --history (default 20)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Output format
+        #[arg(long, value_enum, default_value = "plain")]
+        output: OutputFormat,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +187,16 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Setup { path } => {
             let target = path.unwrap_or_else(|| std::path::PathBuf::from("."));
             setup::run(&target)
+        }
+        Command::Savings { history, limit, output } => {
+            savings::run(
+                &cfg.db_path,
+                cfg.embedding_dim,
+                &cfg.model_id,
+                history,
+                limit.unwrap_or(20),
+                output == OutputFormat::Json,
+            )
         }
     }
 }

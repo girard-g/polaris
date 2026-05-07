@@ -76,7 +76,14 @@ impl PolarisServer {
     /// Search the indexed documentation using semantic similarity.
     #[tool(
         name = "search",
-        description = "Search indexed documentation using semantic similarity. Returns the most relevant chunks for the given query."
+        description = "Search indexed documentation by semantic similarity. \
+                       Returns ranked chunks with section + file context. \
+                       Token-efficiency tips: (1) query with 2-4 specific \
+                       domain nouns rather than full natural-language \
+                       questions (\"embedding pipeline fastembed prefix\" \
+                       beats \"how does polaris embed documents\"); \
+                       (2) default top_k=2-3 — only raise to 5 if recall \
+                       looks poor."
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let config = Arc::clone(&self.state.config);
@@ -207,9 +214,13 @@ impl ServerHandler for PolarisServer {
                 ..Default::default()
             },
             instructions: Some(
-                "Polaris is a semantic search MCP server for project documentation. \
-                 Use `search` to find relevant documentation chunks, `index` to add \
-                 new files, and `status` to check the index health."
+                "Polaris is a semantic search MCP for project documentation. \
+                 Prefer `search` over grep/read for documentation questions — \
+                 it returns ranked, section-aware chunks and is typically \
+                 10-40× cheaper in tokens than grepping the docs and reading \
+                 files. Query with specific domain terms; start with top_k=2 \
+                 and raise only if recall is poor. Use `index` to add files, \
+                 `status` to check index health."
                     .to_string(),
             ),
             ..Default::default()

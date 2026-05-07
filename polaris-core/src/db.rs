@@ -1635,4 +1635,19 @@ mod tests {
         assert_eq!(agg.by_source.mcp.result_bytes, 250);
         assert_eq!(agg.by_source.mcp.baseline_bytes, 7_000);
     }
+
+    #[test]
+    fn recent_search_log_newest_first_with_limit() {
+        INIT.call_once(register_vec_extension);
+        let db = Database::open_in_memory(4, "test-model").unwrap();
+
+        db.insert_search_log(100, LogSource::Cli, "first", 5, 100, 1_000).unwrap();
+        db.insert_search_log(200, LogSource::Cli, "second", 5, 100, 1_000).unwrap();
+        db.insert_search_log(300, LogSource::Mcp, "third", 5, 100, 1_000).unwrap();
+
+        let rows = db.recent_search_log(2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].query, "third");
+        assert_eq!(rows[1].query, "second");
+    }
 }

@@ -74,7 +74,7 @@ polaris setup            # configure current directory
 polaris setup ./my-proj  # configure a specific directory
 ```
 
-Creates `.mcp.json` (pointing at the running polaris binary) and adds polaris-related entries to `.gitignore` (`polaris.db*`, `.fastembed_cache/`, `.mcp.json` itself). Idempotent: re-running is safe.
+Creates `.mcp.json` (pointing at the running polaris binary) and adds polaris-related entries to `.gitignore` (`polaris.db`, `polaris.db-shm`, `polaris.db-wal`, `.fastembed_cache/`, `.mcp.json` itself). Idempotent: re-running is safe.
 
 ### Index
 

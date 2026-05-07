@@ -375,7 +375,8 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: Outpu
     let embed = polaris_core::SharedEmbedding::load(&cfg.model_id, cfg.embedding_dim)?;
     let mut set = polaris_core::BankSet::new(embed.clone());
 
-    for db_path in &all_db_paths {
+    let mut primary_bank: Option<polaris_core::Bank> = None;
+    for (i, db_path) in all_db_paths.iter().enumerate() {
         let bank_cfg = polaris_core::BankConfig {
             repo_root: db_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf(),
             index_path: db_path.clone(),
@@ -395,10 +396,25 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: Outpu
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_string();
+        if i == 0 {
+            primary_bank = Some(bank.clone());
+        }
         set.mount(bank, label);
     }
 
     let results = set.search(query, polaris_core::SearchOpts { top_k })?;
+
+    if let Some(bank) = primary_bank {
+        let repo_root = bank.repo_root().to_path_buf();
+        let _handle = savings::spawn_search_log(
+            bank,
+            repo_root,
+            polaris_core::db::LogSource::Cli,
+            query.to_string(),
+            top_k,
+            &results,
+        );
+    }
 
     if output == OutputFormat::Json {
         println!(

@@ -406,7 +406,9 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: Outpu
 
     if let Some(bank) = primary_bank {
         let repo_root = bank.repo_root().to_path_buf();
-        let _handle = savings::spawn_search_log(
+        // Await the handle so the row lands before #[tokio::main] drops the
+        // runtime — otherwise the spawned task can be aborted at process exit.
+        let handle = savings::spawn_search_log(
             bank,
             repo_root,
             polaris_core::db::LogSource::Cli,
@@ -414,6 +416,7 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: Outpu
             top_k,
             &results,
         );
+        handle.await.ok();
     }
 
     if output == OutputFormat::Json {

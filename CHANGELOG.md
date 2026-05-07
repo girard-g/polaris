@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `polaris savings` subcommand reporting cumulative tokens saved by
+  going through Polaris instead of `grep + read`. Renders a summary
+  block by default, a per-query history with `--history`, and JSON
+  with `--output json`.
+- `search_log` table (schema v3) records one row per CLI and MCP
+  search: timestamp, source, query, top_k, delivered bytes, and
+  baseline bytes (sum of unique result-file sizes).
+- `polaris_core::Bank::log_search` thin wrapper, plus `LogSource`,
+  `SavingsAggregate`, `SavingsBySource`, `SavingsCounters`, and
+  `SearchLogRow` types re-exported from `polaris_core`.
+- `Database::insert_search_log`, `recent_search_log`, and
+  `aggregate_savings` query methods.
+
+### Changed
+- SQLite schema bumped from v2 to v3. Existing databases migrate
+  automatically on first open; the v1→v2→v3 chain is exercised in
+  tests.
+- CLI and MCP `search` paths now log one `search_log` row per query
+  via `tokio::spawn` (off the hot path). The CLI awaits the log
+  task before returning so rows aren't lost when `#[tokio::main]`
+  drops the runtime at process exit.
+
 ## [0.2.0] - 2026-04-27
 
 ### Changed

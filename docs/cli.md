@@ -254,6 +254,8 @@ polaris savings --output json
 4. Tokens are estimated as `bytes / 4`.
 5. Empty log: prints `No searches recorded yet. Run a search to start tracking.` and exits 0.
 
+**Multi-DB note.** When `--db` is passed multiple times, only the *primary* (first) DB receives `search_log` rows, and baseline bytes are computed against that DB's `repo_root`. Result chunks that originate from secondary DBs whose files don't exist under the primary repo will contribute 0 bytes to the baseline, so multi-DB savings can under-report.
+
 **Output (summary):**
 
 ```

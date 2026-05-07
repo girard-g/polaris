@@ -227,6 +227,55 @@ Embedding dim: 512
 Last indexed: 2025-02-26T14:23:45Z
 ```
 
+### `polaris savings`
+
+Show cumulative tokens saved by going through Polaris instead of `grep + read`. Reads from the `search_log` table inside `polaris.db`.
+
+```bash
+polaris savings              # summary
+polaris savings --history    # per-query history (newest first)
+polaris savings --history --limit 50
+polaris savings --output json
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--history` | false | Print the per-query log instead of the summary |
+| `--limit <N>` | 20 | Maximum rows for `--history` |
+| `--output <FORMAT>` | plain | Output format: `plain` or `json` |
+
+**Behaviour:**
+
+1. Reads the `search_log` table from `polaris.db`.
+2. Aggregates rows into total searches, total result/baseline bytes, and a per-source (`cli` / `mcp`) breakdown.
+3. Renders either the summary block or the per-query history table.
+4. Tokens are estimated as `bytes / 4`.
+5. Empty log: prints `No searches recorded yet. Run a search to start tracking.` and exits 0.
+
+**Output (summary):**
+
+```
+  polaris  ·  savings
+
+  Total searches      127  (mcp 98 / cli 29)
+  Tokens delivered   31.2K
+  Baseline           412K
+  Tokens saved       381K  ~13× cheaper
+  Tracking since     2026-04-09
+
+  Tokens estimated at ~4 chars/token.
+```
+
+**Error cases (stderr, exit 1):**
+
+| Situation | Message |
+|-----------|---------|
+| `polaris.db` doesn't exist | `no index at 'polaris.db'  —  run polaris index <path> first` |
+
+---
+
 ### `polaris chunks <path>`
 
 Show how a file was chunked — heading contexts, byte offsets, and content previews.

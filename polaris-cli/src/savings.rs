@@ -1,10 +1,14 @@
 //! `polaris savings` — render cumulative tokens-saved analytics from `search_log`.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use console::style;
-use polaris_core::db::{Database, SavingsAggregate, SearchLogRow};
+use polaris_core::Bank;
+use polaris_core::db::{Database, LogSource, SavingsAggregate, SearchLogRow, SearchResult};
 use polaris_core::error::{PolarisError, Result};
+use tokio::task::JoinHandle;
 
 /// Heuristic: ~4 chars per token (matches README's existing claim).
 pub const BYTES_PER_TOKEN: f64 = 4.0;
@@ -171,6 +175,51 @@ pub fn run(
     Ok(())
 }
 
+/// Compute `result_bytes` (sum of `content` bytes) and the unique result file paths.
+fn measure_result(results: &[SearchResult]) -> (usize, Vec<PathBuf>) {
+    let result_bytes: usize = results.iter().map(|r| r.content.len()).sum();
+    let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
+    for r in results {
+        paths.insert(PathBuf::from(&r.file_path));
+    }
+    (result_bytes, paths.into_iter().collect())
+}
+
+fn baseline_from_paths(repo_root: &Path, paths: &[PathBuf]) -> usize {
+    paths
+        .iter()
+        .filter_map(|p| {
+            let absolute = if p.is_absolute() { p.clone() } else { repo_root.join(p) };
+            std::fs::metadata(&absolute).ok().map(|m| m.len() as usize)
+        })
+        .sum()
+}
+
+/// Fire-and-forget: compute baseline + insert one row into `search_log`.
+///
+/// Returns the `JoinHandle` so tests can `.await` for determinism. Production
+/// callers drop it.
+pub fn spawn_search_log(
+    bank: Bank,
+    repo_root: PathBuf,
+    source: LogSource,
+    query: String,
+    top_k: usize,
+    results: &[SearchResult],
+) -> JoinHandle<()> {
+    let (result_bytes, paths) = measure_result(results);
+    tokio::spawn(async move {
+        let baseline_bytes = baseline_from_paths(&repo_root, &paths);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Err(e) = bank.log_search(source, &query, top_k, result_bytes, baseline_bytes, ts) {
+            tracing::warn!("search log write failed: {e}");
+        }
+    })
+}
+
 fn summary_json(agg: &SavingsAggregate) -> serde_json::Value {
     serde_json::json!({
         "total_searches": agg.total_searches,
@@ -210,7 +259,7 @@ fn history_json(rows: &[SearchLogRow]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polaris_core::db::{LogSource, SavingsAggregate, SavingsBySource, SavingsCounters, SearchLogRow};
+    use polaris_core::db::{LogSource, SavingsAggregate, SavingsBySource, SavingsCounters, SearchLogRow, SearchResult};
 
     fn agg_with(cli: (usize, usize, usize), mcp: (usize, usize, usize), since: Option<i64>) -> SavingsAggregate {
         SavingsAggregate {
@@ -330,5 +379,89 @@ mod tests {
         let err = run(&missing, 512, "nomic-embed-text-v1.5", false, 20, false).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("no index at"));
+    }
+
+    #[test]
+    fn measure_result_dedups_paths_and_sums_content_bytes() {
+        let results = vec![
+            SearchResult {
+                chunk_id: 1,
+                content: "hello".into(),
+                heading_context: "".into(),
+                file_path: "docs/a.md".into(),
+                score: 1.0,
+                source_db: None,
+            },
+            SearchResult {
+                chunk_id: 2,
+                content: "world".into(),
+                heading_context: "".into(),
+                file_path: "docs/a.md".into(),
+                score: 0.9,
+                source_db: None,
+            },
+            SearchResult {
+                chunk_id: 3,
+                content: "!".into(),
+                heading_context: "".into(),
+                file_path: "docs/b.md".into(),
+                score: 0.8,
+                source_db: None,
+            },
+        ];
+        let (bytes, paths) = measure_result(&results);
+        assert_eq!(bytes, 11);
+        assert_eq!(paths, vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/b.md")]);
+    }
+
+    #[tokio::test]
+    #[ignore = "Bank::open requires SharedEmbedding which downloads a ~137 MB ONNX model"]
+    async fn spawn_search_log_inserts_row_for_cli_source() {
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir(&docs).unwrap();
+        let doc_a = docs.join("a.md");
+        std::fs::write(&doc_a, "Lorem ipsum dolor sit amet, consectetur adipiscing elit.").unwrap();
+
+        let index_path = dir.path().join("polaris.db");
+        let embed = polaris_core::SharedEmbedding::load("nomic-embed-text-v1.5", 64).unwrap();
+        let bank = polaris_core::Bank::open(
+            polaris_core::BankConfig {
+                repo_root: dir.path().to_path_buf(),
+                index_path: index_path.clone(),
+                embedding_dim: 64,
+                model_id: "nomic-embed-text-v1.5".into(),
+                ..Default::default()
+            },
+            embed,
+        )
+        .unwrap();
+
+        let fake_results = vec![SearchResult {
+            chunk_id: 1,
+            content: "Lorem ipsum".into(),
+            heading_context: "".into(),
+            file_path: "docs/a.md".into(),
+            score: 1.0,
+            source_db: None,
+        }];
+
+        let handle = spawn_search_log(
+            bank.clone(),
+            dir.path().to_path_buf(),
+            LogSource::Cli,
+            "test query".into(),
+            5,
+            &fake_results,
+        );
+        handle.await.unwrap();
+
+        let db = Database::open(&index_path, 64, "nomic-embed-text-v1.5").unwrap();
+        let agg = db.aggregate_savings().unwrap();
+        assert_eq!(agg.total_searches, 1);
+        assert_eq!(agg.by_source.cli.searches, 1);
+        assert_eq!(agg.by_source.cli.result_bytes, 11);
+        assert!(agg.by_source.cli.baseline_bytes >= 50, "baseline should reflect the file size");
     }
 }

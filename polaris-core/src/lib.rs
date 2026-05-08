@@ -6,6 +6,7 @@ pub mod db;
 pub mod embedding;
 pub mod error;
 pub mod indexer;
+pub mod paths;
 pub mod search;
 
 pub use bank::{Bank, BankConfig, BankSet};

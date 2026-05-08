@@ -78,6 +78,8 @@ polaris setup ./my-proj  # configure a specific directory
 
 Creates `.mcp.json` (pointing at the running polaris binary) and adds polaris-related entries to `.gitignore` (`polaris.db`, `polaris.db-shm`, `polaris.db-wal`, `.fastembed_cache/`, `.mcp.json` itself). Idempotent: re-running is safe.
 
+`polaris setup` also writes a marker-delimited Polaris MCP block into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` at the project root, steering compatible coding agents toward `polaris.search` for documentation queries. Existing user content in those files is preserved (the block is delimited by `<!-- polaris:begin --> … <!-- polaris:end -->` markers and only that range is rewritten on re-run). Pass `--no-agents` to skip these three files.
+
 ### Index
 
 ```bash

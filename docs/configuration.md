@@ -118,6 +118,16 @@ Changing `model_id` requires deleting the database and re-indexing.
 
 ## Model Caching
 
-The fastembed model is downloaded on first use to `~/.cache/huggingface/`. Subsequent runs reuse the cached ONNX files.
+The fastembed model is downloaded on first use to a user-global cache shared across all projects, so multiple Polaris installs do not each redownload the same ONNX files.
+
+Resolution order:
+
+1. `POLARIS_CACHE_DIR` environment variable (if set and non-empty) → `$POLARIS_CACHE_DIR/models/`.
+2. Otherwise the platform user cache directory + `polaris/models/`:
+   - Linux: `~/.cache/polaris/models/` (honours `$XDG_CACHE_HOME`).
+   - macOS: `~/Library/Caches/polaris/models/`.
+   - Windows: `%LOCALAPPDATA%\polaris\models\`.
 
 Download progress is shown in the terminal when the model is not yet cached.
+
+If you have a leftover `.fastembed_cache/` directory in a project from an older Polaris version, you can safely remove it: `rm -rf .fastembed_cache/`.

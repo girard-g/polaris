@@ -8,7 +8,7 @@
 | `mxbai-embed-large-v1` | 1024 | 1024 | ~670 MB |
 | `all-minilm-l6-v2` | 384 | 384 | ~23 MB |
 
-All models run via ONNX on CPU. Model files are cached in `~/.cache/huggingface/`.
+All models run via ONNX on CPU. Model files are cached in a user-global directory shared across projects (default `~/.cache/polaris/models/`; overridable via `POLARIS_CACHE_DIR`). See [Configuration → Model Caching](configuration.md#model-caching).
 
 ## Matryoshka Truncation
 

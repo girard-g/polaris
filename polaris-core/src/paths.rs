@@ -42,7 +42,12 @@ fn resolve_cache_root(env_value: Option<String>, dirs_cache: Option<PathBuf>) ->
 pub fn polaris_cache_dir() -> Result<PathBuf> {
     let env_value = std::env::var(ENV_VAR).ok();
     let path = resolve_cache_root(env_value, dirs::cache_dir())?;
-    std::fs::create_dir_all(&path)?;
+    std::fs::create_dir_all(&path).map_err(|e| {
+        PolarisError::Config(format!(
+            "Failed to create cache directory {}: {e}",
+            path.display()
+        ))
+    })?;
     Ok(path)
 }
 
@@ -113,8 +118,11 @@ mod tests {
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let prev = std::env::var(key).ok();
-            // SAFETY: tests using this guard do not run concurrently with
-            // other code that reads/writes the same env var.
+            // SAFETY: env mutation is not thread-safe (POSIX setenv(3) is not
+            // async-signal/thread-safe). The Rust test runner executes tests in
+            // parallel threads; this guard is safe here because only ONE test in
+            // this module calls EnvGuard. All other tests invoke the pure
+            // `resolve_cache_root` and never read POLARIS_CACHE_DIR. Keep it that way.
             unsafe {
                 std::env::set_var(key, value);
             }
@@ -124,7 +132,7 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: see `set`.
+            // SAFETY: see `EnvGuard::set` — same single-test invariant applies.
             unsafe {
                 match &self.prev {
                     Some(v) => std::env::set_var(self.key, v),

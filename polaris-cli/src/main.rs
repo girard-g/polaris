@@ -109,10 +109,13 @@ enum Command {
         path: PathBuf,
     },
 
-    /// Configure the current project to use polaris (writes .mcp.json, updates .gitignore)
+    /// Configure the current project to use polaris (writes .mcp.json, updates .gitignore, writes agent instructions)
     Setup {
         /// Project directory (defaults to current working directory)
         path: Option<PathBuf>,
+        /// Do not write CLAUDE.md, AGENTS.md, GEMINI.md
+        #[arg(long)]
+        no_agents: bool,
     },
 
     /// Show cumulative tokens saved using polaris vs grep+read
@@ -184,9 +187,9 @@ async fn run(cli: Cli) -> Result<()> {
             cmd_watch(cfg, &paths, !no_recursive).await
         }
         Command::Chunks { path } => cmd_chunks(cfg, &path).await,
-        Command::Setup { path } => {
+        Command::Setup { path, no_agents } => {
             let target = path.unwrap_or_else(|| std::path::PathBuf::from("."));
-            setup::run(&target)
+            setup::run(&target, no_agents)
         }
         Command::Savings { history, limit, output } => {
             savings::run(

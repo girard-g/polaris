@@ -41,9 +41,11 @@ On first run, the embedding model is downloaded (~137 MB) and cached. Subsequent
 
 | Platform | Model cache location |
 |----------|----------------------|
-| Linux    | `~/.cache/huggingface/` |
-| macOS    | `~/Library/Caches/huggingface/` |
-| Windows  | `%LOCALAPPDATA%\huggingface\` |
+| Linux    | `~/.cache/polaris/models/` (honours `$XDG_CACHE_HOME`) |
+| macOS    | `~/Library/Caches/polaris/models/` |
+| Windows  | `%LOCALAPPDATA%\polaris\models\` |
+
+The cache is shared across projects. Set `POLARIS_CACHE_DIR` to override the location (e.g. for CI or shared team caches). See [Configuration → Model Caching](configuration.md#model-caching) for full details.
 
 ```bash
 ./target/debug/polaris index ./docs
@@ -71,6 +73,7 @@ cargo test
 |----------|--------|
 | `RUST_LOG` | Tracing log level. Examples: `debug`, `polaris=trace`, `info` |
 | `RUST_LOG_STYLE` | Log color. `never` disables ANSI colors |
+| `POLARIS_CACHE_DIR` | Override the user-global model cache root. Models are stored under `$POLARIS_CACHE_DIR/models/`. |
 
 ## Project Layout
 
@@ -91,8 +94,7 @@ polaris/
 │       ├── mod.rs
 │       ├── server.rs
 │       └── types.rs
-├── docs/               This documentation
-└── .fastembed_cache/   Local model cache (gitignored)
+└── docs/               This documentation
 ```
 
 ## Adding a New MCP Tool

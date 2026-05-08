@@ -55,9 +55,11 @@ pub struct EmbeddingEngine {
 impl EmbeddingEngine {
     pub fn new(target_dim: usize, model_id: &str) -> Result<Self> {
         let info = resolve_model(model_id)?;
+        let cache_dir = crate::paths::polaris_cache_dir()?;
         let model = TextEmbedding::try_new(
             InitOptions::new(info.fastembed_model)
-                .with_show_download_progress(true),
+                .with_show_download_progress(true)
+                .with_cache_dir(cache_dir),
         )
         .map_err(|e| PolarisError::Embedding(anyhow::anyhow!("Failed to load model: {e}")))?;
 

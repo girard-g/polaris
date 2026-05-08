@@ -279,7 +279,7 @@ pub fn merge_agent_instructions(existing: Option<&str>) -> Result<AgentReport> {
 }
 
 /// Entry point for the `setup` command.
-pub fn run(path: &Path) -> Result<()> {
+pub fn run(path: &Path, no_agents: bool) -> Result<()> {
     use console::style;
 
     if !path.exists() {
@@ -363,6 +363,46 @@ pub fn run(path: &Path) -> Result<()> {
                 "  {}  .gitignore already up to date",
                 style("✓").green(),
             );
+        }
+    }
+
+    // Agent instruction files
+    if !no_agents {
+        for filename in AGENT_FILES {
+            let agent_path = path.join(filename);
+            if agent_path.exists() && !agent_path.is_file() {
+                return Err(PolarisError::Setup(format!(
+                    "{} is not a regular file",
+                    agent_path.display()
+                )));
+            }
+            let existing = read_optional(&agent_path)?;
+            let report = merge_agent_instructions(existing.as_deref()).map_err(|e| {
+                if let PolarisError::Setup(msg) = e {
+                    PolarisError::Setup(format!("{filename}: {msg}"))
+                } else {
+                    e
+                }
+            })?;
+            match (&report.new_content, &report.action) {
+                (Some(content), AgentAction::Created) => {
+                    std::fs::write(&agent_path, content)?;
+                    println!(
+                        "  {}  Created {filename} (polaris block)",
+                        style("✓").green(),
+                    );
+                }
+                (Some(content), AgentAction::Updated) => {
+                    std::fs::write(&agent_path, content)?;
+                    println!(
+                        "  {}  Updated {filename} (polaris block refreshed)",
+                        style("✓").green(),
+                    );
+                }
+                (None, _) | (Some(_), AgentAction::Unchanged) => {
+                    println!("  {}  {filename} already configured", style("✓").green());
+                }
+            }
         }
     }
 
@@ -620,7 +660,7 @@ second
     #[test]
     fn run_creates_files_in_empty_dir() {
         let dir = TempDir::new().unwrap();
-        run(dir.path()).unwrap();
+        run(dir.path(), false).unwrap();
 
         let mcp = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&mcp).unwrap();
@@ -635,11 +675,11 @@ second
     #[test]
     fn run_is_idempotent() {
         let dir = TempDir::new().unwrap();
-        run(dir.path()).unwrap();
+        run(dir.path(), false).unwrap();
         let mcp_first = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let gi_first = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
 
-        run(dir.path()).unwrap();
+        run(dir.path(), false).unwrap();
         let mcp_second = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let gi_second = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
 
@@ -649,7 +689,7 @@ second
 
     #[test]
     fn run_errors_when_path_missing() {
-        let result = run(Path::new("/this/path/should/not/exist/polaris-test-zzz"));
+        let result = run(Path::new("/this/path/should/not/exist/polaris-test-zzz"), false);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
@@ -658,7 +698,7 @@ second
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "x").unwrap();
-        let result = run(&file);
+        let result = run(&file, false);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 }

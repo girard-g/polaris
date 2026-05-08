@@ -701,4 +701,81 @@ second
         let result = run(&file, false);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
+
+    #[test]
+    fn run_writes_all_three_agent_files() {
+        let dir = TempDir::new().unwrap();
+        run(dir.path(), false).unwrap();
+
+        for filename in AGENT_FILES {
+            let path = dir.path().join(filename);
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("expected {filename} to exist"));
+            assert!(
+                content.contains("<!-- polaris:begin -->"),
+                "{filename} missing polaris:begin"
+            );
+            assert!(
+                content.contains("<!-- polaris:end -->"),
+                "{filename} missing polaris:end"
+            );
+            assert!(
+                content.contains("## Polaris MCP"),
+                "{filename} missing block header"
+            );
+        }
+    }
+
+    #[test]
+    fn run_preserves_existing_user_content_in_agent_files() {
+        let dir = TempDir::new().unwrap();
+        let existing_user_rules = "# My project rules\n\nUse Rust 2024 edition.\nNo unsafe blocks.\n";
+        std::fs::write(dir.path().join("CLAUDE.md"), existing_user_rules).unwrap();
+
+        run(dir.path(), false).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        // Original content preserved at the top.
+        assert!(content.starts_with(existing_user_rules));
+        // Polaris block appended after a blank line.
+        assert!(content.contains("\n\n<!-- polaris:begin -->"));
+    }
+
+    #[test]
+    fn run_skips_agent_files_with_no_agents() {
+        let dir = TempDir::new().unwrap();
+        run(dir.path(), true).unwrap();
+
+        for filename in AGENT_FILES {
+            let path = dir.path().join(filename);
+            assert!(
+                !path.exists(),
+                "{filename} should not exist when --no-agents is set"
+            );
+        }
+        // .mcp.json and .gitignore should still be written.
+        assert!(dir.path().join(".mcp.json").exists());
+        assert!(dir.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn run_is_idempotent_with_agent_files() {
+        let dir = TempDir::new().unwrap();
+        run(dir.path(), false).unwrap();
+
+        let mut first: Vec<(String, String)> = Vec::new();
+        for filename in AGENT_FILES {
+            first.push((
+                (*filename).to_string(),
+                std::fs::read_to_string(dir.path().join(filename)).unwrap(),
+            ));
+        }
+
+        run(dir.path(), false).unwrap();
+
+        for (filename, before) in &first {
+            let after = std::fs::read_to_string(dir.path().join(filename)).unwrap();
+            assert_eq!(*before, after, "{filename} should be unchanged on rerun");
+        }
+    }
 }

@@ -15,6 +15,10 @@
   `SearchLogRow` types re-exported from `polaris_core`.
 - `Database::insert_search_log`, `recent_search_log`, and
   `aggregate_savings` query methods.
+- `polaris setup` now writes a marker-delimited Polaris MCP instruction
+  block into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` at the project root.
+  Pass `--no-agents` to skip them. Existing user content is preserved;
+  re-runs only refresh the block.
 
 ### Changed
 - SQLite schema bumped from v2 to v3. Existing databases migrate

@@ -22,13 +22,20 @@ polaris setup            # configure current directory
 polaris setup ./my-proj  # configure a specific directory
 ```
 
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--no-agents` | false | Skip writing `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` |
+
 **Behaviour:**
 
 1. Validates the target path exists and is a directory
 2. Resolves the running binary via `std::env::current_exe()` and writes its absolute path to `.mcp.json` under `mcpServers.polaris`
 3. If `.mcp.json` already exists, parses it and upserts the polaris entry, preserving any other servers
 4. Appends missing entries to `.gitignore` under a `# polaris` comment header (`polaris.db`, `polaris.db-shm`, `polaris.db-wal`, `.fastembed_cache/`, `.mcp.json`)
-5. Idempotent: re-running prints "already configured" / "already up to date" without rewriting files
+5. Writes a Polaris MCP instruction block into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` at the project root, marker-delimited (`<!-- polaris:begin --> … <!-- polaris:end -->`). Preserves existing user content; refreshes only the block on re-run. Skipped if `--no-agents` is passed.
+6. Idempotent: re-running prints "already configured" / "already up to date" without rewriting files
 
 **Output (first run):**
 

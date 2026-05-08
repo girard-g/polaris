@@ -44,6 +44,9 @@ polaris  · setup
 
   ✓  Created .mcp.json (polaris → /usr/local/bin/polaris)
   ✓  Created .gitignore (5 entries)
+  ✓  Created CLAUDE.md (polaris block)
+  ✓  Created AGENTS.md (polaris block)
+  ✓  Created GEMINI.md (polaris block)
 ```
 
 **Output (rerun):**
@@ -53,6 +56,9 @@ polaris  · setup
 
   ✓  .mcp.json already configured
   ✓  .gitignore already up to date
+  ✓  CLAUDE.md already configured
+  ✓  AGENTS.md already configured
+  ✓  GEMINI.md already configured
 ```
 
 ---

@@ -12,40 +12,44 @@ The primary use case is feeding coding agents (e.g. Claude Code) with relevant d
 - **Heading-aware chunking** — Markdown structure is preserved in chunks for better retrieval
 - **Hybrid search** — BM25 full-text search fused with vector KNN via RRF; MMR reranking for diversity
 - **MCP native** — Runs as a stdio MCP server so any compatible agent can call `search`, `index`, and `status`
-- **Web UI (v3 enterprise)** — browser-based admin and user interface, served on the same HTTPS port as the MCP endpoint, bundled into the binary via `rust-embed`
+- **Setup orchestration** — `polaris setup` writes `.mcp.json`, updates `.gitignore`, and refreshes a marker-delimited Polaris block in `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`
+- **Savings telemetry** — `polaris savings` reports how many tokens Polaris saved versus grep+read, via an append-only `search_log` table
 
 ## Non-Goals
 
-- Multi-user or networked deployments in the default mode (an opt-in enterprise/team server mode with namespace isolation and mTLS is planned for v3 — see [multi-tenant.md](multi-tenant.md))
+- Multi-user or networked deployments in the default mode (a multi-tenant server mode with namespace isolation and mTLS is a planned design — see [multi-tenant.md](multi-tenant.md))
 - Support for non-markdown formats (PDF, HTML, code files)
 - Cloud or remote vector stores
 
 ## High-Level Architecture
 
+Two crates: `polaris-core` (library) holds the retrieval pipeline; `polaris-cli` (binary) hosts the CLI and the MCP server.
+
 ```
-┌──────────────────────────────────────────────────────────┐
-│  CLI (clap)         │  MCP Server (rmcp 0.16 / stdio)    │
-│  index / search /   │  tools: search, index, status      │
-│  serve / status /   │                                    │
-│  watch              │                                    │
-└─────────┬───────────┴──────────────┬─────────────────────┘
-          │                          │
-          ▼                          ▼
-┌─────────────────────────────────────────┐
-│  SearchEngine  ←→  Indexer              │
-│      │                  │              │
-│  EmbeddingEngine    EmbeddingEngine     │
-│      │                  │              │
-│  Database (db.rs)   Database (db.rs)    │
-└──────────────────────────────────────── ┘
-          │
-          ▼
-┌──────────────────────────────────┐
-│  SQLite + sqlite-vec + FTS5      │
-│  documents / chunks /            │
-│  vec_chunks (KNN) /              │
-│  chunks_fts (BM25)               │
-└──────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│  CLI (clap)                            │  MCP Server (rmcp)    │
+│  index · search · serve · status ·     │  tools: search,       │
+│  watch · chunks · setup · savings      │         index, status │
+└─────────┬──────────────────────────────┴──────────┬────────────┘
+          │                                        │
+          ▼                                        ▼
+┌────────────────────────────────────────────────────────┐
+│  Bank / BankSet (polaris-core)                         │
+│      │                                                 │
+│  ┌───┴───────────────┐    ┌──────────────────────────┐ │
+│  │ SearchEngine ←→ Indexer │  EmbeddingEngine         │ │
+│  └─────────┬───────────────┘  (Arc, fastembed inside) │ │
+│            ▼                                          │ │
+│        Database (db.rs)                               │ │
+└────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+       ┌──────────────────────────────────────────┐
+       │  SQLite + sqlite-vec + FTS5              │
+       │  metadata · documents · chunks ·         │
+       │  vec_chunks (KNN) · chunks_fts (BM25) ·  │
+       │  search_log (savings telemetry)          │
+       └──────────────────────────────────────────┘
 ```
 
 ## Tech Stack
@@ -71,14 +75,23 @@ The primary use case is feeding coding agents (e.g. Claude Code) with relevant d
 # Build
 cargo build --release
 
+# (Optional) wire Polaris into a project — writes .mcp.json, .gitignore, agent-instruction blocks
+polaris setup
+
 # Index a docs folder
 polaris index ./docs
 
 # Search
 polaris search "how to configure the database"
 
+# Watch and auto-reindex
+polaris watch ./docs
+
 # Start MCP server (stdio)
 polaris serve
+
+# Inspect token savings vs. grep+read
+polaris savings
 ```
 
 See [cli.md](cli.md) for full command reference.

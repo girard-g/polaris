@@ -1,6 +1,6 @@
-# Polaris Multi-Tenant Deployment (v3 Planned)
+# Polaris Multi-Tenant Deployment (Planned)
 
-> **Status:** Planned for v3. Not yet implemented. This document describes the intended design.
+> **Status:** Planned design. Not yet implemented. This document describes the intended architecture.
 >
 > For standard single-user deployments, none of this applies — the default mode remains a single local binary with no networking.
 
@@ -339,7 +339,7 @@ The server validates client certs against the CA at the TLS handshake. Requests 
 
 ## Automated User Enrollment
 
-The manual openssl flow (generate key → generate CSR → sign cert → distribute files) is error-prone for end users. Polaris v3 provides a two-command enrollment flow that keeps the private key on the user's machine.
+The manual openssl flow (generate key → generate CSR → sign cert → distribute files) is error-prone for end users. The planned multi-tenant mode provides a two-command enrollment flow that keeps the private key on the user's machine.
 
 ### Flow overview
 
@@ -775,7 +775,7 @@ volumes:
 
 ## Web UI
 
-Polaris v3 serves a browser-based admin and user interface on the **same port** as the MCP endpoint. Static assets are embedded in the binary at compile time via `rust-embed` — no separate web server, no separate deployment step.
+The multi-tenant mode is planned to serve a browser-based admin and user interface on the **same port** as the MCP endpoint. Static assets would be embedded in the binary at compile time via `rust-embed` — no separate web server, no separate deployment step.
 
 ### Routes
 
@@ -880,7 +880,7 @@ The initial implementation will support CRL (Certificate Revocation List) files,
 crl = "/etc/polaris/revoked.crl"   # optional
 ```
 
-OCSP stapling is out of scope for v3 but may be added later.
+OCSP stapling is out of scope for the initial multi-tenant rollout but may be added later.
 
 ### Namespace Isolation at the DB Layer
 

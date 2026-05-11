@@ -13,7 +13,7 @@ let db = Database::open(&config)?;
 
 `register_vec_extension()` calls `sqlite3_auto_extension` via the rusqlite FFI.
 
-## Schema (v2)
+## Schema (v3)
 
 ### `metadata`
 
@@ -28,7 +28,7 @@ CREATE TABLE metadata (
 
 | Key | Example Value | Notes |
 |-----|---------------|-------|
-| `schema_version` | `"2"` | Incremented on schema migrations |
+| `schema_version` | `"3"` | Incremented on schema migrations |
 | `embedding_dim` | `"512"` | Validated against config on open — mismatch is a hard error |
 | `model_id` | `"nomic-embed-text-v1.5"` | Validated against config on open — mismatch is a hard error |
 
@@ -89,6 +89,24 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
 
 `content='chunks'` means FTS5 reads from the `chunks` table for content (no duplication), but **write operations must be manually synchronized** — FTS5 does not auto-sync with the source table.
 
+### `search_log`
+
+Append-only telemetry table powering `polaris savings`. One row per search call (CLI or MCP).
+
+```sql
+CREATE TABLE search_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             INTEGER NOT NULL,       -- Unix seconds
+    source         TEXT NOT NULL,          -- 'cli' or 'mcp'
+    query          TEXT NOT NULL,
+    top_k          INTEGER NOT NULL,
+    result_bytes   INTEGER NOT NULL,       -- size of returned chunks
+    baseline_bytes INTEGER NOT NULL        -- estimated cost of grep+read alternative
+);
+
+CREATE INDEX idx_search_log_ts ON search_log(ts);
+```
+
 ## Schema Migrations
 
 `Database::open()` checks `schema_version` on existing databases and applies migrations automatically.
@@ -105,6 +123,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 INSERT INTO chunks_fts(rowid, content, heading_context)
 SELECT id, content, heading_context FROM chunks;
 UPDATE metadata SET value='2' WHERE key='schema_version';
+```
+
+### v2 → v3
+
+Creates the `search_log` table and its timestamp index:
+
+```sql
+CREATE TABLE IF NOT EXISTS search_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             INTEGER NOT NULL,
+    source         TEXT NOT NULL,
+    query          TEXT NOT NULL,
+    top_k          INTEGER NOT NULL,
+    result_bytes   INTEGER NOT NULL,
+    baseline_bytes INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_search_log_ts ON search_log(ts);
+UPDATE metadata SET value='3' WHERE key='schema_version';
 ```
 
 ## KNN Search Query
@@ -177,12 +213,13 @@ Order for `delete_document()` and `delete_chunks_for_document()`:
 2. Delete from `vec_chunks`
 3. Delete from `documents` (cascade removes `chunks`) or `DELETE FROM chunks`
 
-## Dimension Validation
+## Dimension / Model Validation
 
-On `Database::open()`, the stored `embedding_dim` is compared to the config value. A mismatch returns:
+On `Database::open()`, the stored `embedding_dim` and `model_id` are compared to the config values. A mismatch is a hard error:
 
 ```
 Dimension mismatch: database has dim=256, config has dim=384
+Model mismatch: database was indexed with model 'nomic-embed-text-v1.5', config has 'mxbai-embed-large-v1' — delete the database and re-index to switch models
 ```
 
 Resolution: delete the database and re-index.
@@ -215,6 +252,8 @@ Polaris does not depend on the `chrono` crate. Timestamps are generated via a cu
 pub struct DbStats {
     pub doc_count: usize,
     pub chunk_count: usize,
+    pub empty_doc_count: usize,        // Documents that produced zero chunks
+    pub total_source_bytes: u64,       // Sum of file_size across documents
     pub last_indexed: Option<String>,  // RFC 3339 or None
     pub db_size_bytes: u64,            // From filesystem metadata
     pub embedding_dim: usize,          // From metadata table

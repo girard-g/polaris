@@ -80,6 +80,8 @@ let dim: usize = engine.dim();
 pub struct EmbeddingEngine {
     model: Mutex<TextEmbedding>,
     target_dim: usize,
+    doc_prefix: String,    // model-specific document prefix
+    query_prefix: String,  // model-specific query prefix
 }
 ```
 

@@ -34,7 +34,7 @@ Search indexed documentation using semantic similarity.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `query` | string | yes | — | Natural language search query |
-| `top_k` | integer | no | 5 | Number of results to return |
+| `top_k` | integer | no | 5 | Number of results to return (clamped to `max_top_k`, default 50) |
 
 **Returns:** Markdown-formatted string with scored results.
 
@@ -95,9 +95,12 @@ Return statistics about the current index.
 Documents: 24
 Chunks: 312
 Database size: 1437696 bytes
+Model: nomic-embed-text-v1.5
 Embedding dim: 512
 Last indexed: 2025-02-26T14:23:45Z
 ```
+
+The `index` tool also emits progress notifications when the caller passes a `progressToken` in the request `_meta` field.
 
 ## Protocol Details
 
@@ -106,7 +109,7 @@ Last indexed: 2025-02-26T14:23:45Z
 - **Server name:** `polaris`
 - **Version:** from `CARGO_PKG_VERSION`
 - **Server instructions** (sent in `initialize` response):
-  > Polaris is a semantic search MCP server for project documentation. Use `search` to find relevant documentation chunks, `index` to add new files, and `status` to check the index health.
+  > Polaris is a semantic search MCP for project documentation. Prefer `search` over grep/read for documentation questions — it returns ranked, section-aware chunks and is typically 10-40× cheaper in tokens than grepping the docs and reading files. Query with specific domain terms; start with top_k=2 and raise only if recall is poor. Use `index` to add files, `status` to check index health.
 
 ## Shared State
 
@@ -114,16 +117,14 @@ All three tools share a single `PolarisState`:
 
 ```rust
 PolarisState {
-    config:           Arc<PolarisConfig>,
-    embedding_engine: Arc<EmbeddingEngine>,  // Mutex<TextEmbedding> inside
-    read_db:          Arc<Mutex<Database>>,  // search + status
-    write_db:         Arc<Mutex<Database>>,  // index
+    config: Arc<PolarisConfig>,
+    bank:   polaris_core::Bank,  // Arc<BankInner> with Mutex<Database> inside
 }
 ```
 
-Two separate `rusqlite::Connection`s open the same WAL-mode file. Search/status use `read_db`; index uses `write_db`. Under WAL, a concurrent index run won't block search queries.
+`Bank` is cheaply cloneable (`Arc<BankInner>` internally) and serialises concurrent access through its own `Mutex<Database>`. MCP tool calls are typically serial, so this single-connection model is acceptable. The underlying SQLite connection runs in WAL mode.
 
-Each tool clones the required `Arc`s and offloads all blocking work to `tokio::task::spawn_blocking`. The DB mutex is acquired inside the blocking closure — never across an `.await` point.
+Each tool clones the `config` / `bank` handle and offloads all blocking work to `tokio::task::spawn_blocking`. The DB mutex is acquired inside the blocking closure — never across an `.await` point.
 
 ## Error Handling in Tools
 
@@ -136,7 +137,7 @@ Error: <embedding error message>
 
 ## Implementation Notes
 
-- The `mcp/server.rs` file does **not** import `use crate::error::Result` — it conflicts with rmcp macro-generated code that expects `ErrorData`. Use `std::result::Result` or `PolarisError` directly.
+- `polaris-cli/src/mcp/server.rs` does **not** import `polaris_core::Result` — it conflicts with rmcp macro-generated code that expects `ErrorData`. Use `std::result::Result` or `PolarisError` directly.
 - The `#[tool_router]` attribute on the `impl PolarisServer` block generates the routing table.
 - `#[tool_handler(router = self.tool_router)]` wires it into `ServerHandler`.
-- `Database` (`rusqlite::Connection`) is `!Send`. It is accessed via `Arc<Mutex<Database>>` — the `Arc` is cloned on the async side, the lock is acquired inside the `spawn_blocking` closure where `Send` is not required.
+- `Database` (`rusqlite::Connection`) is `!Send`. It is accessed through `Bank`, which holds an `Arc<BankInner>` containing a `Mutex<Database>` — the cheap `Bank` handle is cloned on the async side and the lock is acquired inside the `spawn_blocking` closure where `Send` is not required.

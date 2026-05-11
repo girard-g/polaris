@@ -127,9 +127,9 @@ The `index` MCP tool currently returns a summary after completion. Real-time pro
 
 ---
 
-## v3 Todo List
+## Multi-Tenant Todo List
 
-Features planned for v3, in rough priority order.
+Features planned for the multi-tenant deployment mode, in rough priority order.
 
 ### Multi-tenant deployment
 
@@ -216,15 +216,3 @@ Browser-based admin and user interface, served on the same HTTPS port, bundled i
 ### Cross-encoder reranking
 
 After KNN + BM25 retrieval, re-score with a small cross-encoder model for better precision on ambiguous queries.
-
-### Web UI
-
-Simple local web interface for browsing indexed docs and testing search queries.
-
-### Non-markdown formats
-
-Extend indexing to `.txt`, `.rst`, and source code files. Requires format-specific chunking strategies.
-
-### Concurrent DB access
-
-Replace `Arc<Mutex<Database>>` with a connection pool (e.g. `r2d2` + `rusqlite`) to allow parallel read queries. Write operations (indexing) would still serialize.

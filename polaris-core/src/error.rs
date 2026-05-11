@@ -23,6 +23,9 @@ pub enum PolarisError {
     #[error("Setup error: {0}")]
     Setup(String),
 
+    #[error("Update error: {0}")]
+    Update(String),
+
     #[error("Dimension mismatch: database has dim={db_dim}, config has dim={config_dim}")]
     DimensionMismatch { db_dim: usize, config_dim: usize },
 

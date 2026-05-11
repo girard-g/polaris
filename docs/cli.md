@@ -137,15 +137,15 @@ To configure authentication, set the `AUTH_TOKEN` environment variable...
 ...
 ```
 
-Score is `1.0 - cosine_distance`. Higher is more similar.
+Score is the final hybrid-search score (RRF + heading boost, after MMR rerank) normalised to `[0, 1]` per result set, so the top result is `1.000` and others are fractions of it. See [Search → Score interpretation](search.md).
 
 **Error cases (stderr, exit 1):**
 
 | Situation | Message |
 |-----------|---------|
-| DB file doesn't exist | `No index found at 'polaris.db'. Run 'polaris index <path>' first.` |
-| DB exists but empty | `Index is empty. Run 'polaris index <path>' to add documents.` |
-| DB has docs, no match | `No results found.` (stdout, exit 0) |
+| DB file doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| DB exists but empty | `index is empty  —  run polaris index <path> to add documents` (stdout, exit 0) |
+| DB has docs, no match | `no matches found` plus a `tip:` line (stdout, exit 0) |
 
 ---
 
@@ -287,7 +287,7 @@ polaris savings --output json
 
 | Situation | Message |
 |-----------|---------|
-| `polaris.db` doesn't exist | `no index at 'polaris.db'  —  run polaris index <path> first` |
+| `polaris.db` doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
 
 ---
 
@@ -299,7 +299,7 @@ Show how a file was chunked — heading contexts, byte offsets, and content prev
 polaris chunks docs/guide.md
 ```
 
-Useful for diagnosing retrieval quality. The path must match the normalised form stored in the index (e.g. `docs/guide.md`, not `./docs/guide.md`).
+Useful for diagnosing retrieval quality. Paths are normalised before lookup, so `./docs/guide.md` and `docs/guide.md` both work.
 
 ---
 
@@ -308,6 +308,8 @@ Useful for diagnosing retrieval quality. The path must match the normalised form
 | Variable | Effect |
 |----------|--------|
 | `RUST_LOG` | Log level filter. Examples: `debug`, `polaris=trace`, `warn` |
+| `RUST_LOG_STYLE` | Log colour. `never` disables ANSI colours |
+| `POLARIS_CACHE_DIR` | Override the user-global model cache root. Models are stored under `$POLARIS_CACHE_DIR/models/`. See [Configuration → Model Caching](configuration.md#model-caching). |
 
 ## Exit Codes
 

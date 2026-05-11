@@ -4,17 +4,17 @@ Conventions and constraints that must be followed when modifying or extending Po
 
 ## Error Handling
 
-### Use the `Result` alias everywhere — except `mcp/server.rs`
+### Use the `Result` alias everywhere — except `polaris-cli/src/mcp/server.rs`
 
 ```rust
-// error.rs defines:
+// polaris-core/src/error.rs defines:
 pub type Result<T> = std::result::Result<T, PolarisError>;
 
-// Use it in all modules:
-use crate::error::Result;
+// Re-exported at the crate root, so downstream code uses:
+use polaris_core::Result;
 ```
 
-**Exception:** `mcp/server.rs` must NOT import `use crate::error::Result`. The rmcp `#[tool]` and `#[tool_router]` macros generate code that expects `ErrorData` in scope, and importing the custom `Result` alias breaks compilation. Use bare `std::result::Result<_, PolarisError>` or `PolarisError` directly.
+**Exception:** `polaris-cli/src/mcp/server.rs` must NOT import `polaris_core::Result`. The rmcp `#[tool]` and `#[tool_router]` macros generate code that expects `ErrorData` in scope, and importing the custom `Result` alias breaks compilation. Use bare `std::result::Result<_, PolarisError>` or `PolarisError` directly.
 
 ### Tool errors are strings, not MCP errors
 
@@ -39,9 +39,9 @@ Reserve `Indexing(String)` for unexpected/ad-hoc errors. Named variants with con
 Arc<EmbeddingEngine>  // pass this, not a cloned EmbeddingEngine
 ```
 
-### `Database` is behind `Arc<Mutex<Database>>` in MCP mode
+### `Database` is wrapped inside `Bank` in MCP mode
 
-Lock the mutex per operation, not per session. Do not hold the lock across `await` points.
+The MCP server's `PolarisState` holds a `polaris_core::Bank` instead of a raw `Arc<Mutex<Database>>`. `Bank` is `Arc<BankInner>` internally and serialises access through its own `Mutex<Database>`. Clone the cheap `Bank` handle into each tool's `spawn_blocking` closure; lock per operation, not per session; and do not hold the lock across `.await` points.
 
 ### `TextEmbedding` requires `&mut self` — always goes through `Mutex`
 

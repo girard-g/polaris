@@ -1,16 +1,29 @@
 # Architecture
 
+Polaris is a Cargo workspace with two crates:
+
+- **`polaris-core`** — the retrieval pipeline as a library (`bank`, `config`, `db`, `embedding`, `error`, `indexer`, `paths`, `search`).
+- **`polaris-cli`** — the binary: CLI entry point, MCP server, setup orchestration, savings reporter, TUI.
+
 ## Module Map
 
 ```
-src/
-├── main.rs         CLI entry point — parses args, dispatches commands
-├── config.rs       Config loading (TOML + CLI overrides)
+polaris-core/src/
+├── lib.rs          Library entry — re-exports the public API
+├── config.rs       PolarisConfig (TOML + CLI overrides), IndexOpts, SearchOpts
 ├── error.rs        PolarisError enum + Result alias
-├── embedding.rs    EmbeddingEngine — wraps fastembed, handles prefix + normalization
-├── db.rs           Database — SQLite schema, CRUD, KNN + BM25 search, migrations
+├── paths.rs        polaris_cache_dir() — global ONNX model cache resolver
+├── embedding.rs    EmbeddingEngine / SharedEmbedding — fastembed wrapper
+├── db.rs           Database — SQLite schema, CRUD, KNN + BM25, migrations, search_log
+├── bank.rs         Bank + BankSet — per-project DB handle, multi-DB fused search
 ├── indexer.rs      Indexer — file discovery, chunking, incremental sync
-├── search.rs       SearchEngine — hybrid search: KNN + BM25 → RRF → MMR
+└── search.rs       SearchEngine — hybrid: KNN + BM25 → RRF → MMR
+
+polaris-cli/src/
+├── main.rs         CLI entry point — parses args, dispatches commands
+├── setup.rs        `polaris setup` — gitignore + agent-instruction-file orchestration
+├── savings.rs      `polaris savings` — query the search_log table
+├── tui.rs          Progress UI helpers for indexing
 └── mcp/
     ├── mod.rs      Re-exports
     ├── server.rs   PolarisServer — tool implementations, ServerHandler
@@ -19,64 +32,77 @@ src/
 
 ## Component Responsibilities
 
-### `main.rs`
+### `polaris-cli/src/main.rs`
 - CLI argument parsing via clap
-- Bootstrap: load config → register sqlite-vec extension → open DB → init embedding engine
-- Route to: `index`, `search`, `serve`, or `status`
+- Bootstrap: load config → register sqlite-vec extension → open Bank → init embedding engine
+- Route to: `index`, `search`, `serve`, `status`, `watch`, `chunks`, `setup`, `savings`
 - Logging setup (stderr for `serve`, stdout otherwise)
 
-### `config.rs`
+### `polaris-core/src/config.rs`
 - `PolarisConfig` is the central config struct (serde-deserializable from TOML)
 - Load priority: explicit `--config` flag → `./polaris.toml` → platform config dir → defaults
 - Platform config dir: `~/.config/polaris/` (Linux), `~/Library/Application Support/polaris/` (macOS), `%APPDATA%\polaris\` (Windows)
-- `apply_overrides()` handles `--dim` and `--db` CLI flags after loading
-- Fields: `db_path`, `embedding_dim`, `max_chunk_tokens`, `chunk_overlap_chars`, `model_id`, `mmr_lambda`, `mmr_candidate_multiplier`, `heading_boost`, `rrf_k`
+- `apply_overrides()` handles `--db`, `--dim`, and `--model` CLI flags after loading
+- Fields: `db_path`, `embedding_dim`, `max_chunk_tokens`, `chunk_overlap_chars`, `model_id`, `mmr_lambda`, `mmr_candidate_multiplier`, `heading_boost`, `rrf_k`, `max_top_k`, `max_file_size`, `extra_db_paths`
+- Also defines `IndexOpts` and `SearchOpts` used by `Bank`
 
-### `error.rs`
-- `PolarisError` with `thiserror` — distinct variants for Embedding, Database, IO, Config, MCP, DimensionMismatch, ModelMismatch
+### `polaris-core/src/error.rs`
+- `PolarisError` with `thiserror` — variants: Embedding, Database, Io, Indexing, Config, Mcp, Setup, DimensionMismatch, ModelMismatch
 - `Result<T>` alias used throughout the codebase
-- Exception: `mcp/server.rs` does NOT import this alias (conflicts with rmcp macro-generated code)
+- Exception: `polaris-cli/src/mcp/server.rs` does NOT import this alias (conflicts with rmcp macro-generated code) and uses `PolarisError` directly
 
-### `embedding.rs`
-- `EmbeddingEngine` wraps `TextEmbedding` from fastembed inside a `Mutex`
+### `polaris-core/src/paths.rs`
+- `polaris_cache_dir()` resolves the global ONNX model cache directory
+- Resolution order: `$POLARIS_CACHE_DIR/models` → `dirs::cache_dir()/polaris/models` → error
+- Directory is created on resolve so fastembed can write into it
+
+### `polaris-core/src/embedding.rs`
+- `EmbeddingEngine` wraps `TextEmbedding` from fastembed inside a `Mutex` and carries `target_dim` plus the model's `doc_prefix` / `query_prefix`
 - Mutex required because `TextEmbedding::embed()` takes `&mut self`
 - Exposes `embed_documents(&[String])` and `embed_query(&str)` — both apply task prefix and L2-normalize
-- Matryoshka truncation: full 768-dim output is sliced to `target_dim`
+- Matryoshka truncation: native-dim output (768 for nomic, 1024 for mxbai, 384 for minilm) is sliced to `target_dim`
+- `SharedEmbedding` is an `Arc`-wrapped handle shared by `Bank` / `BankSet`
 
-### `db.rs`
+### `polaris-core/src/db.rs`
 - `register_vec_extension()` must be called once before any `Connection` is opened
 - `Database::open(path, dim, model_id)` creates schema on first run; validates `embedding_dim` and `model_id` against metadata on subsequent runs; applies migrations automatically
-- Schema v2: `documents`, `chunks`, `vec_chunks` (sqlite-vec KNN), `chunks_fts` (FTS5 BM25)
+- Schema v3: `documents`, `chunks`, `vec_chunks` (sqlite-vec KNN), `chunks_fts` (FTS5 BM25), `search_log` (savings telemetry)
 - `search_knn_with_embeddings()` — KNN with per-result embedding fetch (for MMR)
 - `search_bm25()` — FTS5 BM25 ranked search
 - `get_chunk_with_metadata()` — hydrate BM25-only results with content + embedding
+- `insert_search_log()` / `aggregate_savings()` — append-only telemetry feeding `polaris savings`
 - FTS5 writes are manually synchronized on insert and delete
-- Central structs: `DocumentRecord`, `ChunkRecord`, `SearchResult`, `SearchResultWithEmbedding`, `Bm25Result`, `DbStats`
+- Central structs: `DocumentRecord`, `ChunkRecord`, `SearchResult`, `SearchResultWithEmbedding`, `Bm25Result`, `DbStats`, `SearchLogRow`, `SavingsAggregate`
 
-### `indexer.rs`
+### `polaris-core/src/bank.rs`
+- `Bank` is the per-project handle bundling a `Database`, embedding engine, and indexing/search config
+- Internally `Arc<BankInner>` with a `Mutex<Database>` — `Bank::clone()` is cheap
+- `BankSet` mounts multiple `Bank`s for fused multi-DB search (primary + `extra_db_paths`)
+
+### `polaris-core/src/indexer.rs`
 - `Indexer` holds `Arc<EmbeddingEngine>` + chunking config
 - `index_path()` runs a **three-phase pipeline** optimised for large corpora:
   - **Phase A (parallel collect):** `rayon::par_iter()` reads each file once — SHA256 from in-memory bytes, then `chunk_markdown()`. Concurrent across all CPU cores.
   - **Phase B (cross-file embedding):** All chunks from all pending files are flattened and embedded in batches of 32. Batches are always full (except the last), maximising ONNX throughput.
   - **Phase C (single-transaction write):** One `BEGIN`/`COMMIT` for the entire run.
 - `Chunk` struct carries `heading_context` (e.g. `"Guide > Installation"`)
-- `FileData` struct is the intermediate representation produced by Phase A
+- Files larger than `max_file_size` (default 10 MB) are skipped with an error recorded in `IndexReport.errors`
+- `normalise_path()` is exported so callers can pre-normalise paths; CLI commands like `chunks` apply it automatically
 
-### `search.rs`
+### `polaris-core/src/search.rs`
 - `SearchEngine<'a>` borrows both `EmbeddingEngine` and `Database` by reference
 - Hybrid pipeline: vector KNN + BM25 → RRF fusion → heading boost → MMR rerank → `Vec<SearchResult>`
+- `search()` normalises scores to `[0, 1]` per result set (top result = 1.0); `search_raw()` returns the raw RRF score for `BankSet` to fuse across multiple banks before its own normalisation pass
 - `compute_rrf_scores()` — pure function, rank-based fusion (scale-invariant)
 - `compute_heading_boost()` — additive bonus for heading term matches
 - `mmr_rerank()` — greedy Maximal Marginal Relevance selection
-- `format_results()` — formats to markdown string; `score` field holds the final normalized [0,1] score
+- `format_results()` — formats to markdown string; `score` field holds the final normalised [0,1] score
 
-### `mcp/server.rs`
-- `PolarisState` holds `Arc<PolarisConfig>`, `Arc<EmbeddingEngine>`, `read_db: Arc<Mutex<Database>>`, `write_db: Arc<Mutex<Database>>`
-- Two separate DB connections to the same file so reads (search, status) and writes (index) don't mutually serialize under WAL mode
-- `lock_db()` helper acquires a `Mutex` guard or returns a formatted error string — used by all three tool closures
-- `PolarisServer` implements `ServerHandler` with three `#[tool]` methods
-- Each tool clones required `Arc`s, then offloads all blocking work via `tokio::task::spawn_blocking`
-- DB mutex is acquired inside the blocking closure (never across an `.await`)
+### `polaris-cli/src/mcp/server.rs`
+- `PolarisState` holds `config: Arc<PolarisConfig>` and `bank: polaris_core::Bank`
+- `Bank` clones cheaply (`Arc<BankInner>` internally) and serialises concurrent access through its own `Mutex<Database>`; MCP tool calls are typically serial so this single-connection model is acceptable
+- `PolarisServer` implements `ServerHandler` with three `#[tool]` methods: `search`, `index`, `status`
+- Each tool clones `config` / `bank`, then offloads blocking work via `tokio::task::spawn_blocking`
 - Tool errors are returned as formatted strings (not MCP error objects) for simplicity
 
 ## Data Flow
@@ -130,8 +156,9 @@ Query string
       → returns (scores_map, bm25_only_ids)
   → fetch metadata + embeddings for BM25-only chunks
   → heading boost on RRF scores
-  → MMR rerank (greedy, lambda=0.7)
-  → top_k results with score in distance field
+  → MMR rerank (greedy, lambda from config)
+  → normalise scores to [0, 1] (top result = 1.0)
+  → top_k Vec<SearchResult>
   → format_results() → markdown string
 ```
 
@@ -139,18 +166,16 @@ Query string
 
 ```
 PolarisState {
-    config:           Arc<PolarisConfig>       (read-only)
-    embedding_engine: Arc<EmbeddingEngine>     (Mutex<TextEmbedding> inside)
-    read_db:          Arc<Mutex<Database>>     (search + status)
-    write_db:         Arc<Mutex<Database>>     (index)
+    config: Arc<PolarisConfig>     (read-only)
+    bank:   polaris_core::Bank     (Arc<BankInner> with Mutex<Database> inside)
 }
 ```
 
-Two separate `rusqlite::Connection`s open the same WAL-mode database file. Read operations (search, status) use `read_db`; write operations (index) use `write_db`. Under WAL mode a writer never blocks readers, so a background index call won't stall concurrent search queries.
+`Bank` owns the single `rusqlite::Connection` (WAL mode) and serialises access through its internal mutex. Tool handlers clone the cheap `Bank` handle before entering `spawn_blocking` and never hold a lock across an `.await` point.
 
 ## Threading Model
 
 - tokio runtime runs the MCP server loop
 - Tool handlers are `async fn`; all blocking work (embedding, SQLite, filesystem) runs on a dedicated thread pool via `tokio::task::spawn_blocking`
-- Each tool clones the relevant `Arc`s before entering `spawn_blocking`; the DB mutex is acquired inside the closure, never across an `.await` point
-- `read_db` and `write_db` each serialize their respective callers through their own mutex; a search and an index can proceed concurrently under WAL mode
+- Each tool clones the relevant `Arc`s / `Bank` handle before entering `spawn_blocking`; the DB mutex is acquired inside the closure, never across an `.await` point
+- WAL mode is still enabled on the underlying connection, but a single-connection model means concurrent tool calls serialise on the bank mutex

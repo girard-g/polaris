@@ -39,6 +39,16 @@ heading_boost = 0.05
 # RRF k constant for Reciprocal Rank Fusion
 # Higher values smooth the score distribution; 60 is the standard default
 rrf_k = 60
+
+# Cap on the `top_k` value accepted by search commands (prevents runaway queries)
+max_top_k = 50
+
+# Maximum file size (in bytes) the indexer will process; larger files are skipped
+max_file_size = 10485760  # 10 MiB
+
+# Additional read-only database paths for multi-DB search (BankSet)
+# extra_db_paths = ["/path/to/other/polaris.db", "../shared/docs.db"]
+extra_db_paths = []
 ```
 
 ## Load Priority
@@ -63,6 +73,9 @@ Config is resolved in this order (first match wins):
 | `mmr_candidate_multiplier` | `3` | — | Candidate pool = top_k × 3 |
 | `heading_boost` | `0.05` | — | Additive; 0.0 disables it |
 | `rrf_k` | `60` | — | RRF rank fusion constant |
+| `max_top_k` | `50` | — | Maximum `top_k` accepted by search commands |
+| `max_file_size` | `10485760` | `> 0` | 10 MiB; larger files are skipped during indexing |
+| `extra_db_paths` | `[]` | — | Additional read-only DBs fused into search (multi-DB) |
 
 ## Config Validation
 
@@ -76,14 +89,15 @@ Error: Config error: chunk_overlap_chars (2000) must be less than max_chunk_toke
 
 ## CLI Overrides
 
-Two config values can be overridden at runtime without editing the config file:
+Three config values can be overridden at runtime without editing the config file:
 
 ```bash
-polaris --dim 384 index ./docs      # Override embedding_dim
-polaris --db /tmp/test.db search "query"  # Override db_path
+polaris --dim 384 index ./docs              # Override embedding_dim
+polaris --db /tmp/test.db search "query"    # Override db_path
+polaris --model mxbai-embed-large-v1 index ./docs  # Override model_id
 ```
 
-These flags are global (accepted before any subcommand).
+These flags are global (accepted before any subcommand). `model_id` and `embedding_dim` are still validated against any existing database on open — switching values typically requires deleting the database and re-indexing.
 
 ## Database Constraints
 

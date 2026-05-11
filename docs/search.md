@@ -19,7 +19,8 @@ Query string
   → fetch metadata + embeddings for BM25-only results
   → heading boost: additive bonus for heading term matches
   → MMR rerank: greedy diversity selection
-  → top_k results, score stored in `distance` field
+  → normalise scores to [0, 1] (top result = 1.0)
+  → top_k results
   → format_results() → Markdown string
 ```
 
@@ -29,13 +30,14 @@ Query string
 pub struct SearchResult {
     pub chunk_id:        i64,
     pub content:         String,
-    pub heading_context: String,  // e.g. "# Guide > ## Auth"
+    pub heading_context: String,         // e.g. "# Guide > ## Auth"
     pub file_path:       String,
-    pub distance:        f32,     // RRF + heading boost score (higher = better)
+    pub score:           f32,            // Normalised [0, 1]; top result = 1.0
+    pub source_db:       Option<String>, // Populated only for multi-DB BankSet results
 }
 ```
 
-Note: `distance` no longer stores cosine distance. It holds the final combined score (RRF + heading boost) for display purposes.
+`SearchEngine::search` divides every result's raw score by the maximum score in the result set so the top hit is always `1.000`. Use `SearchEngine::search_raw` (called by `BankSet`) to get the unnormalised RRF + heading-boost scores when results must be fused across multiple banks before a single cross-bank normalisation pass.
 
 ## Scoring
 
@@ -50,7 +52,7 @@ score(d) = 1 / (k + rank_vector(d))  +  1 / (k + rank_bm25(d))
 - `k = 60` by default (`rrf_k` in config)
 - If a chunk only appears in one list, it gets one term only
 - Higher score = better match
-- Typical range: `0.01–0.04` for single-list hits, up to ~`0.09` for top hits in both lists
+- The raw RRF range is roughly `0.01–0.09`, but `SearchEngine::search` normalises by the per-call maximum, so the displayed `score` is in `[0, 1]` with `1.000` at the top
 
 ### Heading Boost
 
@@ -75,14 +77,14 @@ Default `mmr_lambda = 0.7` (favours relevance over diversity).
 ## Result Format
 
 ```markdown
-### Result 1 — score: 0.041
+### Result 1 — score: 1.000
 **Section:** Guide > Authentication
 **File:** `docs/guide.md`
 
 To configure authentication, set the `AUTH_TOKEN` environment variable...
 
 ---
-### Result 2 — score: 0.028
+### Result 2 — score: 0.683
 **Section:** Reference > API
 **File:** `docs/reference.md`
 
@@ -116,6 +118,11 @@ impl<'a> SearchEngine<'a> {
     ) -> Self;
 
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>>;
+
+    /// Like `search`, but returns raw (unnormalised) RRF + heading-boost
+    /// scores. Used by `BankSet` to fuse results from multiple banks before
+    /// applying a single cross-bank normalisation pass.
+    pub fn search_raw(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>>;
 
     pub fn format_results(results: &[SearchResult]) -> String;
 }

@@ -33,9 +33,38 @@ pub fn target_triple() -> Option<&'static str> {
     }
 }
 
+/// Read a single line from `reader` and treat it as a yes/no answer.
+///
+/// Accepts `y`, `yes`, `Y`, `YES` (case-insensitive) as yes. Anything else — including
+/// EOF, an empty line, or `maybe` — counts as no. The prompt text must be written by
+/// the caller before invoking this function.
+///
+/// `writer` is currently unused but kept so callers can route the answer echo if
+/// desired in the future; tests pass a `Vec<u8>` sink.
+pub fn prompt_yes_no(
+    reader: &mut impl std::io::BufRead,
+    _writer: &mut impl std::io::Write,
+) -> std::io::Result<bool> {
+    let mut line = String::new();
+    let n = reader.read_line(&mut line)?;
+    if n == 0 {
+        // EOF before any data — treat as "no".
+        return Ok(false);
+    }
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(matches!(answer.as_str(), "y" | "yes"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    fn yn(input: &str) -> bool {
+        let mut reader = Cursor::new(input.as_bytes().to_vec());
+        let mut writer: Vec<u8> = Vec::new();
+        prompt_yes_no(&mut reader, &mut writer).unwrap()
+    }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
@@ -60,4 +89,25 @@ mod tests {
     fn target_triple_does_not_panic() {
         let _ = target_triple();
     }
+
+    #[test]
+    fn prompt_yes_no_accepts_y_lower() { assert!(yn("y\n")); }
+    #[test]
+    fn prompt_yes_no_accepts_yes_lower() { assert!(yn("yes\n")); }
+    #[test]
+    fn prompt_yes_no_accepts_y_upper() { assert!(yn("Y\n")); }
+    #[test]
+    fn prompt_yes_no_accepts_yes_upper() { assert!(yn("YES\n")); }
+    #[test]
+    fn prompt_yes_no_accepts_yes_mixed() { assert!(yn("Yes\n")); }
+    #[test]
+    fn prompt_yes_no_rejects_n() { assert!(!yn("n\n")); }
+    #[test]
+    fn prompt_yes_no_rejects_empty_line() { assert!(!yn("\n")); }
+    #[test]
+    fn prompt_yes_no_rejects_eof() { assert!(!yn("")); }
+    #[test]
+    fn prompt_yes_no_rejects_garbage() { assert!(!yn("maybe\n")); }
+    #[test]
+    fn prompt_yes_no_trims_trailing_whitespace() { assert!(yn("  y  \n")); }
 }

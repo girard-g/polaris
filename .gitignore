@@ -5,3 +5,4 @@ polaris.db-wal
 .fastembed_cache/
 .mcp.json
 docs/superpowers/
+CLAUDE.md

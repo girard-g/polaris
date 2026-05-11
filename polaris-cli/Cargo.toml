@@ -25,6 +25,9 @@ schemars = "1"
 # Watcher (CLI-only in Phase 1)
 notify-debouncer-mini = "0.4"
 
+# Self-update (GitHub Releases backend, rustls TLS)
+self_update = { version = "0.44", features = ["rustls"] }
+
 # Async + logging
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -2,6 +2,7 @@ mod mcp;
 mod setup;
 mod savings;
 mod tui;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -130,6 +131,22 @@ enum Command {
         #[arg(long, value_enum, default_value = "plain")]
         output: OutputFormat,
     },
+
+    /// Self-update the polaris binary from the latest GitHub release
+    Update {
+        /// Check for an update without installing
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Install a specific version instead of latest (e.g. 2.0.10)
+        #[arg(long)]
+        version: Option<String>,
+        /// Re-install even when already on the target version
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +217,9 @@ async fn run(cli: Cli) -> Result<()> {
                 limit.unwrap_or(20),
                 output == OutputFormat::Json,
             )
+        }
+        Command::Update { check, yes, version, force } => {
+            update::run(update::UpdateOpts { check, yes, version, force })
         }
     }
 }

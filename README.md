@@ -50,7 +50,7 @@ polaris serve               # stdio MCP server for Claude Code
 
 ## How It Works
 
-Polaris indexes markdown files as vector embeddings (via a local ONNX model) and full-text search entries (FTS5). At query time it runs both vector KNN and BM25, fuses the results with Reciprocal Rank Fusion, applies a heading boost, and reranks with MMR for diversity.
+Polaris uses **hybrid search**: it indexes markdown as both vector embeddings (via a local ONNX model) and full-text search entries (FTS5). At query time it runs vector KNN and BM25 in parallel, fuses the results with Reciprocal Rank Fusion, applies a heading boost, and reranks with MMR for diversity.
 
 ```
 query → vector KNN + BM25 → RRF fusion → heading boost → MMR rerank → top-k results

@@ -35,7 +35,7 @@ polaris-cli/src/
 ### `polaris-cli/src/main.rs`
 - CLI argument parsing via clap
 - Bootstrap: load config → register sqlite-vec extension → open Bank → init embedding engine
-- Route to: `index`, `search`, `serve`, `status`, `watch`, `chunks`, `setup`, `savings`
+- Route to: `index`, `search`, `serve`, `status`, `watch`, `chunks`, `setup`, `savings`, `update`
 - Logging setup (stderr for `serve`, stdout otherwise)
 
 ### `polaris-core/src/config.rs`

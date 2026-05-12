@@ -65,6 +65,8 @@ cargo build --release
 # binary at: ./target/release/polaris
 ```
 
+Already installed? Run `polaris update` to upgrade in place.
+
 First search will download the embedding model (~137 MB) to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux). See [Configuration → Model Caching](docs/configuration.md#model-caching) for the full resolution order and the `POLARIS_CACHE_DIR` override.
 
 ## Usage

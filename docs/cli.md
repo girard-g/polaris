@@ -303,6 +303,46 @@ Useful for diagnosing retrieval quality. Paths are normalised before lookup, so 
 
 ---
 
+### `polaris update`
+
+Self-upgrade the polaris binary from the latest GitHub release.
+
+```
+polaris update                       # check, prompt y/N, install
+polaris update --check               # read-only: print latest vs current
+polaris update --yes                 # skip prompt
+polaris update -y                    # short form of --yes
+polaris update --version 2.0.10      # install a specific version
+polaris update --force               # re-install even when already on latest
+```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--check` | Read-only. Prints `polaris is up to date` or `update available: vX.Y.Z → vA.B.C` and exits. |
+| `--yes` / `-y` | Skip the confirmation prompt. |
+| `--version <X.Y.Z>` | Install a specific version (pin or downgrade) instead of the latest tag. |
+| `--force` | Re-install even when already on the target version (recovery from a corrupted binary). |
+
+Behaviour:
+
+- Fetches the latest release (or `--version` when provided) from `github.com/girard-g/polaris`.
+- Compares to `CARGO_PKG_VERSION` using semver.
+- Downloads the asset matching the running platform (`polaris-linux-x86_64`, `polaris-macos-aarch64`, or `polaris-windows-x86_64.exe`) to a temp file alongside the running binary, then atomically renames it over the current executable.
+- On Windows the running binary is first renamed to `polaris.old` so the rename succeeds while the process is live.
+- Refuses with exit code 2 on platforms that have no release asset.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Update succeeded, already up to date, or `--check` ran cleanly |
+| 1 | User declined the prompt, or a network / API / I/O error occurred |
+| 2 | Running platform has no release asset |
+
+---
+
 ## Environment Variables
 
 | Variable | Effect |
@@ -316,4 +356,5 @@ Useful for diagnosing retrieval quality. Paths are normalised before lookup, so 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Any error (config, IO, embedding, DB, dimension mismatch) |
+| 1 | Generic error (config, IO, embedding, DB, dimension mismatch, user-declined prompt) |
+| 2 | `update` only — running platform has no release asset |

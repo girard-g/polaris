@@ -16,6 +16,15 @@ polaris index ./docs     # index your markdown
 polaris serve            # MCP server for Claude Code / Cursor / Codex
 ```
 
+## Features
+
+- **Hybrid semantic + lexical search** — vector KNN (sqlite-vec) and BM25 (FTS5) fused with Reciprocal Rank Fusion, then MMR-reranked for diversity.
+- **MCP-native** — exposes `search`, `index`, `status` tools over stdio. Works with Claude Code, Cursor, Codex, and any MCP-compatible coding agent.
+- **Local-first, zero cloud** — embeddings run on-CPU via a local ONNX model. No API keys, no telemetry, your code never leaves the machine.
+- **Single static binary** — one `curl | bash` install. No Python, no Node, no Docker.
+- **Auto-watch** — `polaris watch ./docs` re-indexes on file changes within ~500 ms, so the agent always sees fresh docs.
+- **Token-savings analytics** — `polaris savings` shows the cumulative tokens you've saved vs. the agent grepping and reading raw files.
+
 ## Why Polaris — Token Savings vs. Grep + Read
 
 For documentation questions, calling the Polaris MCP `search` tool is dramatically cheaper than the usual agent loop of grepping the docs tree and reading the matching files. Measured on a real query (*"how does Polaris embed documents?"*) against this repo's `docs/`:

@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "polaris-cli"
-version = "0.2.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2445,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "polaris-core"
-version = "0.2.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "console 0.15.11",

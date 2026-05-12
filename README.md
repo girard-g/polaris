@@ -290,3 +290,7 @@ CLI overrides: `polaris --dim 384 --db /tmp/test.db search "query"`
 | [docs/mcp-server.md](docs/mcp-server.md) | MCP tools and integration |
 | [docs/architecture.md](docs/architecture.md) | Module map and data flow |
 | [docs/todos.md](docs/todos.md) | Known limitations and roadmap |
+
+## License
+
+MIT — see [LICENSE](LICENSE).

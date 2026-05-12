@@ -171,7 +171,7 @@ fn classify_error(
         ),
         // GitHub Returns HTTP 404 for unknown tags; self_update wraps this as NetworkError.
         (E::Network(_) | E::Reqwest(_), Some(v))
-            if err_str.contains("404") =>
+            if err_str.contains("status: 404") =>
         {
             format!(
                 "no release tagged v{v}. See https://github.com/girard-g/polaris/releases for available versions."

@@ -207,6 +207,12 @@ Tools exposed: `search`, `index`, `status`.
 
 Numbers from this repo's docs; your mileage will vary.
 
+## Polaris Pro
+
+Polaris Pro extends the open-source server with **`polaris-ingest`** — a companion ingester for code, PDF, and `.docx` — and a **web UI** for browsing the index without an agent. Same hybrid retrieval pipeline; broader inputs and a human-friendly view on top.
+
+In development. [Join the waitlist](https://tally.so/r/ZjvJry) — early signups get 50% off at launch.
+
 ## Configuration
 
 Create `polaris.toml` in the working directory (all fields optional):

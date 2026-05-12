@@ -2,7 +2,7 @@
 # Polaris installer — downloads the latest release binary from GitHub
 # and installs it to ~/.local/bin (default) or /usr/local/bin (--system).
 #
-# Usage: curl -fsSL https://raw.githubusercontent.com/girard-g/polaris/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/girard-g/polaris/main/install.sh | bash
 #        ./install.sh [--system] [--dry-run] [--version vX.Y.Z]
 
 set -euo pipefail
@@ -31,7 +31,12 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --system) INSTALL_DIR="/usr/local/bin"; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
-        --version) VERSION="$2"; shift 2 ;;
+        --version)
+            if [ $# -lt 2 ]; then
+                echo "error: --version requires a value (e.g. --version v1.2.3)" >&2
+                exit 2
+            fi
+            VERSION="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac

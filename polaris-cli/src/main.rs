@@ -219,7 +219,12 @@ async fn run(cli: Cli) -> Result<()> {
             )
         }
         Command::Update { check, yes, version, force } => {
-            update::run(update::UpdateOpts { check, yes, version, force })
+            let opts = update::UpdateOpts { check, yes, version, force };
+            tokio::task::spawn_blocking(move || update::run(opts))
+                .await
+                .map_err(|e| polaris_core::error::PolarisError::Update(
+                    format!("update task panicked: {e}")
+                ))?
         }
     }
 }

@@ -163,10 +163,20 @@ fn classify_error(
     requested_version: Option<&str>,
 ) -> PolarisError {
     use self_update::errors::Error as E;
+    let err_str = err.to_string();
     let msg = match (&err, requested_version) {
+        // self_update may return E::Release or E::Network(404) for a missing tag.
         (E::Release(m), Some(v)) if m.contains(v) => format!(
             "no release tagged v{v}. See https://github.com/girard-g/polaris/releases for available versions."
         ),
+        // GitHub Returns HTTP 404 for unknown tags; self_update wraps this as NetworkError.
+        (E::Network(_) | E::Reqwest(_), Some(v))
+            if err_str.contains("404") =>
+        {
+            format!(
+                "no release tagged v{v}. See https://github.com/girard-g/polaris/releases for available versions."
+            )
+        }
         (E::Network(_) | E::Reqwest(_), _) => format!(
             "could not reach github.com ({err}). Check connectivity or try again later."
         ),

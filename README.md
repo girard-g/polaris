@@ -79,16 +79,36 @@ let results = bank.search("how does chunking work", SearchOpts { top_k: 5 })?;
 For multi-bank searches with score fusion, use `BankSet`. For incremental
 updates after a git pull, use `Bank::index_diff(&changed, &removed)`.
 
-## Install
+## Quick Start
+
+### Install (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/girard-g/polaris/main/install.sh | bash
+```
+
+Downloads the latest release binary and installs it to `~/.local/bin` (or `/usr/local/bin` with `--system`). Run `polaris update` later to upgrade in place.
+
+Windows: build from source (see below).
+
+### Install from source
 
 ```bash
 cargo build --release
 # binary at: ./target/release/polaris
 ```
 
-Already installed? Run `polaris update` to upgrade in place.
+For Windows or any platform where the `curl | bash` install does not have a release asset, build from source.
 
-First search will download the embedding model (~137 MB) to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux). See [Configuration → Model Caching](docs/configuration.md#model-caching) for the full resolution order and the `POLARIS_CACHE_DIR` override.
+### First search
+
+```bash
+polaris setup
+polaris index ./docs
+polaris search "your first query"
+```
+
+The first search downloads the embedding model (~137 MB) to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux). See [Configuration → Model Caching](docs/configuration.md#model-caching) for the full resolution order and the `POLARIS_CACHE_DIR` override.
 
 ## Usage
 

@@ -213,6 +213,35 @@ Polaris Pro extends the open-source server with **`polaris-ingest`** — a compa
 
 In development. [Join the waitlist](https://tally.so/r/ZjvJry) — early signups get 50% off at launch.
 
+## Frequently Asked Questions
+
+### What is Polaris?
+A local RAG server that lets coding agents semantically search your project docs over MCP.
+
+### What is MCP?
+The Model Context Protocol, an open standard from Anthropic that lets AI agents talk to external tools. Polaris implements an MCP server so Claude Code, Cursor, Codex, and similar agents can call it directly.
+
+### What's the difference between Polaris and Polaris Pro?
+The open-source Polaris server indexes Markdown only and is CLI-driven. **Polaris Pro** adds `polaris-ingest` for code, PDF, and `.docx`, plus a web UI. Pro is in development — see the [waitlist](https://tally.so/r/ZjvJry).
+
+### Does Polaris work with Claude Code, Cursor, and Codex?
+Yes. Any MCP-compatible client works. `polaris setup` writes the `.mcp.json` and updates `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` automatically.
+
+### Do I need an API key or cloud account?
+No. Embeddings run locally via a bundled ONNX model. Nothing is sent over the network after the initial model download.
+
+### How does Polaris compare to LangChain, LlamaIndex, or Haystack?
+Those are full RAG frameworks for building applications. Polaris is a thin, zero-config server purpose-built for the coding-agent use case: drop in next to a repo, get MCP search.
+
+### What file types does Polaris index?
+The open-source server indexes Markdown (`.md`). For code, PDF, and `.docx`, see `polaris-ingest` in [Polaris Pro](#polaris-pro).
+
+### Can I use Polaris on private or proprietary code?
+Yes. Everything runs locally; there's no telemetry. The MIT license permits commercial use.
+
+### How do I update Polaris?
+Run `polaris update` to upgrade in place, or re-run the install one-liner.
+
 ## Configuration
 
 Create `polaris.toml` in the working directory (all fields optional):

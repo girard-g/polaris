@@ -3,7 +3,7 @@
 use console::style;
 use polaris_core::error::{PolarisError, Result};
 use self_update::backends::github::Update as GhUpdate;
-use self_update::version::bump_is_compatible;
+use self_update::version::bump_is_greater;
 
 /// Options parsed from the `polaris update` subcommand.
 #[derive(Debug, Clone)]
@@ -78,8 +78,8 @@ pub fn run(opts: UpdateOpts) -> Result<()> {
     let target_ver = release.version.trim_start_matches('v').to_string();
 
     // 4. Compare versions.
-    //    bump_is_compatible returns Ok(true) iff `target_ver > current` per semver.
-    let is_newer = bump_is_compatible(current, &target_ver).unwrap_or(false);
+    //    bump_is_greater returns Ok(true) iff target_ver > current per semver ordering.
+    let is_newer = bump_is_greater(current, &target_ver).unwrap_or(false);
     let is_same = current == target_ver;
 
     // 5. --check is read-only.
@@ -140,23 +140,9 @@ pub fn run(opts: UpdateOpts) -> Result<()> {
         }
     }
 
-    // 8. Install. Re-build to ensure target_version_tag is wired before `.update()`.
-    let mut install_builder = GhUpdate::configure();
-    install_builder
-        .repo_owner("girard-g")
-        .repo_name("polaris")
-        .bin_name("polaris")
-        .target(asset)
-        .current_version(current)
-        .show_download_progress(true)
-        .no_confirm(true);
-    if let Some(v) = &opts.version {
-        install_builder.target_version_tag(&format!("v{v}"));
-    }
-
-    let status = install_builder
-        .build()
-        .map_err(|e| PolarisError::Update(format!("could not initialise installer: {e}")))?
+    // 8. Install. Reuse `updater` from step 3 — target_version_tag was already set on the
+    //    builder before `.build()`, so no second HTTP call is needed.
+    let status = updater
         .update()
         .map_err(|e| classify_error(e, opts.version.as_deref()))?;
 
@@ -186,7 +172,7 @@ fn classify_error(
         ),
         (E::Io(io), _) if matches!(
             io.kind(),
-            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Other
+            std::io::ErrorKind::PermissionDenied
         ) => format!(
             "cannot write to the polaris binary ({io}). Re-run with appropriate permissions, or reinstall manually."
         ),
@@ -234,6 +220,11 @@ pub fn prompt_yes_no(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn current_version_is_non_empty() {
+        assert!(!current_version().is_empty());
+    }
 
     fn yn(input: &str) -> bool {
         let mut reader = Cursor::new(input.as_bytes().to_vec());

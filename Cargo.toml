@@ -3,7 +3,7 @@ members = ["polaris-core", "polaris-cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.87"
 

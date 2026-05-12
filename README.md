@@ -1,11 +1,10 @@
 # Polaris — MCP Semantic Search for Claude Code, Cursor & Coding Agents
+**Polaris is a local-first RAG server that gives coding agents fast, ranked answers from your project's documentation — over the Model Context Protocol (MCP).** Drop it next to any repo and Claude Code, Cursor, or Codex stops grepping blindly: a single semantic search call returns the exact section the agent needs, typically **10–40× cheaper in tokens** than the usual grep-and-read loop.
 
 [![Build](https://img.shields.io/github/actions/workflow/status/girard-g/polaris/ci.yml?branch=main)](https://github.com/girard-g/polaris/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-7c3aed)](https://modelcontextprotocol.io)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange)](https://www.rust-lang.org)
-
-**Polaris is a local-first RAG server that gives coding agents fast, ranked answers from your project's documentation — over the Model Context Protocol (MCP).** Drop it next to any repo and Claude Code, Cursor, or Codex stops grepping blindly: a single semantic search call returns the exact section the agent needs, typically **10–40× cheaper in tokens** than the usual grep-and-read loop.
 
 Single static binary. No API keys, no cloud, no runtime dependencies — your code never leaves the machine. Named after the North Star: a fixed reference point so your agent always knows where it is.
 
@@ -108,7 +107,7 @@ polaris index ./docs
 polaris search "your first query"
 ```
 
-The first search downloads the embedding model (~137 MB) to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux). See [Configuration → Model Caching](docs/configuration.md#model-caching) for the full resolution order and the `POLARIS_CACHE_DIR` override.
+The first search downloads the embedding model (~137 MB) to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux). See [Configuration → Model Caching](docs/configuration.md) for the full resolution order and the `POLARIS_CACHE_DIR` override.
 
 ## Usage
 

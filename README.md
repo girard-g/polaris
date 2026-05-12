@@ -56,6 +56,17 @@ Polaris uses **hybrid search**: it indexes markdown as both vector embeddings (v
 query → vector KNN + BM25 → RRF fusion → heading boost → MMR rerank → top-k results
 ```
 
+## Polaris vs. Alternatives
+
+| | Polaris | grep + read (default agent loop) | Hosted RAG (Pinecone, LlamaIndex Cloud) | File-system MCP servers |
+|---|---|---|---|---|
+| **Setup** | one `curl \| bash` | none | account, API keys, infra | one `npx` |
+| **Privacy** | local, code never leaves machine | local | code uploaded to vendor | local |
+| **Token cost per query** | ~285–925 tokens | ~12,700 tokens | varies (network round-trip) | high (returns raw files) |
+| **Ranking** | hybrid (vector + BM25 + RRF + MMR) | none | vector-only by default | none |
+
+Numbers from this repo's docs; your mileage will vary.
+
 ## Library Use
 
 Polaris's retrieval pipeline is also available as a Rust library (`polaris-core`):

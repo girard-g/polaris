@@ -1,8 +1,20 @@
-# Polaris
+# Polaris — MCP Semantic Search for Claude Code, Cursor & Coding Agents
 
-Polaris is the North Star — the fixed point sailors and navigators have used for centuries to orient themselves in the dark. This tool aims to do the same for coding agents: give them a reliable reference point in an unfamiliar codebase, so they always know where they are.
+[![Build](https://img.shields.io/github/actions/workflow/status/girard-g/polaris/ci.yml?branch=main)](https://github.com/girard-g/polaris/actions)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-compatible-7c3aed)](https://modelcontextprotocol.io)
+[![Rust](https://img.shields.io/badge/built%20with-Rust-orange)](https://www.rust-lang.org)
 
-Lightweight RAG system for coding agents. Index your project docs, search them semantically, serve results over MCP — single binary, no runtime dependencies.
+**Polaris is a local-first RAG server that gives coding agents fast, ranked answers from your project's documentation — over the Model Context Protocol (MCP).** Drop it next to any repo and Claude Code, Cursor, or Codex stops grepping blindly: a single semantic search call returns the exact section the agent needs, typically **10–40× cheaper in tokens** than the usual grep-and-read loop.
+
+Single static binary. No API keys, no cloud, no runtime dependencies — your code never leaves the machine. Named after the North Star: a fixed reference point so your agent always knows where it is.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/girard-g/polaris/main/install.sh | bash
+polaris setup            # wire into current project (.mcp.json + agent files)
+polaris index ./docs     # index your markdown
+polaris serve            # MCP server for Claude Code / Cursor / Codex
+```
 
 ## Why Polaris — Token Savings vs. Grep + Read
 

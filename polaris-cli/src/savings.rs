@@ -280,11 +280,16 @@ pub fn spawn_search_log(
 }
 
 fn summary_json(agg: &SavingsAggregate) -> serde_json::Value {
+    let cost = cost_breakdown(agg);
     serde_json::json!({
         "total_searches": agg.total_searches,
         "total_result_bytes": agg.total_result_bytes,
         "total_baseline_bytes": agg.total_baseline_bytes,
         "tracking_since_ts": agg.tracking_since_ts,
+        "cost_model": cost.model,
+        "cost_price_usd_per_mtok": cost.price_usd_per_mtok,
+        "cost_without_polaris_usd": cost.cost_without_usd,
+        "cost_with_polaris_usd": cost.cost_with_usd,
         "source_breakdown": {
             "mcp": {
                 "searches": agg.by_source.mcp.searches,
@@ -437,6 +442,29 @@ mod tests {
             out.contains("saved           : 72.0K   -> $1.08"),
             "missing 'saved' row. Output was:\n{out}",
         );
+    }
+
+    #[test]
+    fn summary_json_includes_cost_fields() {
+        // Same aggregate as cost_breakdown_math: 75_000 tok baseline, 3_000 tok delivered.
+        let agg = agg_with((1, 4_000, 100_000), (2, 8_000, 200_000), Some(1_700_000_000));
+        let v = summary_json(&agg);
+
+        assert_eq!(v["cost_model"], "Opus4.7");
+        assert!(
+            (v["cost_price_usd_per_mtok"].as_f64().unwrap() - 15.0).abs() < 1e-9,
+            "unexpected price: {v}",
+        );
+        assert!(
+            (v["cost_without_polaris_usd"].as_f64().unwrap() - 1.125).abs() < 1e-6,
+            "unexpected cost_without_polaris_usd: {v}",
+        );
+        assert!(
+            (v["cost_with_polaris_usd"].as_f64().unwrap() - 0.045).abs() < 1e-6,
+            "unexpected cost_with_polaris_usd: {v}",
+        );
+        // Spec: saved_usd is intentionally NOT in JSON (trivial subtraction).
+        assert!(v.get("cost_saved_usd").is_none(), "saved_usd should not be in JSON");
     }
 
     #[test]

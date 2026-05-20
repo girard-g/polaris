@@ -57,9 +57,6 @@ pub fn format_summary(agg: &SavingsAggregate) -> String {
         "\n  {} ({}$ for 1_000_000 tokens)\n\n",
         cost.model, cost.price_usd_per_mtok,
     ));
-    let delivered_tok = bytes_to_tokens(agg.total_result_bytes);
-    let baseline_tok = bytes_to_tokens(agg.total_baseline_bytes);
-    let saved_tok = baseline_tok.saturating_sub(delivered_tok);
     out.push_str(&format!(
         "  {:<15} : {:<8}-> ${:.2}\n",
         "without polaris", fmt_count(baseline_tok), round_cents(cost.cost_without_usd),

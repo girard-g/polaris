@@ -51,6 +51,28 @@ pub fn format_summary(agg: &SavingsAggregate) -> String {
         out.push_str(&format!("  Tracking since     {}\n", fmt_iso_date(ts)));
     }
     out.push_str("\n  Tokens estimated at ~4 chars/token.\n");
+
+    let cost = cost_breakdown(agg);
+    out.push_str(&format!(
+        "\n  {} ({}$ for 1_000_000 tokens)\n\n",
+        cost.model, cost.price_usd_per_mtok,
+    ));
+    let delivered_tok = bytes_to_tokens(agg.total_result_bytes);
+    let baseline_tok = bytes_to_tokens(agg.total_baseline_bytes);
+    let saved_tok = baseline_tok.saturating_sub(delivered_tok);
+    out.push_str(&format!(
+        "  {:<15} : {:<8}-> ${:.2}\n",
+        "without polaris", fmt_count(baseline_tok), round_cents(cost.cost_without_usd),
+    ));
+    out.push_str(&format!(
+        "  {:<15} : {:<8}-> ${:.2}\n",
+        "with polaris", fmt_count(delivered_tok), round_cents(cost.cost_with_usd),
+    ));
+    out.push_str(&format!(
+        "  {:<15} : {:<8}-> ${:.2}\n",
+        "saved", fmt_count(saved_tok), round_cents(cost.saved_usd),
+    ));
+
     out
 }
 
@@ -110,6 +132,15 @@ fn cost_breakdown(agg: &SavingsAggregate) -> CostBreakdown {
         cost_with_usd,
         saved_usd,
     }
+}
+
+/// Round a dollar amount to the nearest cent using half-away-from-zero.
+///
+/// Rust's `{:.2}` formatter uses round-half-to-even (banker's rounding), which
+/// produces $1.12 for 1.125. Currency convention rounds 0.5 up, giving $1.13,
+/// so we pre-round here before formatting.
+fn round_cents(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
 }
 
 fn fmt_count(n: usize) -> String {
@@ -376,6 +407,39 @@ mod tests {
         assert!((cb.cost_with_usd - 0.045).abs() < 1e-9);
         // 1.125 - 0.045 = 1.08
         assert!((cb.saved_usd - 1.08).abs() < 1e-9);
+    }
+
+    #[test]
+    fn format_summary_includes_cost_block() {
+        // Same aggregate as format_summary_populated:
+        // delivered = 3_000 tokens, baseline = 75_000 tokens.
+        let agg = agg_with((1, 4_000, 100_000), (2, 8_000, 200_000), Some(1_700_000_000));
+        let out = format_summary(&agg);
+
+        // Header line, rendered verbatim from the constants.
+        assert!(
+            out.contains("Opus4.7 (15$ for 1_000_000 tokens)"),
+            "missing cost header. Output was:\n{out}",
+        );
+
+        // Three data rows. The token-count column is padded to width 8
+        // with no separator space before `->`, so:
+        //   75.0K  → 5 chars + 3 spaces padding
+        //   3.0K   → 4 chars + 4 spaces padding
+        //   72.0K  → 5 chars + 3 spaces padding
+        // Costs: 1.125 → $1.13, 0.045 → $0.05, 1.08 → $1.08.
+        assert!(
+            out.contains("without polaris : 75.0K   -> $1.13"),
+            "missing 'without polaris' row. Output was:\n{out}",
+        );
+        assert!(
+            out.contains("with polaris    : 3.0K    -> $0.05"),
+            "missing 'with polaris' row. Output was:\n{out}",
+        );
+        assert!(
+            out.contains("saved           : 72.0K   -> $1.08"),
+            "missing 'saved' row. Output was:\n{out}",
+        );
     }
 
     #[test]

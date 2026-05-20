@@ -13,6 +13,12 @@ use tokio::task::JoinHandle;
 /// Heuristic: ~4 chars per token (matches README's existing claim).
 pub const BYTES_PER_TOKEN: f64 = 4.0;
 
+/// Hardcoded model name shown in the savings cost-comparison block.
+const COST_MODEL_NAME: &str = "Opus4.7";
+
+/// Hardcoded input price (US dollars per 1,000,000 tokens) for the cost block.
+const COST_PRICE_USD_PER_MTOK: f64 = 15.0;
+
 /// Render `SavingsAggregate` as the plain-text summary block.
 pub fn format_summary(agg: &SavingsAggregate) -> String {
     if agg.total_searches == 0 {
@@ -79,6 +85,31 @@ pub fn format_history(rows: &[SearchLogRow]) -> String {
 
 fn bytes_to_tokens(bytes: usize) -> usize {
     ((bytes as f64) / BYTES_PER_TOKEN).round() as usize
+}
+
+struct CostBreakdown {
+    model: &'static str,
+    price_usd_per_mtok: f64,
+    cost_without_usd: f64,
+    cost_with_usd: f64,
+    saved_usd: f64,
+}
+
+fn cost_breakdown(agg: &SavingsAggregate) -> CostBreakdown {
+    let delivered_tok = bytes_to_tokens(agg.total_result_bytes);
+    let baseline_tok = bytes_to_tokens(agg.total_baseline_bytes);
+    let cost_without_usd =
+        baseline_tok as f64 * COST_PRICE_USD_PER_MTOK / 1_000_000.0;
+    let cost_with_usd =
+        delivered_tok as f64 * COST_PRICE_USD_PER_MTOK / 1_000_000.0;
+    let saved_usd = (cost_without_usd - cost_with_usd).max(0.0);
+    CostBreakdown {
+        model: COST_MODEL_NAME,
+        price_usd_per_mtok: COST_PRICE_USD_PER_MTOK,
+        cost_without_usd,
+        cost_with_usd,
+        saved_usd,
+    }
 }
 
 fn fmt_count(n: usize) -> String {
@@ -329,6 +360,22 @@ mod tests {
         assert_eq!(fmt_count(1_000), "1.0K");
         assert_eq!(fmt_count(31_200), "31.2K");
         assert_eq!(fmt_count(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn cost_breakdown_math() {
+        // delivered = 4_000 + 8_000 = 12_000 bytes → 3_000 tokens
+        // baseline  = 100_000 + 200_000 = 300_000 bytes → 75_000 tokens
+        let agg = agg_with((1, 4_000, 100_000), (2, 8_000, 200_000), Some(1_700_000_000));
+        let cb = cost_breakdown(&agg);
+        assert_eq!(cb.model, "Opus4.7");
+        assert!((cb.price_usd_per_mtok - 15.0).abs() < 1e-9);
+        // 75_000 * 15 / 1_000_000 = 1.125
+        assert!((cb.cost_without_usd - 1.125).abs() < 1e-9);
+        // 3_000 * 15 / 1_000_000 = 0.045
+        assert!((cb.cost_with_usd - 0.045).abs() < 1e-9);
+        // 1.125 - 0.045 = 1.08
+        assert!((cb.saved_usd - 1.08).abs() < 1e-9);
     }
 
     #[test]

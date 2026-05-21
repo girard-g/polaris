@@ -154,6 +154,15 @@ RUST_LOG=debug polaris serve 2>polaris-debug.log
 
 Then watch `polaris-debug.log` while Claude Code interacts with the server.
 
+## Smoke-testing the Claude Code hook integration
+
+1. Build a fresh polaris: `cargo build --release`
+2. In a scratch directory: `mkdir -p scratch/docs && cd scratch && echo "# Foo" > docs/foo.md`
+3. `path/to/polaris setup` (the new build). Verify `.claude/settings.json` exists and contains a `PostToolUse` matcher whose command ends in `polaris hook index`.
+4. Open Claude Code in `scratch/`; ask it to add a new paragraph to `docs/foo.md`.
+5. Without manually re-indexing, run `path/to/polaris search "<text from the agent's edit>"`. The edit should appear in the results.
+6. Run `path/to/polaris setup --no-hooks`. Verify `.claude/settings.json` no longer contains a polaris entry; verify the file itself still exists.
+
 ## Releasing
 
 Pre-built binaries for Linux x86_64, macOS aarch64, macOS x86_64, and Windows x86_64 are built automatically via GitHub Actions on tag push:

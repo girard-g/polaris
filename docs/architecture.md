@@ -32,10 +32,14 @@ polaris-cli/src/
 
 ## Component Responsibilities
 
+### `polaris-cli/src/hook.rs`
+
+Internal `polaris hook <subcommand>` entry points invoked by Claude Code hooks. Reads JSON payloads from stdin, applies extension and indexed-root gates, calls into `polaris-core::indexer` for single-file index passes, and swallows all errors into stderr to maintain a 0 exit code (Claude Code surfaces non-zero hook exits as warning banners).
+
 ### `polaris-cli/src/main.rs`
 - CLI argument parsing via clap
 - Bootstrap: load config → register sqlite-vec extension → open Bank → init embedding engine
-- Route to: `index`, `search`, `serve`, `status`, `watch`, `chunks`, `setup`, `savings`, `update`
+- Route to: `index`, `search`, `serve`, `status`, `watch`, `chunks`, `setup`, `savings`, `update`, `hook`
 - Logging setup (stderr for `serve`, stdout otherwise)
 
 ### `polaris-core/src/config.rs`

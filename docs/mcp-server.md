@@ -141,3 +141,11 @@ Error: <embedding error message>
 - The `#[tool_router]` attribute on the `impl PolarisServer` block generates the routing table.
 - `#[tool_handler(router = self.tool_router)]` wires it into `ServerHandler`.
 - `Database` (`rusqlite::Connection`) is `!Send`. It is accessed through `Bank`, which holds an `Arc<BankInner>` containing a `Mutex<Database>` — the cheap `Bank` handle is cloned on the async side and the lock is acquired inside the `spawn_blocking` closure where `Send` is not required.
+
+## Hook integration (Claude Code)
+
+When you run `polaris setup` in a project, polaris also writes a `PostToolUse` hook into `.claude/settings.json`. The hook fires after Claude Code's `Write`, `Edit`, or `MultiEdit` tools complete; it re-runs `polaris index` for the touched file if (a) the path ends in `.md` and (b) the file lives under a directory the index already covers. Failures are swallowed silently — a transient hook hiccup never interrupts your session.
+
+To opt out, run `polaris setup --no-hooks`. To remove the hook from a project that already has it installed, re-run `polaris setup --no-hooks` — it strips the polaris entries from `.claude/settings.json` while leaving any other hooks intact.
+
+The hook is a Claude Code feature; Codex, Cursor, and Gemini CLI users keep using the MCP `search` tool and can run `polaris watch` if they want background auto-indexing.

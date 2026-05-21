@@ -1433,6 +1433,7 @@ second
     }
 
     #[test]
+    #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
     fn run_runs_initial_index_when_hooks_installed() {
         use polaris_core::config::PolarisConfig;
         use polaris_core::db::Database;
@@ -1463,6 +1464,7 @@ second
     }
 
     #[test]
+    #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
     fn run_initial_index_stores_absolute_paths() {
         use polaris_core::config::PolarisConfig;
         use polaris_core::db::Database;

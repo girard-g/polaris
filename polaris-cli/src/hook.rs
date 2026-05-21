@@ -5,6 +5,7 @@
 //! so a transient hiccup never interrupts the user's session via a Claude Code
 //! warning banner.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -116,10 +117,37 @@ pub fn perform_index(file_path: &Path, db_path: &Path) -> Result<HookIndexReport
     })
 }
 
-/// Entry point for `polaris hook index` — re-index a single file the agent
-/// just edited.
+/// Entry point for `polaris hook index`. Reads the payload from stdin and
+/// delegates to `run_index_for_payload`. Always returns `Ok(())` so the
+/// process exits 0; errors are logged to stderr by the inner helper.
 pub fn run_index() -> Result<()> {
-    // Implementation lands in Task 8–11.
+    let mut buf = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+        eprintln!("polaris hook index: failed to read stdin: {e}");
+        return Ok(());
+    }
+    let db_path = PolarisConfig::default().db_path;
+    run_index_for_payload(&buf, &db_path)
+}
+
+/// Pure-ish helper that takes the stdin payload and the DB path. Swallows
+/// every error into a stderr line and returns `Ok(())`. Exposed for tests so
+/// we can exercise the silent-failure discipline without spinning up stdin.
+pub fn run_index_for_payload(payload: &str, db_path: &Path) -> Result<()> {
+    let parsed = match parse_payload(payload) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("polaris hook index: {e}");
+            return Ok(());
+        }
+    };
+
+    if let Err(e) = perform_index(&parsed.file_path, db_path) {
+        eprintln!(
+            "polaris hook index: failed to index {}: {e}",
+            parsed.file_path.display(),
+        );
+    }
     Ok(())
 }
 
@@ -317,5 +345,34 @@ mod tests {
             "vendor README should not be indexed; got {:?}",
             docs_after
         );
+    }
+
+    #[test]
+    fn run_index_with_payload_returns_ok_even_on_invalid_json() {
+        // We use a public helper rather than mocking stdin: same logic path.
+        let result = run_index_for_payload("not json {", Path::new("/nonexistent/polaris.db"));
+        assert!(result.is_ok(), "should swallow errors and return Ok");
+    }
+
+    #[test]
+    fn run_index_with_payload_returns_ok_when_file_missing() {
+        let json = r#"{
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "/this/does/not/exist.md" }
+        }"#;
+        let result = run_index_for_payload(json, Path::new("/nonexistent/polaris.db"));
+        assert!(result.is_ok(), "should swallow errors and return Ok");
+    }
+
+    #[test]
+    fn run_index_with_payload_returns_ok_when_file_not_markdown() {
+        let json = r#"{
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "/p/foo.rs" }
+        }"#;
+        let result = run_index_for_payload(json, Path::new("/nonexistent/polaris.db"));
+        assert!(result.is_ok());
     }
 }

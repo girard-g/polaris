@@ -184,6 +184,12 @@ pub fn perform_index(
         None
     };
 
+    // TODO(perf): EmbeddingEngine::new loads the ONNX model (~140 MB resident,
+    // ~hundreds of ms wall time) on every eligible hook fire. Acceptable for
+    // occasional markdown edits, but a chatty doc-editing session pays the
+    // cost per edit. Phase 2 options: a long-lived background indexer the
+    // hook signals, or batching markdown indexing into a Stop hook instead
+    // of PostToolUse.
     let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
     let indexer = Indexer::new(
         engine,

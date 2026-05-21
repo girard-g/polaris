@@ -23,9 +23,10 @@ pub struct HookPayload {
 
 /// Parse a Claude Code hook payload (stdin JSON) into the fields we care about.
 ///
-/// `Write`, `Edit`, and `MultiEdit` all set `tool_input.file_path` to the
-/// target. Anything else is treated as a parse error so the caller can decide
-/// (we currently exit 0 silently — see `run_index`).
+/// Returns `Err` if the JSON is invalid, the top level isn't an object, or
+/// `tool_input.file_path` is missing. We don't re-validate `tool_name` here —
+/// the gate on which tools trigger the hook is the matcher configured in
+/// `.claude/settings.json` (`Write|Edit|MultiEdit`).
 pub fn parse_payload(json: &str) -> Result<HookPayload> {
     use serde_json::Value;
 
@@ -49,15 +50,18 @@ pub fn parse_payload(json: &str) -> Result<HookPayload> {
 }
 
 /// Returns true if the path looks like a markdown file we should consider
-/// indexing. Case-insensitive on the extension; rejects extension-only names.
+/// indexing. Strict `ext == "md"` to match
+/// `polaris-core::indexer::discover_markdown_files`, which is case-sensitive
+/// — accepting `.MD` here would only result in a wasted round-trip when the
+/// indexer skips the file. Also rejects extension-only names (e.g. literally
+/// `.md` with no stem).
 pub fn is_markdown(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
         return false;
     };
-    if !ext.eq_ignore_ascii_case("md") {
+    if ext != "md" {
         return false;
     }
-    // Require a non-empty stem so files literally named `.md` are rejected.
     path.file_stem()
         .and_then(|s| s.to_str())
         .map(|s| !s.is_empty())
@@ -99,6 +103,9 @@ pub fn perform_index(file_path: &Path, db_path: &Path) -> Result<HookIndexReport
     register_vec_extension();
     let db = Database::open(db_path, cfg.embedding_dim, &cfg.model_id)?;
 
+    // TODO(perf): O(n) on every hook fire — fine at typical scale (hundreds to
+    // low thousands of docs) but worth replacing with a dedicated roots table
+    // or a process-lifetime cache if very large indexes become common.
     let indexed = db.get_all_document_hashes()?;
     let indexed_paths: Vec<String> = indexed.into_iter().map(|(p, _)| p).collect();
     if !under_indexed_root(file_path, &indexed_paths) {
@@ -218,8 +225,11 @@ mod tests {
     }
 
     #[test]
-    fn is_markdown_accepts_md_uppercase() {
-        assert!(is_markdown(Path::new("/p/FOO.MD")));
+    fn is_markdown_rejects_md_uppercase() {
+        // Aligned with polaris-core::indexer::discover_markdown_files which uses
+        // strict `ext == "md"`. Hook-side acceptance of `.MD` would only cause a
+        // wasted round-trip where the indexer discovers zero files.
+        assert!(!is_markdown(Path::new("/p/FOO.MD")));
     }
 
     #[test]

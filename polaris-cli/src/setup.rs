@@ -227,6 +227,9 @@ pub fn remove_polaris_hooks_from_settings(existing: &str) -> Result<Option<Strin
         ));
     };
 
+    // If `hooks` is missing or not an object, polaris cannot own anything in
+    // it; treat as no-op. `merge_claude_settings` errors on the same input
+    // (because it must install something); the uninstall path is best-effort.
     let Some(Value::Object(hooks_map)) = root.get_mut("hooks") else {
         return Ok(None);
     };
@@ -1213,11 +1216,14 @@ second
             "/usr/bin/my-formatter"
         );
 
-        // UserPromptSubmit: the only entry was polaris-owned; entire array now empty
-        // but key may still exist. Either way must not contain polaris.
-        if let Some(arr) = parsed["hooks"]["UserPromptSubmit"].as_array() {
-            assert!(arr.is_empty(), "UserPromptSubmit should have no polaris entries");
-        }
+        // UserPromptSubmit: the only entry was polaris-owned and got removed,
+        // pruning the surrounding matcher block. The event key remains as an
+        // empty array; assert that explicitly so a regression that deletes the
+        // event key would be caught.
+        let submit = parsed["hooks"]["UserPromptSubmit"]
+            .as_array()
+            .expect("UserPromptSubmit key must still exist");
+        assert!(submit.is_empty(), "UserPromptSubmit should have no polaris entries");
 
         // Unrelated top-level keys are preserved.
         assert_eq!(parsed["permissions"]["allow"][0], "Bash");
@@ -1255,5 +1261,37 @@ second
     fn remove_polaris_hooks_errors_on_invalid_json() {
         let result = remove_polaris_hooks_from_settings("not json {");
         assert!(matches!(result, Err(PolarisError::Setup(_))));
+    }
+
+    #[test]
+    fn remove_polaris_hooks_strips_polaris_but_keeps_sibling_in_same_block() {
+        // A matcher block has both a polaris hook and a sibling hook. The polaris
+        // entry should be stripped; the sibling should survive in the same block.
+        let existing = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "/usr/local/bin/polaris hook index" },
+          { "type": "command", "command": "/usr/bin/my-formatter" }
+        ]
+      }
+    ]
+  }
+}"#;
+        let content = remove_polaris_hooks_from_settings(existing)
+            .unwrap()
+            .expect("file should be rewritten");
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let blocks = parsed["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1, "matcher block should be preserved");
+        let hooks = blocks[0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1, "exactly one hook should remain");
+        assert_eq!(
+            hooks[0]["command"],
+            "/usr/bin/my-formatter",
+            "sibling hook should be the survivor"
+        );
     }
 }

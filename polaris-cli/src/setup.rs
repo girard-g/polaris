@@ -717,17 +717,33 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
 /// they actually want indexed.
 ///
 /// We deliberately do NOT canonicalize the target path. The CLI flow
-/// (`polaris index docs`) stores paths in whatever form the user gave (relative
-/// `docs/foo.md` from `polaris index docs` invoked at the project root).
-/// Canonicalizing here would create absolute rows that DUPLICATE existing
-/// relative rows for the same files. The hook side translates Claude Code's
-/// absolute payloads to whichever form matches the DB (see `hook.rs`).
+/// (`polaris index docs` invoked from inside the project) stores paths as
+/// `docs/foo.md`. Canonicalizing here would create absolute rows that
+/// DUPLICATE existing relative rows for the same files. The hook side
+/// translates Claude Code's absolute payloads to whichever form matches
+/// the DB (see `hook.rs`).
+///
+/// To produce that same `docs/foo.md` form regardless of which directory
+/// the user invoked `polaris setup` from (e.g. `polaris setup ./my-proj`
+/// from a parent dir), we switch the process CWD to `setup_path` for the
+/// indexing call and pass the indexer a plain `docs` relative path. Without
+/// this, `polaris setup ./my-proj` would store `my-proj/docs/foo.md` and
+/// the hook's cwd-relative gate (looking for `docs/foo.md`) would silently
+/// no-op. The RAII guard restores the prior CWD on return.
 fn run_initial_index(setup_path: &Path) -> Result<()> {
     use polaris_core::config::PolarisConfig;
     use polaris_core::db::{self, Database};
     use polaris_core::embedding::EmbeddingEngine;
     use polaris_core::indexer::Indexer;
+    use std::path::PathBuf;
     use std::sync::Arc;
+
+    struct CwdGuard(PathBuf);
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
 
     let docs_dir = setup_path.join("docs");
     if !docs_dir.is_dir() {
@@ -740,10 +756,27 @@ fn run_initial_index(setup_path: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    let target = docs_dir;
 
+    let Some(prev_cwd) = std::env::current_dir().ok() else {
+        eprintln!(
+            "  {}  initial index: could not capture current dir; skipping",
+            console::style("⚠").yellow(),
+        );
+        return Ok(());
+    };
+    if let Err(e) = std::env::set_current_dir(setup_path) {
+        eprintln!(
+            "  {}  initial index: could not enter {}: {e}",
+            console::style("⚠").yellow(),
+            setup_path.display(),
+        );
+        return Ok(());
+    }
+    let _cwd_guard = CwdGuard(prev_cwd);
+
+    let target = Path::new("docs");
     let mut cfg = PolarisConfig::default();
-    cfg.db_path = setup_path.join("polaris.db");
+    cfg.db_path = PathBuf::from("polaris.db");
 
     db::register_vec_extension();
 
@@ -1574,4 +1607,47 @@ second
         );
     }
 
+    #[test]
+    #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
+    fn run_initial_index_stores_paths_matching_hook_cwd_relative_form() {
+        // Regression: `polaris setup ./my-proj` invoked from a parent dir
+        // must produce DB paths `docs/foo.md` (cwd-relative from the project
+        // root) rather than `my-proj/docs/foo.md`. The hook gate translates
+        // Claude Code's absolute payload using `cwd` and compares against
+        // `docs/foo.md` — any other prefix would silently no-op.
+        //
+        // NOTE: mutates process CWD via set_current_dir. Don't run in
+        // parallel with other CWD-mutating tests.
+        use polaris_core::config::PolarisConfig;
+        use polaris_core::db::Database;
+
+        let parent = TempDir::new().unwrap();
+        let proj_name = "myproj";
+        let proj = parent.path().join(proj_name);
+        std::fs::create_dir_all(proj.join("docs")).unwrap();
+        std::fs::write(proj.join("docs").join("foo.md"), "# Foo\nbody\n").unwrap();
+
+        // Mimic `polaris setup ./myproj` from `parent`.
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(parent.path()).unwrap();
+        let result = run(Path::new(proj_name), false, false);
+        std::env::set_current_dir(prev_cwd).unwrap();
+        result.unwrap();
+
+        let cfg = PolarisConfig::default();
+        let db = Database::open(
+            &proj.join("polaris.db"),
+            cfg.embedding_dim,
+            &cfg.model_id,
+        )
+        .unwrap();
+        let docs = db.get_all_document_hashes().unwrap();
+        assert!(
+            docs.iter().any(|(p, _)| p == "docs/foo.md"),
+            "expected stored path \"docs/foo.md\" (cwd-relative form the hook \
+             will look for); got {:?} — setup invoked with an explicit path \
+             argument must not bake the project-name prefix into stored paths",
+            docs,
+        );
+    }
 }

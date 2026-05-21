@@ -40,7 +40,7 @@ Internal `polaris hook <subcommand>` entry points invoked by Claude Code hooks. 
 - CLI argument parsing via clap
 - Bootstrap: load config → register sqlite-vec extension → open Bank → init embedding engine
 - Route to: `index`, `search`, `serve`, `status`, `watch`, `chunks`, `setup`, `savings`, `update`, `hook`
-- Logging setup (stderr for `serve`, stdout otherwise)
+- Logging setup (always stderr; keeps stdout clean for command output, JSON, MCP framing, hook payloads)
 
 ### `polaris-core/src/config.rs`
 - `PolarisConfig` is the central config struct (serde-deserializable from TOML)

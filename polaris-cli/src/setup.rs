@@ -691,16 +691,24 @@ fn run_initial_index(setup_path: &Path) -> Result<()> {
     use std::sync::Arc;
 
     let docs_dir = setup_path.join("docs");
-    let target = if docs_dir.is_dir() {
+    let target_raw = if docs_dir.is_dir() {
         docs_dir
     } else {
         setup_path.to_path_buf()
     };
+    // Canonicalize so the DB stores absolute paths. Claude Code's hook payloads
+    // always carry absolute file paths; relative paths in the DB would fail the
+    // indexed-root gate on every hook fire.
+    let target = std::fs::canonicalize(&target_raw).unwrap_or(target_raw);
 
     let mut cfg = PolarisConfig::default();
     // Index into a project-local polaris.db (matches the rest of the CLI's
-    // default behavior when no --db override is given).
-    cfg.db_path = setup_path.join("polaris.db");
+    // default behavior when no --db override is given). Canonicalize the
+    // parent so the stored db_path is absolute even when setup runs from ".".
+    let db_path_raw = setup_path.join("polaris.db");
+    cfg.db_path = std::fs::canonicalize(setup_path)
+        .map(|p| p.join("polaris.db"))
+        .unwrap_or(db_path_raw);
 
     db::register_vec_extension();
 
@@ -1450,6 +1458,41 @@ second
         assert!(
             docs.iter().any(|(p, _)| p.ends_with("foo.md")),
             "docs/foo.md should be indexed; got {:?}",
+            docs
+        );
+    }
+
+    #[test]
+    fn run_initial_index_stores_absolute_paths() {
+        use polaris_core::config::PolarisConfig;
+        use polaris_core::db::Database;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(
+            dir.path().join("docs").join("foo.md"),
+            "# Foo\nbody\n",
+        )
+        .unwrap();
+
+        // Use a relative path for setup (mirrors `polaris setup` from main.rs
+        // which defaults to `.`) — but cd into the tempdir first so the
+        // relative path resolves to our temp tree.
+        // NOTE: mutates process CWD; do not parallelize with other CWD-mutating tests.
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let result = run(Path::new("."), false, false);
+        std::env::set_current_dir(prev_cwd).unwrap();
+        result.unwrap();
+
+        let db_path = dir.path().join("polaris.db");
+        assert!(db_path.exists());
+        let cfg = PolarisConfig::default();
+        let db = Database::open(&db_path, cfg.embedding_dim, &cfg.model_id).unwrap();
+        let docs = db.get_all_document_hashes().unwrap();
+        assert!(
+            docs.iter().any(|(p, _)| std::path::Path::new(p).is_absolute()),
+            "expected at least one stored path to be absolute; got {:?}",
             docs
         );
     }

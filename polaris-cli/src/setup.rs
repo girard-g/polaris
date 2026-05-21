@@ -279,8 +279,10 @@ pub fn merge_agent_instructions(existing: Option<&str>) -> Result<AgentReport> {
 }
 
 /// Entry point for the `setup` command.
-pub fn run(path: &Path, no_agents: bool) -> Result<()> {
+pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
     use console::style;
+
+    let _ = no_hooks;
 
     if !path.exists() {
         return Err(PolarisError::Setup(format!(
@@ -660,7 +662,7 @@ second
     #[test]
     fn run_creates_files_in_empty_dir() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), false).unwrap();
+        run(dir.path(), false, true).unwrap();
 
         let mcp = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&mcp).unwrap();
@@ -675,11 +677,11 @@ second
     #[test]
     fn run_is_idempotent() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), false).unwrap();
+        run(dir.path(), false, true).unwrap();
         let mcp_first = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let gi_first = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
 
-        run(dir.path(), false).unwrap();
+        run(dir.path(), false, true).unwrap();
         let mcp_second = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let gi_second = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
 
@@ -689,7 +691,7 @@ second
 
     #[test]
     fn run_errors_when_path_missing() {
-        let result = run(Path::new("/this/path/should/not/exist/polaris-test-zzz"), false);
+        let result = run(Path::new("/this/path/should/not/exist/polaris-test-zzz"), false, true);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
@@ -698,14 +700,14 @@ second
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "x").unwrap();
-        let result = run(&file, false);
+        let result = run(&file, false, true);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
     #[test]
     fn run_writes_all_three_agent_files() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), false).unwrap();
+        run(dir.path(), false, true).unwrap();
 
         for filename in AGENT_FILES {
             let path = dir.path().join(filename);
@@ -732,7 +734,7 @@ second
         let existing_user_rules = "# My project rules\n\nUse Rust 2024 edition.\nNo unsafe blocks.\n";
         std::fs::write(dir.path().join("CLAUDE.md"), existing_user_rules).unwrap();
 
-        run(dir.path(), false).unwrap();
+        run(dir.path(), false, true).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
         // Original content preserved at the top.
@@ -744,7 +746,7 @@ second
     #[test]
     fn run_skips_agent_files_with_no_agents() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), true).unwrap();
+        run(dir.path(), true, true).unwrap();
 
         for filename in AGENT_FILES {
             let path = dir.path().join(filename);
@@ -761,7 +763,7 @@ second
     #[test]
     fn run_is_idempotent_with_agent_files() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), false).unwrap();
+        run(dir.path(), false, true).unwrap();
 
         let mut first: Vec<(String, String)> = Vec::new();
         for filename in AGENT_FILES {
@@ -771,7 +773,7 @@ second
             ));
         }
 
-        run(dir.path(), false).unwrap();
+        run(dir.path(), false, true).unwrap();
 
         for (filename, before) in &first {
             let after = std::fs::read_to_string(dir.path().join(filename)).unwrap();

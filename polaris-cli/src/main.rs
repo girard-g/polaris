@@ -110,13 +110,16 @@ enum Command {
         path: PathBuf,
     },
 
-    /// Configure the current project to use polaris (writes .mcp.json, updates .gitignore, writes agent instructions)
+    /// Configure the current project to use polaris (writes .mcp.json, updates .gitignore, writes agent instructions, installs Claude Code hook)
     Setup {
         /// Project directory (defaults to current working directory)
         path: Option<PathBuf>,
         /// Do not write CLAUDE.md, AGENTS.md, GEMINI.md
         #[arg(long)]
         no_agents: bool,
+        /// Do not install (or remove) the Claude Code auto-index hook in .claude/settings.json
+        #[arg(long)]
+        no_hooks: bool,
     },
 
     /// Show cumulative tokens saved using polaris vs grep+read
@@ -204,9 +207,9 @@ async fn run(cli: Cli) -> Result<()> {
             cmd_watch(cfg, &paths, !no_recursive).await
         }
         Command::Chunks { path } => cmd_chunks(cfg, &path).await,
-        Command::Setup { path, no_agents } => {
+        Command::Setup { path, no_agents, no_hooks } => {
             let target = path.unwrap_or_else(|| std::path::PathBuf::from("."));
-            setup::run(&target, no_agents)
+            setup::run(&target, no_agents, no_hooks)
         }
         Command::Savings { history, limit, output } => {
             savings::run(

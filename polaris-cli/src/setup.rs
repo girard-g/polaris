@@ -210,6 +210,65 @@ pub fn merge_claude_settings(
     })
 }
 
+/// Strip every polaris-owned hook entry from a `.claude/settings.json` file,
+/// pruning matcher blocks whose `hooks[]` becomes empty.
+///
+/// Returns `Some(new_content)` if the file changed, `None` if nothing
+/// polaris-owned was present (no rewrite needed).
+pub fn remove_polaris_hooks_from_settings(existing: &str) -> Result<Option<String>> {
+    use serde_json::Value;
+
+    let parsed: Value = serde_json::from_str(existing).map_err(|e| {
+        PolarisError::Setup(format!("invalid JSON in .claude/settings.json: {e}"))
+    })?;
+    let Value::Object(mut root) = parsed else {
+        return Err(PolarisError::Setup(
+            "expected top-level object in .claude/settings.json".into(),
+        ));
+    };
+
+    let Some(Value::Object(hooks_map)) = root.get_mut("hooks") else {
+        return Ok(None);
+    };
+
+    let mut removed_any = false;
+    for event_value in hooks_map.values_mut() {
+        let Value::Array(blocks) = event_value else {
+            continue;
+        };
+        for block in blocks.iter_mut() {
+            let Value::Object(block_obj) = block else {
+                continue;
+            };
+            let Some(Value::Array(hook_entries)) = block_obj.get_mut("hooks") else {
+                continue;
+            };
+            let before = hook_entries.len();
+            hook_entries.retain(|entry| !is_polaris_owned(entry));
+            if hook_entries.len() != before {
+                removed_any = true;
+            }
+        }
+        blocks.retain(|block| {
+            let Value::Object(block_obj) = block else {
+                return true;
+            };
+            match block_obj.get("hooks") {
+                Some(Value::Array(arr)) => !arr.is_empty(),
+                _ => true,
+            }
+        });
+    }
+
+    if !removed_any {
+        return Ok(None);
+    }
+
+    let new_content_str = serde_json::to_string_pretty(&Value::Object(root))
+        .map_err(|e| PolarisError::Setup(format!("failed to serialize .claude/settings.json: {e}")))?;
+    Ok(Some(new_content_str + "\n"))
+}
+
 /// Returns true if the given hook entry's `command` basename is `polaris`.
 fn is_polaris_owned(entry: &serde_json::Value) -> bool {
     let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) else {
@@ -1110,5 +1169,91 @@ second
             !settings_path.exists(),
             ".claude/settings.json should not be created when --no-hooks is set"
         );
+    }
+
+    #[test]
+    fn remove_polaris_hooks_strips_polaris_entries_across_events() {
+        let existing = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "/usr/local/bin/polaris hook index" }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          { "type": "command", "command": "/usr/bin/my-formatter" }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/usr/local/bin/polaris hook search" }
+        ]
+      }
+    ]
+  },
+  "permissions": { "allow": ["Bash"] }
+}"#;
+        let new_content = remove_polaris_hooks_from_settings(existing).unwrap();
+        let content = new_content.expect("file should be rewritten");
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // PostToolUse: polaris matcher block was the only entry and was pruned;
+        // the formatter block survives.
+        let post = parsed["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0]["matcher"], "Write");
+        assert_eq!(
+            post[0]["hooks"][0]["command"],
+            "/usr/bin/my-formatter"
+        );
+
+        // UserPromptSubmit: the only entry was polaris-owned; entire array now empty
+        // but key may still exist. Either way must not contain polaris.
+        if let Some(arr) = parsed["hooks"]["UserPromptSubmit"].as_array() {
+            assert!(arr.is_empty(), "UserPromptSubmit should have no polaris entries");
+        }
+
+        // Unrelated top-level keys are preserved.
+        assert_eq!(parsed["permissions"]["allow"][0], "Bash");
+    }
+
+    #[test]
+    fn remove_polaris_hooks_returns_none_when_nothing_to_remove() {
+        let existing = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          { "type": "command", "command": "/usr/bin/my-formatter" }
+        ]
+      }
+    ]
+  }
+}"#;
+        let result = remove_polaris_hooks_from_settings(existing).unwrap();
+        assert!(
+            result.is_none(),
+            "should return None when no polaris entries are present"
+        );
+    }
+
+    #[test]
+    fn remove_polaris_hooks_returns_none_on_empty_hooks_section() {
+        let existing = r#"{ "permissions": { "allow": [] } }"#;
+        let result = remove_polaris_hooks_from_settings(existing).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn remove_polaris_hooks_errors_on_invalid_json() {
+        let result = remove_polaris_hooks_from_settings("not json {");
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 }

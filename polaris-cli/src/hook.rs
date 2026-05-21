@@ -257,6 +257,18 @@ pub fn run_index_for_payload(payload: &str, db_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Prefix a Unix-style path with a drive letter on Windows so it qualifies
+    /// as a true absolute path (Windows requires a drive prefix; a bare
+    /// leading `/` is treated as relative there). Used in tests that
+    /// exercise the absolute-branch of `under_indexed_root`.
+    fn abs(p: &str) -> String {
+        if cfg!(unix) {
+            p.to_string()
+        } else {
+            format!("C:{p}")
+        }
+    }
+
     #[test]
     fn parse_payload_extracts_file_path_for_edit() {
         let json = r#"{
@@ -406,12 +418,18 @@ mod tests {
 
     #[test]
     fn under_indexed_root_absolute_db_matches_absolute_target() {
-        // DB has absolute paths (e.g., `polaris index /abs/proj`).
-        let indexed = vec!["/proj/docs/foo.md".to_string()];
-        let target = Path::new("/proj/docs/new.md");
+        // DB has absolute paths (e.g., `polaris index /abs/proj`). Use
+        // platform-appropriate absolute paths so the test exercises the
+        // absolute branch on Windows too (where /proj is not absolute).
+        let indexed_str = abs("/proj/docs/foo.md");
+        let target_str = abs("/proj/docs/new.md");
+        let cwd_str = abs("/proj");
+        let indexed = vec![indexed_str];
+        let target = Path::new(&target_str);
+        let cwd = Path::new(&cwd_str);
         assert_eq!(
-            under_indexed_root(target, Some(Path::new("/proj")), &indexed),
-            Some(PathBuf::from("/proj/docs/new.md")),
+            under_indexed_root(target, Some(cwd), &indexed),
+            Some(PathBuf::from(&target_str)),
             "should return the absolute form because the indexed row is absolute"
         );
     }
@@ -443,11 +461,12 @@ mod tests {
 
     #[test]
     fn under_indexed_root_matches_single_file_absolute_indexed_root() {
-        let indexed = vec!["/abs/README.md".to_string()];
-        let target = Path::new("/abs/README.md");
+        let p = abs("/abs/README.md");
+        let indexed = vec![p.clone()];
+        let target = Path::new(&p);
         assert_eq!(
             under_indexed_root(target, None, &indexed),
-            Some(PathBuf::from("/abs/README.md")),
+            Some(PathBuf::from(&p)),
         );
     }
 

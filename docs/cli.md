@@ -27,6 +27,7 @@ polaris setup ./my-proj  # configure a specific directory
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--no-agents` | false | Skip writing `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` |
+| `--no-hooks` | false | Skip writing `.claude/settings.json` and the initial index pass. Re-run on a previously-set-up project to remove the polaris hook entries (the file itself stays). |
 
 **Behaviour:**
 
@@ -358,3 +359,11 @@ Exit codes:
 | 0 | Success |
 | 1 | Generic error (config, IO, embedding, DB, dimension mismatch, user-declined prompt) |
 | 2 | `update` only — running platform has no release asset |
+
+## Internal commands
+
+These commands are invoked by Claude Code hooks and are not intended for direct use.
+
+### `polaris hook index`
+
+Reads a `PostToolUse` hook payload (JSON) on stdin and re-indexes the touched file if it passes the markdown extension and indexed-root gates. Always exits 0 — failures go to stderr only.

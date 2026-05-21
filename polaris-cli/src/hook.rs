@@ -19,14 +19,20 @@ use polaris_core::indexer::Indexer;
 #[derive(Debug)]
 pub struct HookPayload {
     pub file_path: PathBuf,
+    /// The working directory Claude Code is operating in. We use it to
+    /// translate the absolute `file_path` into a project-relative form when
+    /// the index stores relative paths (the CLI flow `polaris index docs`).
+    /// Absent when the payload omits it; in that case we fall back to
+    /// absolute-only matching.
+    pub cwd: Option<PathBuf>,
 }
 
 /// Parse a Claude Code hook payload (stdin JSON) into the fields we care about.
 ///
 /// Returns `Err` if the JSON is invalid, the top level isn't an object, or
-/// `tool_input.file_path` is missing. We don't re-validate `tool_name` here —
-/// the gate on which tools trigger the hook is the matcher configured in
-/// `.claude/settings.json` (`Write|Edit|MultiEdit`).
+/// `tool_input.file_path` is missing. `cwd` is optional. We don't re-validate
+/// `tool_name` here — the gate on which tools trigger the hook is the matcher
+/// configured in `.claude/settings.json` (`Write|Edit|MultiEdit`).
 pub fn parse_payload(json: &str) -> Result<HookPayload> {
     use serde_json::Value;
 
@@ -44,8 +50,13 @@ pub fn parse_payload(json: &str) -> Result<HookPayload> {
         .ok_or_else(|| {
             PolarisError::Setup("hook payload missing tool_input.file_path".into())
         })?;
+    let cwd = root
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
     Ok(HookPayload {
         file_path: PathBuf::from(file_path),
+        cwd,
     })
 }
 
@@ -68,18 +79,48 @@ pub fn is_markdown(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns true if `target` lives under the parent directory of at least one
-/// previously-indexed document. Checks whether any indexed path's parent is an
-/// ancestor of (or equal to the parent of) `target`.
-pub fn under_indexed_root(target: &Path, indexed_paths: &[String]) -> bool {
+/// If `target` lives under a directory containing at least one previously
+/// indexed document, returns the form of `target` that matches the existing
+/// row's path representation:
+///   - Absolute `target` when the matching indexed row stores an absolute path
+///     (typical when the user ran `polaris index /abs/path`).
+///   - `cwd`-relative `target` when the matching indexed row stores a relative
+///     path (typical when the user ran `polaris index docs` or `polaris setup`
+///     from the project root).
+///
+/// Returns `None` if no matching root exists. Returning the matched form lets
+/// `perform_index` re-index using the same path string the existing row uses,
+/// avoiding duplicate rows that would otherwise pollute search results.
+///
+/// `cwd` is the working directory Claude Code reported in the hook payload.
+/// When `cwd` is absent or doesn't contain `target`, we fall back to using
+/// `target` itself as the "relative" form — useful for unit tests where both
+/// inputs are already relative.
+pub fn under_indexed_root(
+    target: &Path,
+    cwd: Option<&Path>,
+    indexed_paths: &[String],
+) -> Option<PathBuf> {
+    let target_rel: PathBuf = cwd
+        .and_then(|c| target.strip_prefix(c).ok())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| target.to_path_buf());
+
     for p in indexed_paths {
-        if let Some(parent) = Path::new(p).parent() {
-            if !parent.as_os_str().is_empty() && target.starts_with(parent) {
-                return true;
+        let p_path = Path::new(p);
+        let Some(parent) = p_path.parent() else { continue };
+        if parent.as_os_str().is_empty() {
+            continue;
+        }
+        if parent.is_absolute() {
+            if target.starts_with(parent) {
+                return Some(target.to_path_buf());
             }
+        } else if target_rel.starts_with(parent) {
+            return Some(target_rel.clone());
         }
     }
-    false
+    None
 }
 
 /// Outcome of one `perform_index` call. Used in tests; production code only
@@ -91,10 +132,28 @@ pub struct HookIndexReport {
     pub indexed_new_or_modified: usize,
 }
 
+/// RAII guard that restores the process working directory on drop. Hook
+/// processes are short-lived, but resetting on drop keeps the contract simple
+/// in tests and future composition.
+struct CwdGuard(PathBuf);
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
 /// Apply the gates and (if eligible) run a single-file index pass. Pure
 /// failures (DB locked, etc.) bubble up as `Err`; the caller decides whether
 /// to surface them — `run_index` swallows them into stderr.
-pub fn perform_index(file_path: &Path, db_path: &Path) -> Result<HookIndexReport> {
+///
+/// `cwd` is the working directory Claude Code reported in the payload.
+/// We use it to compute the relative form of `file_path` for matching against
+/// indexed roots that store relative paths.
+pub fn perform_index(
+    file_path: &Path,
+    cwd: Option<&Path>,
+    db_path: &Path,
+) -> Result<HookIndexReport> {
     if !is_markdown(file_path) {
         return Ok(HookIndexReport { indexed_new_or_modified: 0 });
     }
@@ -108,9 +167,22 @@ pub fn perform_index(file_path: &Path, db_path: &Path) -> Result<HookIndexReport
     // or a process-lifetime cache if very large indexes become common.
     let indexed = db.get_all_document_hashes()?;
     let indexed_paths: Vec<String> = indexed.into_iter().map(|(p, _)| p).collect();
-    if !under_indexed_root(file_path, &indexed_paths) {
+    let Some(target_for_indexer) = under_indexed_root(file_path, cwd, &indexed_paths) else {
         return Ok(HookIndexReport { indexed_new_or_modified: 0 });
-    }
+    };
+
+    // If the matched form is relative, the indexer's WalkDir will resolve it
+    // against the process CWD. Set CWD to the payload's cwd so it points at
+    // the project root. The RAII guard restores the prior CWD on return.
+    let _cwd_guard = if !target_for_indexer.is_absolute() {
+        cwd.and_then(|c| {
+            let prev = std::env::current_dir().ok()?;
+            std::env::set_current_dir(c).ok()?;
+            Some(CwdGuard(prev))
+        })
+    } else {
+        None
+    };
 
     let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
     let indexer = Indexer::new(
@@ -119,7 +191,7 @@ pub fn perform_index(file_path: &Path, db_path: &Path) -> Result<HookIndexReport
         cfg.chunk_overlap_chars,
         cfg.max_file_size,
     );
-    let report = indexer.index_path(&db, file_path, false, false, false, None)?;
+    let report = indexer.index_path(&db, &target_for_indexer, false, false, false, None)?;
     Ok(HookIndexReport {
         indexed_new_or_modified: report.added.len() + report.modified.len(),
     })
@@ -150,7 +222,7 @@ pub fn run_index_for_payload(payload: &str, db_path: &Path) -> Result<()> {
         }
     };
 
-    if let Err(e) = perform_index(&parsed.file_path, db_path) {
+    if let Err(e) = perform_index(&parsed.file_path, parsed.cwd.as_deref(), db_path) {
         eprintln!(
             "polaris hook index: failed to index {}: {e}",
             parsed.file_path.display(),
@@ -217,6 +289,29 @@ mod tests {
         assert!(parse_payload("[1,2,3]").is_err());
     }
 
+    #[test]
+    fn parse_payload_extracts_cwd_when_present() {
+        let json = r#"{
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "/proj/docs/foo.md" },
+            "cwd": "/proj"
+        }"#;
+        let payload = parse_payload(json).unwrap();
+        assert_eq!(payload.cwd, Some(std::path::PathBuf::from("/proj")));
+    }
+
+    #[test]
+    fn parse_payload_cwd_is_none_when_absent() {
+        let json = r#"{
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "/proj/docs/foo.md" }
+        }"#;
+        let payload = parse_payload(json).unwrap();
+        assert_eq!(payload.cwd, None);
+    }
+
     use std::path::Path;
 
     #[test]
@@ -243,21 +338,69 @@ mod tests {
     #[test]
     fn under_indexed_root_true_when_indexed_sibling_exists() {
         let indexed = vec!["docs/foo.md".to_string(), "docs/sub/bar.md".to_string()];
-        // A new file under the same directory tree should match.
-        assert!(under_indexed_root(Path::new("docs/sub/new.md"), &indexed));
-        assert!(under_indexed_root(Path::new("docs/new.md"), &indexed));
+        // A new file under the same directory tree should match. Both target
+        // and indexed are relative here; cwd=None falls back to target-as-rel.
+        assert_eq!(
+            under_indexed_root(Path::new("docs/sub/new.md"), None, &indexed),
+            Some(PathBuf::from("docs/sub/new.md")),
+        );
+        assert_eq!(
+            under_indexed_root(Path::new("docs/new.md"), None, &indexed),
+            Some(PathBuf::from("docs/new.md")),
+        );
     }
 
     #[test]
     fn under_indexed_root_false_when_disjoint() {
         let indexed = vec!["docs/foo.md".to_string()];
-        assert!(!under_indexed_root(Path::new("node_modules/pkg/README.md"), &indexed));
-        assert!(!under_indexed_root(Path::new("other/dir/x.md"), &indexed));
+        assert_eq!(
+            under_indexed_root(Path::new("node_modules/pkg/README.md"), None, &indexed),
+            None,
+        );
+        assert_eq!(
+            under_indexed_root(Path::new("other/dir/x.md"), None, &indexed),
+            None,
+        );
     }
 
     #[test]
     fn under_indexed_root_false_when_no_indexed_paths() {
-        assert!(!under_indexed_root(Path::new("docs/foo.md"), &[]));
+        assert_eq!(under_indexed_root(Path::new("docs/foo.md"), None, &[]), None);
+    }
+
+    #[test]
+    fn under_indexed_root_cwd_translates_absolute_target_to_relative_match() {
+        // Production scenario: DB has relative paths from `polaris index docs`,
+        // hook payload has absolute file_path + cwd = project root.
+        let indexed = vec!["docs/foo.md".to_string()];
+        let target = Path::new("/proj/docs/new.md");
+        let cwd = Path::new("/proj");
+        assert_eq!(
+            under_indexed_root(target, Some(cwd), &indexed),
+            Some(PathBuf::from("docs/new.md")),
+            "should return the cwd-relative form so re-index merges with existing row"
+        );
+    }
+
+    #[test]
+    fn under_indexed_root_absolute_db_matches_absolute_target() {
+        // DB has absolute paths (e.g., `polaris index /abs/proj`).
+        let indexed = vec!["/proj/docs/foo.md".to_string()];
+        let target = Path::new("/proj/docs/new.md");
+        assert_eq!(
+            under_indexed_root(target, Some(Path::new("/proj")), &indexed),
+            Some(PathBuf::from("/proj/docs/new.md")),
+            "should return the absolute form because the indexed row is absolute"
+        );
+    }
+
+    #[test]
+    fn under_indexed_root_returns_none_without_cwd_for_relative_db() {
+        // Without cwd we can't translate an absolute target to a relative form.
+        // Returning None is correct — silent no-op is the right hook behavior.
+        let indexed = vec!["docs/foo.md".to_string()];
+        let target = Path::new("/proj/docs/new.md");
+        assert_eq!(under_indexed_root(target, None, &indexed), None);
     }
 
     #[test]
@@ -295,7 +438,9 @@ mod tests {
         let new_file = docs.join("new.md");
         std::fs::write(&new_file, "# New\nfresh content\n").unwrap();
 
-        let report = perform_index(&new_file, &db_path).expect("hook should succeed");
+        // DB stores absolute paths here (tempdir is absolute), so cwd=None
+        // is fine — the gate's absolute branch will match.
+        let report = perform_index(&new_file, None, &db_path).expect("hook should succeed");
         assert!(
             report.indexed_new_or_modified > 0,
             "expected indexing to record at least one new/modified file; report={report:?}"
@@ -347,7 +492,7 @@ mod tests {
         let vendor_md = vendor_dir.join("README.md");
         std::fs::write(&vendor_md, "# Vendor\n").unwrap();
 
-        let report = perform_index(&vendor_md, &db_path).expect("hook should succeed");
+        let report = perform_index(&vendor_md, None, &db_path).expect("hook should succeed");
         assert_eq!(report.indexed_new_or_modified, 0);
 
         // Confirm vendor README did NOT enter the DB.

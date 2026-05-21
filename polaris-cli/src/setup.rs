@@ -703,6 +703,13 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
 /// `polaris setup` for minutes on typical fullstack repos. Instead we print
 /// a hint and let the user run `polaris index <path>` against the directory
 /// they actually want indexed.
+///
+/// We deliberately do NOT canonicalize the target path. The CLI flow
+/// (`polaris index docs`) stores paths in whatever form the user gave (relative
+/// `docs/foo.md` from `polaris index docs` invoked at the project root).
+/// Canonicalizing here would create absolute rows that DUPLICATE existing
+/// relative rows for the same files. The hook side translates Claude Code's
+/// absolute payloads to whichever form matches the DB (see `hook.rs`).
 fn run_initial_index(setup_path: &Path) -> Result<()> {
     use polaris_core::config::PolarisConfig;
     use polaris_core::db::{self, Database};
@@ -721,19 +728,10 @@ fn run_initial_index(setup_path: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    // Canonicalize so the DB stores absolute paths. Claude Code's hook payloads
-    // always carry absolute file paths; relative paths in the DB would fail the
-    // indexed-root gate on every hook fire.
-    let target = std::fs::canonicalize(&docs_dir).unwrap_or(docs_dir);
+    let target = docs_dir;
 
     let mut cfg = PolarisConfig::default();
-    // Index into a project-local polaris.db (matches the rest of the CLI's
-    // default behavior when no --db override is given). Canonicalize the
-    // parent so the stored db_path is absolute even when setup runs from ".".
-    let db_path_raw = setup_path.join("polaris.db");
-    cfg.db_path = std::fs::canonicalize(setup_path)
-        .map(|p| p.join("polaris.db"))
-        .unwrap_or(db_path_raw);
+    cfg.db_path = setup_path.join("polaris.db");
 
     db::register_vec_extension();
 
@@ -1538,39 +1536,4 @@ second
         );
     }
 
-    #[test]
-    #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
-    fn run_initial_index_stores_absolute_paths() {
-        use polaris_core::config::PolarisConfig;
-        use polaris_core::db::Database;
-
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
-        std::fs::write(
-            dir.path().join("docs").join("foo.md"),
-            "# Foo\nbody\n",
-        )
-        .unwrap();
-
-        // Use a relative path for setup (mirrors `polaris setup` from main.rs
-        // which defaults to `.`) — but cd into the tempdir first so the
-        // relative path resolves to our temp tree.
-        // NOTE: mutates process CWD; do not parallelize with other CWD-mutating tests.
-        let prev_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        let result = run(Path::new("."), false, false);
-        std::env::set_current_dir(prev_cwd).unwrap();
-        result.unwrap();
-
-        let db_path = dir.path().join("polaris.db");
-        assert!(db_path.exists());
-        let cfg = PolarisConfig::default();
-        let db = Database::open(&db_path, cfg.embedding_dim, &cfg.model_id).unwrap();
-        let docs = db.get_all_document_hashes().unwrap();
-        assert!(
-            docs.iter().any(|(p, _)| std::path::Path::new(p).is_absolute()),
-            "expected at least one stored path to be absolute; got {:?}",
-            docs
-        );
-    }
 }

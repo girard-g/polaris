@@ -108,16 +108,32 @@ pub fn under_indexed_root(
 
     for p in indexed_paths {
         let p_path = Path::new(p);
-        let Some(parent) = p_path.parent() else { continue };
-        if parent.as_os_str().is_empty() {
-            continue;
-        }
-        if parent.is_absolute() {
-            if target.starts_with(parent) {
-                return Some(target.to_path_buf());
+        let parent_present = p_path
+            .parent()
+            .map(|pp| !pp.as_os_str().is_empty())
+            .unwrap_or(false);
+
+        if parent_present {
+            // Indexed path has a directory prefix; match by directory prefix.
+            let parent = p_path.parent().unwrap();
+            if parent.is_absolute() {
+                if target.starts_with(parent) {
+                    return Some(target.to_path_buf());
+                }
+            } else if target_rel.starts_with(parent) {
+                return Some(target_rel.clone());
             }
-        } else if target_rel.starts_with(parent) {
-            return Some(target_rel.clone());
+        } else {
+            // Single-file indexed root (e.g. `polaris index README.md` from
+            // the project root → DB row keyed `README.md`). Match the file
+            // exactly so the hook re-indexes it when edited.
+            if p_path.is_absolute() {
+                if target == p_path {
+                    return Some(target.to_path_buf());
+                }
+            } else if target_rel == p_path {
+                return Some(target_rel.clone());
+            }
         }
     }
     None
@@ -397,6 +413,41 @@ mod tests {
             under_indexed_root(target, Some(Path::new("/proj")), &indexed),
             Some(PathBuf::from("/proj/docs/new.md")),
             "should return the absolute form because the indexed row is absolute"
+        );
+    }
+
+    #[test]
+    fn under_indexed_root_matches_single_file_relative_indexed_root() {
+        // User ran `polaris index README.md` from /proj. DB row keyed
+        // "README.md" (no parent dir). Hook fires for /proj/README.md with
+        // cwd=/proj. Should match exactly on filename — without this case,
+        // the empty-parent skip caused single-file indexes to silently no-op.
+        let indexed = vec!["README.md".to_string()];
+        let target = Path::new("/proj/README.md");
+        let cwd = Path::new("/proj");
+        assert_eq!(
+            under_indexed_root(target, Some(cwd), &indexed),
+            Some(PathBuf::from("README.md")),
+        );
+    }
+
+    #[test]
+    fn under_indexed_root_single_file_relative_does_not_match_other_file() {
+        // Same DB row, but a different file in the same dir must NOT match —
+        // single-file roots are filename-exact, not directory-wide.
+        let indexed = vec!["README.md".to_string()];
+        let target = Path::new("/proj/CHANGELOG.md");
+        let cwd = Path::new("/proj");
+        assert_eq!(under_indexed_root(target, Some(cwd), &indexed), None);
+    }
+
+    #[test]
+    fn under_indexed_root_matches_single_file_absolute_indexed_root() {
+        let indexed = vec!["/abs/README.md".to_string()];
+        let target = Path::new("/abs/README.md");
+        assert_eq!(
+            under_indexed_root(target, None, &indexed),
+            Some(PathBuf::from("/abs/README.md")),
         );
     }
 

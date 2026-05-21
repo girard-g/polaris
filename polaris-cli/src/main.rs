@@ -174,9 +174,11 @@ enum HookCommand {
 async fn main() {
     let cli = Cli::parse();
 
-    // For `serve`, logging must go to stderr so stdio stays clean for MCP.
-    let log_target = matches!(cli.command, Command::Serve);
-    init_tracing(log_target);
+    // Always log to stderr: keeps stdout clean for command output (JSON for
+    // `search`/`status --output json`, MCP framing for `serve`, hook payload
+    // for `hook index`, plain CLI text). CLI convention is data→stdout,
+    // diagnostics→stderr — uphold it uniformly.
+    init_tracing();
 
     if let Err(e) = run(cli).await {
         eprintln!("{} {e}", style("✗").red().bold());
@@ -955,18 +957,12 @@ fn print_watch_report(report: &IndexReport) {
 // Tracing setup
 // ---------------------------------------------------------------------------
 
-fn init_tracing(stderr: bool) {
+fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("polaris=info"));
 
-    if stderr {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .init();
-    }
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }

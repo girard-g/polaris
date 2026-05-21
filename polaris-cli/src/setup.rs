@@ -272,19 +272,32 @@ pub fn remove_polaris_hooks_from_settings(existing: &str) -> Result<Option<Strin
     Ok(Some(new_content_str + "\n"))
 }
 
-/// Returns true if the given hook entry's `command` basename is `polaris`.
+/// Returns true if the given hook entry's `command` is a polaris-owned
+/// `polaris hook ...` invocation. Two requirements:
+///   1. The first whitespace-delimited token's basename is `polaris` or
+///      `polaris.exe` (Windows binaries carry the `.exe` suffix).
+///   2. The second token is `hook` — the entire `polaris hook` subcommand
+///      surface is internal to polaris, so any `polaris hook <subcmd>` is
+///      ours (current `index`, future `search` for Phase 2, etc.). Other
+///      polaris invocations (e.g. `polaris status` or `polaris search`)
+///      are user-owned and stay untouched.
 fn is_polaris_owned(entry: &serde_json::Value) -> bool {
     let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) else {
         return false;
     };
-    // `cmd` is "<path-to-polaris> hook index" (or similar). Split off the
-    // first whitespace-delimited token, take its basename.
-    let first_token = cmd.split_whitespace().next().unwrap_or("");
-    std::path::Path::new(first_token)
+    let mut tokens = cmd.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    let basename_matches = std::path::Path::new(first)
         .file_name()
         .and_then(|s| s.to_str())
-        .map(|s| s == "polaris")
-        .unwrap_or(false)
+        .map(|s| s == "polaris" || s == "polaris.exe")
+        .unwrap_or(false);
+    if !basename_matches {
+        return false;
+    }
+    tokens.next() == Some("hook")
 }
 
 /// Compute the .mcp.json update for the polaris entry.
@@ -680,9 +693,16 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
     Ok(())
 }
 
-/// Run an initial index on the project's docs (or root) so the auto-index hook
-/// has an established root to reconcile against. Non-fatal: failures print to
-/// stderr and return Ok(()) so setup completes.
+/// Run an initial index on the project's `./docs/` directory so the auto-index
+/// hook has an established root to reconcile against. Non-fatal: failures print
+/// to stderr and return Ok(()) so setup completes.
+///
+/// If `./docs/` doesn't exist we explicitly do NOT fall back to indexing the
+/// whole setup path — the core indexer uses a plain `WalkDir` with no
+/// gitignore/`node_modules`/`.git` awareness, so a fallback would freeze
+/// `polaris setup` for minutes on typical fullstack repos. Instead we print
+/// a hint and let the user run `polaris index <path>` against the directory
+/// they actually want indexed.
 fn run_initial_index(setup_path: &Path) -> Result<()> {
     use polaris_core::config::PolarisConfig;
     use polaris_core::db::{self, Database};
@@ -691,15 +711,20 @@ fn run_initial_index(setup_path: &Path) -> Result<()> {
     use std::sync::Arc;
 
     let docs_dir = setup_path.join("docs");
-    let target_raw = if docs_dir.is_dir() {
-        docs_dir
-    } else {
-        setup_path.to_path_buf()
-    };
+    if !docs_dir.is_dir() {
+        println!(
+            "  {}  No ./docs/ directory; skipping initial index",
+            console::style("ℹ").cyan(),
+        );
+        eprintln!(
+            "      Run `polaris index <path>` to establish an indexed root for the auto-index hook."
+        );
+        return Ok(());
+    }
     // Canonicalize so the DB stores absolute paths. Claude Code's hook payloads
     // always carry absolute file paths; relative paths in the DB would fail the
     // indexed-root gate on every hook fire.
-    let target = std::fs::canonicalize(&target_raw).unwrap_or(target_raw);
+    let target = std::fs::canonicalize(&docs_dir).unwrap_or(docs_dir);
 
     let mut cfg = PolarisConfig::default();
     // Index into a project-local polaris.db (matches the rest of the CLI's
@@ -1380,6 +1405,56 @@ second
             hooks[0]["command"],
             "/usr/bin/my-formatter",
             "sibling hook should be the survivor"
+        );
+    }
+
+    #[test]
+    fn remove_polaris_hooks_recognizes_windows_exe_basename() {
+        // On Windows, `current_exe()` returns `polaris.exe`. The install path
+        // writes that basename; the uninstall path must recognize it too.
+        // Use forward slashes so `Path::file_name()` parses the basename on
+        // both Linux and Windows (Windows accepts either separator).
+        let existing = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "/c/Users/u/bin/polaris.exe hook index" }
+        ]
+      }
+    ]
+  }
+}"#;
+        let new_content = remove_polaris_hooks_from_settings(existing).unwrap();
+        let content = new_content.expect("polaris.exe entry should be recognized and removed");
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let post = parsed["hooks"]["PostToolUse"].as_array().unwrap();
+        assert!(post.is_empty(), "matcher block should be pruned, got {:?}", post);
+    }
+
+    #[test]
+    fn remove_polaris_hooks_preserves_user_owned_polaris_status_hook() {
+        // A user hand-wrote a hook that runs `polaris status` for some other
+        // purpose. Our ownership check is scoped to `polaris hook ...` only,
+        // so this hook must survive.
+        let existing = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          { "type": "command", "command": "/usr/local/bin/polaris status" }
+        ]
+      }
+    ]
+  }
+}"#;
+        let result = remove_polaris_hooks_from_settings(existing).unwrap();
+        assert!(
+            result.is_none(),
+            "user `polaris status` hook is not polaris-owned and must not be removed; got {:?}",
+            result
         );
     }
 

@@ -251,6 +251,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
     fn run_index_indexes_new_md_under_indexed_root() {
         use polaris_core::config::PolarisConfig;
         use polaris_core::db::{register_vec_extension, Database};
@@ -301,6 +302,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
     fn run_index_silent_noop_when_file_outside_indexed_roots() {
         use polaris_core::config::PolarisConfig;
         use polaris_core::db::{register_vec_extension, Database};

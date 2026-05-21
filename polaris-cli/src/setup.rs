@@ -427,8 +427,6 @@ pub fn merge_agent_instructions(existing: Option<&str>) -> Result<AgentReport> {
 pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
     use console::style;
 
-    let _ = no_hooks;
-
     if !path.exists() {
         return Err(PolarisError::Setup(format!(
             "path not found: {}",
@@ -549,6 +547,39 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
                 (None, _) | (Some(_), AgentAction::Unchanged) => {
                     println!("  {}  {filename} already configured", style("✓").green());
                 }
+            }
+        }
+    }
+
+    // .claude/settings.json — install the auto-index hook unless --no-hooks
+    if !no_hooks {
+        let claude_dir = path.join(".claude");
+        if !claude_dir.exists() {
+            std::fs::create_dir_all(&claude_dir)?;
+        }
+        let settings_path = claude_dir.join("settings.json");
+        let existing_settings = read_optional(&settings_path)?;
+        let report = merge_claude_settings(existing_settings.as_deref(), &binary_path)?;
+        match (&report.new_content, &report.action) {
+            (Some(content), ClaudeSettingsAction::Created) => {
+                std::fs::write(&settings_path, content)?;
+                println!(
+                    "  {}  Created .claude/settings.json (auto-index hook)",
+                    style("✓").green(),
+                );
+            }
+            (Some(content), ClaudeSettingsAction::Updated) => {
+                std::fs::write(&settings_path, content)?;
+                println!(
+                    "  {}  Updated .claude/settings.json (auto-index hook)",
+                    style("✓").green(),
+                );
+            }
+            (None, _) | (Some(_), ClaudeSettingsAction::Unchanged) => {
+                println!(
+                    "  {}  .claude/settings.json already configured",
+                    style("✓").green(),
+                );
             }
         }
     }
@@ -1041,5 +1072,34 @@ second
     fn claude_settings_errors_when_top_level_is_not_object() {
         let result = merge_claude_settings(Some("[1, 2, 3]"), &bin());
         assert!(matches!(result, Err(PolarisError::Setup(_))));
+    }
+
+    #[test]
+    fn run_writes_claude_settings_by_default() {
+        let dir = TempDir::new().unwrap();
+        // Use no_hooks=false to exercise the new path.
+        run(dir.path(), false, false).unwrap();
+
+        let settings_path = dir.path().join(".claude").join("settings.json");
+        assert!(settings_path.exists(), ".claude/settings.json should be created");
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let block = &parsed["hooks"]["PostToolUse"][0];
+        assert_eq!(block["matcher"], "Write|Edit|MultiEdit");
+        let cmd = block["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.ends_with("hook index"));
+    }
+
+    #[test]
+    fn run_skips_claude_settings_with_no_hooks() {
+        let dir = TempDir::new().unwrap();
+        run(dir.path(), false, true).unwrap();
+
+        let settings_path = dir.path().join(".claude").join("settings.json");
+        assert!(
+            !settings_path.exists(),
+            ".claude/settings.json should not be created when --no-hooks is set"
+        );
     }
 }

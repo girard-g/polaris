@@ -554,6 +554,12 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
     // .claude/settings.json — install the auto-index hook unless --no-hooks
     if !no_hooks {
         let claude_dir = path.join(".claude");
+        if claude_dir.exists() && !claude_dir.is_dir() {
+            return Err(PolarisError::Setup(format!(
+                "{} exists but is not a directory",
+                claude_dir.display()
+            )));
+        }
         if !claude_dir.exists() {
             std::fs::create_dir_all(&claude_dir)?;
         }
@@ -575,6 +581,9 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
                     style("✓").green(),
                 );
             }
+            // `Unchanged` is only produced with `new_content: None`, but the
+            // compiler can't prove that — fold the impossible (Some, Unchanged)
+            // case into the no-op arm rather than panicking with unreachable!().
             (None, _) | (Some(_), ClaudeSettingsAction::Unchanged) => {
                 println!(
                     "  {}  .claude/settings.json already configured",

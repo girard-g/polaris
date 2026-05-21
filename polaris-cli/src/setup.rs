@@ -272,7 +272,7 @@ pub fn remove_polaris_hooks_from_settings(existing: &str) -> Result<Option<Strin
     Ok(Some(new_content_str + "\n"))
 }
 
-/// Returns true if the given hook entry's `command` basename is `polaris` or `polaris-*` (e.g., test binaries with hash suffixes).
+/// Returns true if the given hook entry's `command` basename is `polaris`.
 fn is_polaris_owned(entry: &serde_json::Value) -> bool {
     let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) else {
         return false;
@@ -283,7 +283,7 @@ fn is_polaris_owned(entry: &serde_json::Value) -> bool {
     std::path::Path::new(first_token)
         .file_name()
         .and_then(|s| s.to_str())
-        .map(|s| s == "polaris" || s.starts_with("polaris-"))
+        .map(|s| s == "polaris")
         .unwrap_or(false)
 }
 
@@ -1318,14 +1318,31 @@ second
     #[test]
     fn run_no_hooks_removes_existing_polaris_entries() {
         let dir = TempDir::new().unwrap();
-        // First install hooks.
-        run(dir.path(), false, false).unwrap();
-        let settings_path = dir.path().join(".claude").join("settings.json");
-        let installed = std::fs::read_to_string(&settings_path).unwrap();
-        assert!(installed.contains("polaris"), "precondition: hook installed");
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let settings_path = claude_dir.join("settings.json");
 
-        // Then run with --no-hooks; the polaris hook entry should be removed.
+        // Seed the file with a canonical polaris hook entry (don't go through
+        // the install path, because cargo's test binary is named `polaris-<hash>`
+        // and would not be recognized as polaris-owned by the strict-equality
+        // `is_polaris_owned` rule).
+        let seeded = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "/usr/local/bin/polaris hook index" }
+        ]
+      }
+    ]
+  }
+}"#;
+        std::fs::write(&settings_path, seeded).unwrap();
+
+        // Run with --no-hooks; the polaris hook entry should be removed.
         run(dir.path(), false, true).unwrap();
+
         // File still exists (we don't delete the file, only our entries).
         assert!(settings_path.exists());
         let after = std::fs::read_to_string(&settings_path).unwrap();

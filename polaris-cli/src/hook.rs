@@ -5,9 +5,14 @@
 //! so a transient hiccup never interrupts the user's session via a Claude Code
 //! warning banner.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use polaris_core::config::PolarisConfig;
+use polaris_core::db::{register_vec_extension, Database};
+use polaris_core::embedding::EmbeddingEngine;
 use polaris_core::error::{PolarisError, Result};
+use polaris_core::indexer::Indexer;
 
 /// The slice of a Claude Code hook payload we actually use.
 #[derive(Debug)]
@@ -44,7 +49,7 @@ pub fn parse_payload(json: &str) -> Result<HookPayload> {
 
 /// Returns true if the path looks like a markdown file we should consider
 /// indexing. Case-insensitive on the extension; rejects extension-only names.
-pub fn is_markdown(path: &std::path::Path) -> bool {
+pub fn is_markdown(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
         return false;
     };
@@ -56,6 +61,59 @@ pub fn is_markdown(path: &std::path::Path) -> bool {
         .and_then(|s| s.to_str())
         .map(|s| !s.is_empty())
         .unwrap_or(false)
+}
+
+/// Returns true if `target` lives under the parent directory of at least one
+/// previously-indexed document. Checks whether any indexed path's parent is an
+/// ancestor of (or equal to the parent of) `target`.
+pub fn under_indexed_root(target: &Path, indexed_paths: &[String]) -> bool {
+    for p in indexed_paths {
+        if let Some(parent) = Path::new(p).parent() {
+            if !parent.as_os_str().is_empty() && target.starts_with(parent) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Outcome of one `perform_index` call. Used in tests; production code only
+/// cares that the call returned `Ok`.
+#[derive(Debug)]
+pub struct HookIndexReport {
+    /// Number of files added or modified by this index call.
+    pub indexed_new_or_modified: usize,
+}
+
+/// Apply the gates and (if eligible) run a single-file index pass. Pure
+/// failures (DB locked, etc.) bubble up as `Err`; the caller decides whether
+/// to surface them — `run_index` swallows them into stderr.
+pub fn perform_index(file_path: &Path, db_path: &Path) -> Result<HookIndexReport> {
+    if !is_markdown(file_path) {
+        return Ok(HookIndexReport { indexed_new_or_modified: 0 });
+    }
+
+    let cfg = PolarisConfig::default();
+    register_vec_extension();
+    let db = Database::open(db_path, cfg.embedding_dim, &cfg.model_id)?;
+
+    let indexed = db.get_all_document_hashes()?;
+    let indexed_paths: Vec<String> = indexed.into_iter().map(|(p, _)| p).collect();
+    if !under_indexed_root(file_path, &indexed_paths) {
+        return Ok(HookIndexReport { indexed_new_or_modified: 0 });
+    }
+
+    let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
+    let indexer = Indexer::new(
+        engine,
+        cfg.max_chunk_tokens,
+        cfg.chunk_overlap_chars,
+        cfg.max_file_size,
+    );
+    let report = indexer.index_path(&db, file_path, false, false, false, None)?;
+    Ok(HookIndexReport {
+        indexed_new_or_modified: report.added.len() + report.modified.len(),
+    })
 }
 
 /// Entry point for `polaris hook index` — re-index a single file the agent
@@ -141,5 +199,123 @@ mod tests {
         assert!(!is_markdown(Path::new("/p/foo.txt")));
         assert!(!is_markdown(Path::new("/p/foo")));
         assert!(!is_markdown(Path::new("/p/.md")));  // no stem — treat as not-a-doc
+    }
+
+    #[test]
+    fn under_indexed_root_true_when_indexed_sibling_exists() {
+        let indexed = vec!["docs/foo.md".to_string(), "docs/sub/bar.md".to_string()];
+        // A new file under the same directory tree should match.
+        assert!(under_indexed_root(Path::new("docs/sub/new.md"), &indexed));
+        assert!(under_indexed_root(Path::new("docs/new.md"), &indexed));
+    }
+
+    #[test]
+    fn under_indexed_root_false_when_disjoint() {
+        let indexed = vec!["docs/foo.md".to_string()];
+        assert!(!under_indexed_root(Path::new("node_modules/pkg/README.md"), &indexed));
+        assert!(!under_indexed_root(Path::new("other/dir/x.md"), &indexed));
+    }
+
+    #[test]
+    fn under_indexed_root_false_when_no_indexed_paths() {
+        assert!(!under_indexed_root(Path::new("docs/foo.md"), &[]));
+    }
+
+    #[test]
+    fn run_index_indexes_new_md_under_indexed_root() {
+        use polaris_core::config::PolarisConfig;
+        use polaris_core::db::{register_vec_extension, Database};
+        use polaris_core::embedding::EmbeddingEngine;
+        use polaris_core::indexer::Indexer;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let seed = docs.join("seed.md");
+        std::fs::write(&seed, "# Seed\nbody\n").unwrap();
+
+        // Seed the index with the docs/ tree so the indexed-root gate hits.
+        let cfg = PolarisConfig::default();
+        let db_path = dir.path().join("polaris.db");
+        register_vec_extension();
+        let db = Database::open(&db_path, cfg.embedding_dim, &cfg.model_id).unwrap();
+        let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id).unwrap());
+        let indexer = Indexer::new(
+            engine,
+            cfg.max_chunk_tokens,
+            cfg.chunk_overlap_chars,
+            cfg.max_file_size,
+        );
+        indexer.index_path(&db, &docs, true, false, false, None).unwrap();
+        drop(db);
+
+        // Write a new sibling and run the hook action directly.
+        let new_file = docs.join("new.md");
+        std::fs::write(&new_file, "# New\nfresh content\n").unwrap();
+
+        let report = perform_index(&new_file, &db_path).expect("hook should succeed");
+        assert!(
+            report.indexed_new_or_modified > 0,
+            "expected indexing to record at least one new/modified file; report={report:?}"
+        );
+
+        // Verify it landed in the DB.
+        let db2 = Database::open(&db_path, cfg.embedding_dim, &cfg.model_id).unwrap();
+        let docs_after = db2.get_all_document_hashes().unwrap();
+        assert!(
+            docs_after.iter().any(|(p, _)| p.ends_with("new.md")),
+            "new.md should be indexed; got {:?}",
+            docs_after
+        );
+    }
+
+    #[test]
+    fn run_index_silent_noop_when_file_outside_indexed_roots() {
+        use polaris_core::config::PolarisConfig;
+        use polaris_core::db::{register_vec_extension, Database};
+        use polaris_core::embedding::EmbeddingEngine;
+        use polaris_core::indexer::Indexer;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let seed = docs.join("seed.md");
+        std::fs::write(&seed, "# Seed\nbody\n").unwrap();
+
+        let cfg = PolarisConfig::default();
+        let db_path = dir.path().join("polaris.db");
+        register_vec_extension();
+        let db = Database::open(&db_path, cfg.embedding_dim, &cfg.model_id).unwrap();
+        let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id).unwrap());
+        let indexer = Indexer::new(
+            engine,
+            cfg.max_chunk_tokens,
+            cfg.chunk_overlap_chars,
+            cfg.max_file_size,
+        );
+        indexer.index_path(&db, &docs, true, false, false, None).unwrap();
+        drop(db);
+
+        // Write a file under a disjoint directory.
+        let vendor_dir = dir.path().join("vendor").join("pkg");
+        std::fs::create_dir_all(&vendor_dir).unwrap();
+        let vendor_md = vendor_dir.join("README.md");
+        std::fs::write(&vendor_md, "# Vendor\n").unwrap();
+
+        let report = perform_index(&vendor_md, &db_path).expect("hook should succeed");
+        assert_eq!(report.indexed_new_or_modified, 0);
+
+        // Confirm vendor README did NOT enter the DB.
+        let db2 = Database::open(&db_path, cfg.embedding_dim, &cfg.model_id).unwrap();
+        let docs_after = db2.get_all_document_hashes().unwrap();
+        assert!(
+            !docs_after.iter().any(|(p, _)| p.ends_with("vendor/pkg/README.md")),
+            "vendor README should not be indexed; got {:?}",
+            docs_after
+        );
     }
 }

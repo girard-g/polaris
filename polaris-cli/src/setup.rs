@@ -100,9 +100,8 @@ pub struct ClaudeSettingsReport {
     pub action: ClaudeSettingsAction,
 }
 
-/// Polaris owns the unique `{ type: "command", command: "..." }` hook entry
-/// whose command basename is `polaris`. The matcher we install under for the
-/// auto-index hook.
+/// Matcher string for the `PostToolUse` hook block polaris installs for
+/// auto-indexing.
 const POLARIS_POST_TOOL_USE_MATCHER: &str = "Write|Edit|MultiEdit";
 
 /// Compute the `.claude/settings.json` update for the polaris hook entries.
@@ -153,8 +152,8 @@ pub fn merge_claude_settings(
     };
 
     // Drop stale polaris-owned entries across every event. Prune empty matcher
-    // blocks. Track whether the PostToolUse key exists for the append step.
-    for (_event, event_value) in hooks_map.iter_mut() {
+    // blocks.
+    for event_value in hooks_map.values_mut() {
         let Value::Array(blocks) = event_value else {
             continue;
         };
@@ -185,7 +184,7 @@ pub fn merge_claude_settings(
         .or_insert_with(|| json!([]));
     let Value::Array(blocks) = post_tool_use else {
         return Err(PolarisError::Setup(
-            "expected `hooks.PostToolUse` to be an array".into(),
+            "expected `hooks.PostToolUse` to be an array in .claude/settings.json".into(),
         ));
     };
     blocks.push(canonical_block);

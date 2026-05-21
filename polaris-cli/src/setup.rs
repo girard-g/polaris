@@ -653,6 +653,7 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
                 );
             }
         }
+        run_initial_index(path)?;
     } else {
         // --no-hooks: remove any polaris-owned hook entries if the file exists.
         let settings_path = path.join(".claude").join("settings.json");
@@ -676,6 +677,65 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
     }
 
     println!();
+    Ok(())
+}
+
+/// Run an initial index on the project's docs (or root) so the auto-index hook
+/// has an established root to reconcile against. Non-fatal: failures print to
+/// stderr and return Ok(()) so setup completes.
+fn run_initial_index(setup_path: &Path) -> Result<()> {
+    use polaris_core::config::PolarisConfig;
+    use polaris_core::db::{self, Database};
+    use polaris_core::embedding::EmbeddingEngine;
+    use polaris_core::indexer::Indexer;
+    use std::sync::Arc;
+
+    let docs_dir = setup_path.join("docs");
+    let target = if docs_dir.is_dir() {
+        docs_dir
+    } else {
+        setup_path.to_path_buf()
+    };
+
+    let mut cfg = PolarisConfig::default();
+    // Index into a project-local polaris.db (matches the rest of the CLI's
+    // default behavior when no --db override is given).
+    cfg.db_path = setup_path.join("polaris.db");
+
+    db::register_vec_extension();
+
+    let attempt = || -> Result<()> {
+        let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+        let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
+        let indexer = Indexer::new(
+            engine,
+            cfg.max_chunk_tokens,
+            cfg.chunk_overlap_chars,
+            cfg.max_file_size,
+        );
+        let recursive = true;
+        let force = false;
+        let dry_run = false;
+        let _report = indexer.index_path(&db, &target, recursive, force, dry_run, None)?;
+        Ok(())
+    };
+
+    match attempt() {
+        Ok(()) => {
+            println!(
+                "  {}  Indexed {}",
+                console::style("✓").green(),
+                target.display(),
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "  {}  initial index failed: {e}",
+                console::style("⚠").yellow(),
+            );
+            eprintln!("      You can retry with: polaris index {}", target.display());
+        }
+    }
     Ok(())
 }
 
@@ -1361,6 +1421,36 @@ second
         assert!(
             !settings_path.exists(),
             ".claude/settings.json should not be created by --no-hooks"
+        );
+    }
+
+    #[test]
+    fn run_runs_initial_index_when_hooks_installed() {
+        use polaris_core::config::PolarisConfig;
+        use polaris_core::db::Database;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(
+            dir.path().join("docs").join("foo.md"),
+            "# Foo\n\nThis is some content for initial indexing.\n",
+        )
+        .unwrap();
+
+        run(dir.path(), false, false).unwrap();
+
+        // The DB lives at <setup-path>/polaris.db (run_initial_index sets it
+        // explicitly to that location).
+        let db_path = dir.path().join("polaris.db");
+        assert!(db_path.exists(), "initial index should produce polaris.db");
+
+        let cfg = PolarisConfig::default();
+        let db = Database::open(&db_path, cfg.embedding_dim, &cfg.model_id).unwrap();
+        let docs = db.get_all_document_hashes().unwrap();
+        assert!(
+            docs.iter().any(|(p, _)| p.ends_with("foo.md")),
+            "docs/foo.md should be indexed; got {:?}",
+            docs
         );
     }
 }

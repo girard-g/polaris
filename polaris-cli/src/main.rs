@@ -1,3 +1,4 @@
+mod hook;
 mod mcp;
 mod setup;
 mod savings;
@@ -150,6 +151,19 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+
+    /// Internal: subcommands invoked by Claude Code hooks. Not intended for direct use.
+    #[command(hide = true)]
+    Hook {
+        #[command(subcommand)]
+        subcommand: HookCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookCommand {
+    /// Re-index a single file based on a PostToolUse hook payload on stdin.
+    Index,
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +243,9 @@ async fn run(cli: Cli) -> Result<()> {
                     format!("update task panicked: {e}")
                 ))?
         }
+        Command::Hook { subcommand } => match subcommand {
+            HookCommand::Index => hook::run_index(),
+        },
     }
 }
 

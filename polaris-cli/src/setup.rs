@@ -120,7 +120,12 @@ pub fn merge_claude_settings(
 ) -> Result<ClaudeSettingsReport> {
     use serde_json::{json, Map, Value};
 
-    let polaris_command = format!("{} hook index", binary_path.to_string_lossy());
+    // Quote the binary path so spaces in the installation path (common on
+    // Windows: `C:\Program Files\...`) survive Claude Code's shell parsing.
+    // `is_polaris_owned` uses the matching `shell_words::split` to recover
+    // the original tokens.
+    let bin_str = binary_path.to_string_lossy();
+    let polaris_command = format!("{} hook index", shell_words::quote(&bin_str));
     let canonical_block = json!({
         "matcher": POLARIS_POST_TOOL_USE_MATCHER,
         "hooks": [
@@ -274,22 +279,29 @@ pub fn remove_polaris_hooks_from_settings(existing: &str) -> Result<Option<Strin
 
 /// Returns true if the given hook entry's `command` is a polaris-owned
 /// `polaris hook ...` invocation. Two requirements:
-///   1. The first whitespace-delimited token's basename is `polaris` or
+///   1. The first shell-parsed token's basename is `polaris` or
 ///      `polaris.exe` (Windows binaries carry the `.exe` suffix).
 ///   2. The second token is `hook` — the entire `polaris hook` subcommand
 ///      surface is internal to polaris, so any `polaris hook <subcmd>` is
 ///      ours (current `index`, future `search` for Phase 2, etc.). Other
 ///      polaris invocations (e.g. `polaris status` or `polaris search`)
 ///      are user-owned and stay untouched.
+///
+/// Uses `shell_words::split` to honor the same quoting we apply in
+/// `merge_claude_settings`. A command string we can't shell-parse is treated
+/// as not-ours (conservative: leave the user's odd entry alone).
 fn is_polaris_owned(entry: &serde_json::Value) -> bool {
     let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) else {
         return false;
     };
-    let mut tokens = cmd.split_whitespace();
-    let Some(first) = tokens.next() else {
+    let Ok(tokens) = shell_words::split(cmd) else {
         return false;
     };
-    let basename_matches = std::path::Path::new(first)
+    let mut iter = tokens.into_iter();
+    let Some(first) = iter.next() else {
+        return false;
+    };
+    let basename_matches = std::path::Path::new(&first)
         .file_name()
         .and_then(|s| s.to_str())
         .map(|s| s == "polaris" || s == "polaris.exe")
@@ -297,7 +309,7 @@ fn is_polaris_owned(entry: &serde_json::Value) -> bool {
     if !basename_matches {
         return false;
     }
-    tokens.next() == Some("hook")
+    iter.next().as_deref() == Some("hook")
 }
 
 /// Compute the .mcp.json update for the polaris entry.
@@ -1429,6 +1441,32 @@ second
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         let post = parsed["hooks"]["PostToolUse"].as_array().unwrap();
         assert!(post.is_empty(), "matcher block should be pruned, got {:?}", post);
+    }
+
+    #[test]
+    fn merge_claude_settings_quotes_binary_path_with_spaces() {
+        // On Windows the binary commonly lives under `C:\Program Files\...`.
+        // The written command must be shell-parseable and round-trip through
+        // `is_polaris_owned` so re-runs and uninstall keep working.
+        let bin = std::path::PathBuf::from("/opt/some path/polaris");
+        let report = merge_claude_settings(None, &bin).unwrap();
+        let content = report.new_content.expect("should write");
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let cmd = parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        // The command must be shell-quoted in some way (single-quoted token
+        // form is what shell_words::quote emits for paths with spaces).
+        assert!(
+            cmd.contains("'") || cmd.contains("\""),
+            "expected command to be shell-quoted; got: {cmd}"
+        );
+        // Round trip: re-merging should detect this as already-current and
+        // return Unchanged. That only works if `is_polaris_owned` parses the
+        // quoted form correctly.
+        let report2 = merge_claude_settings(Some(&content), &bin).unwrap();
+        assert_eq!(report2.action, ClaudeSettingsAction::Unchanged);
+        assert!(report2.new_content.is_none());
     }
 
     #[test]

@@ -144,7 +144,7 @@ Error: <embedding error message>
 
 ## Hook integration (Claude Code)
 
-When you run `polaris setup` in a project, polaris also writes a `PostToolUse` hook into `.claude/settings.json`. The hook fires after Claude Code's `Write`, `Edit`, or `MultiEdit` tools complete; it re-runs `polaris index` for the touched file if (a) the path ends in `.md` and (b) the file lives under a directory the index already covers. Failures are swallowed silently — a transient hook hiccup never interrupts your session.
+When you run `polaris setup` in a project, polaris also writes a `PostToolUse` hook into `.claude/settings.json`. The hook fires after Claude Code's `Write`, `Edit`, or `MultiEdit` tools complete; it re-runs `polaris index` for the touched file if (a) the path ends in `.md` and (b) the file lives under a directory the index already covers. Failures are non-fatal: the hook logs to stderr and always exits 0, so a transient hiccup never surfaces as a warning banner in Claude Code or interrupts your session.
 
 To opt out, run `polaris setup --no-hooks`. To remove the hook from a project that already has it installed, re-run `polaris setup --no-hooks` — it strips the polaris entries from `.claude/settings.json` while leaving any other hooks intact.
 

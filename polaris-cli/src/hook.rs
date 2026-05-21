@@ -42,6 +42,22 @@ pub fn parse_payload(json: &str) -> Result<HookPayload> {
     })
 }
 
+/// Returns true if the path looks like a markdown file we should consider
+/// indexing. Case-insensitive on the extension; rejects extension-only names.
+pub fn is_markdown(path: &std::path::Path) -> bool {
+    let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if !ext.eq_ignore_ascii_case("md") {
+        return false;
+    }
+    // Require a non-empty stem so files literally named `.md` are rejected.
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+}
+
 /// Entry point for `polaris hook index` — re-index a single file the agent
 /// just edited.
 pub fn run_index() -> Result<()> {
@@ -105,5 +121,25 @@ mod tests {
     #[test]
     fn parse_payload_errors_when_top_level_is_not_object() {
         assert!(parse_payload("[1,2,3]").is_err());
+    }
+
+    use std::path::Path;
+
+    #[test]
+    fn is_markdown_accepts_md_lowercase() {
+        assert!(is_markdown(Path::new("/p/foo.md")));
+    }
+
+    #[test]
+    fn is_markdown_accepts_md_uppercase() {
+        assert!(is_markdown(Path::new("/p/FOO.MD")));
+    }
+
+    #[test]
+    fn is_markdown_rejects_other_extensions() {
+        assert!(!is_markdown(Path::new("/p/foo.rs")));
+        assert!(!is_markdown(Path::new("/p/foo.txt")));
+        assert!(!is_markdown(Path::new("/p/foo")));
+        assert!(!is_markdown(Path::new("/p/.md")));  // no stem — treat as not-a-doc
     }
 }

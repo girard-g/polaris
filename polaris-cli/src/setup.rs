@@ -80,6 +80,152 @@ pub struct AgentReport {
     pub action: AgentAction,
 }
 
+/// What kind of `.claude/settings.json` change happened.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClaudeSettingsAction {
+    /// File didn't exist; we'll create it.
+    Created,
+    /// File existed; the polaris hook entry was added or replaced.
+    Updated,
+    /// File existed and the polaris hook entry already matched; no rewrite needed.
+    Unchanged,
+}
+
+/// Result of computing a `.claude/settings.json` update.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClaudeSettingsReport {
+    /// New file content to write, or `None` if no rewrite is needed.
+    pub new_content: Option<String>,
+    /// Action taken.
+    pub action: ClaudeSettingsAction,
+}
+
+/// Polaris owns the unique `{ type: "command", command: "..." }` hook entry
+/// whose command basename is `polaris`. The matcher we install under for the
+/// auto-index hook.
+const POLARIS_POST_TOOL_USE_MATCHER: &str = "Write|Edit|MultiEdit";
+
+/// Compute the `.claude/settings.json` update for the polaris hook entries.
+///
+/// `existing` is the current file content (or `None` if absent). `binary_path`
+/// is the absolute path to the polaris binary; the canonical hook command is
+/// `<binary_path> hook index`.
+///
+/// Strategy: drop every polaris-owned hook entry from every matcher block under
+/// every event (currently just `PostToolUse`; we walk the whole `hooks.*` map
+/// to be Phase 2-ready), prune any matcher block whose `hooks[]` becomes empty,
+/// then append our canonical matcher block to `hooks.PostToolUse`.
+pub fn merge_claude_settings(
+    existing: Option<&str>,
+    binary_path: &Path,
+) -> Result<ClaudeSettingsReport> {
+    use serde_json::{json, Map, Value};
+
+    let polaris_command = format!("{} hook index", binary_path.to_string_lossy());
+    let canonical_block = json!({
+        "matcher": POLARIS_POST_TOOL_USE_MATCHER,
+        "hooks": [
+            { "type": "command", "command": polaris_command }
+        ]
+    });
+
+    let (mut root, action) = match existing {
+        None => (Map::new(), ClaudeSettingsAction::Created),
+        Some(text) => {
+            let parsed: Value = serde_json::from_str(text).map_err(|e| {
+                PolarisError::Setup(format!("invalid JSON in .claude/settings.json: {e}"))
+            })?;
+            let Value::Object(map) = parsed else {
+                return Err(PolarisError::Setup(
+                    "expected top-level object in .claude/settings.json".into(),
+                ));
+            };
+            (map, ClaudeSettingsAction::Updated)
+        }
+    };
+
+    // Ensure `hooks` is an object.
+    let hooks_value = root.entry("hooks".to_string()).or_insert_with(|| json!({}));
+    let Value::Object(hooks_map) = hooks_value else {
+        return Err(PolarisError::Setup(
+            "expected `hooks` to be an object in .claude/settings.json".into(),
+        ));
+    };
+
+    // Drop stale polaris-owned entries across every event. Prune empty matcher
+    // blocks. Track whether the PostToolUse key exists for the append step.
+    for (_event, event_value) in hooks_map.iter_mut() {
+        let Value::Array(blocks) = event_value else {
+            continue;
+        };
+        for block in blocks.iter_mut() {
+            let Value::Object(block_obj) = block else {
+                continue;
+            };
+            let Some(Value::Array(hook_entries)) = block_obj.get_mut("hooks") else {
+                continue;
+            };
+            hook_entries.retain(|entry| !is_polaris_owned(entry));
+        }
+        // Prune any block whose hooks array is now empty.
+        blocks.retain(|block| {
+            let Value::Object(block_obj) = block else {
+                return true;
+            };
+            match block_obj.get("hooks") {
+                Some(Value::Array(arr)) => !arr.is_empty(),
+                _ => true,
+            }
+        });
+    }
+
+    // Append our canonical matcher block to PostToolUse.
+    let post_tool_use = hooks_map
+        .entry("PostToolUse".to_string())
+        .or_insert_with(|| json!([]));
+    let Value::Array(blocks) = post_tool_use else {
+        return Err(PolarisError::Setup(
+            "expected `hooks.PostToolUse` to be an array".into(),
+        ));
+    };
+    blocks.push(canonical_block);
+
+    let new_content_str = serde_json::to_string_pretty(&Value::Object(root))
+        .map_err(|e| PolarisError::Setup(format!("failed to serialize .claude/settings.json: {e}")))?;
+
+    if let Some(text) = existing {
+        let normalized_existing = serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|v| serde_json::to_string_pretty(&v).ok());
+        if normalized_existing.as_deref() == Some(new_content_str.as_str()) {
+            return Ok(ClaudeSettingsReport {
+                new_content: None,
+                action: ClaudeSettingsAction::Unchanged,
+            });
+        }
+    }
+
+    Ok(ClaudeSettingsReport {
+        new_content: Some(new_content_str + "\n"),
+        action,
+    })
+}
+
+/// Returns true if the given hook entry's `command` basename is `polaris`.
+fn is_polaris_owned(entry: &serde_json::Value) -> bool {
+    let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    // `cmd` is "<path-to-polaris> hook index" (or similar). Split off the
+    // first whitespace-delimited token, take its basename.
+    let first_token = cmd.split_whitespace().next().unwrap_or("");
+    std::path::Path::new(first_token)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s == "polaris")
+        .unwrap_or(false)
+}
+
 /// Compute the .mcp.json update for the polaris entry.
 ///
 /// `existing` is the current file content (or `None` if absent). `binary_path`
@@ -779,5 +925,122 @@ second
             let after = std::fs::read_to_string(dir.path().join(filename)).unwrap();
             assert_eq!(*before, after, "{filename} should be unchanged on rerun");
         }
+    }
+
+    #[test]
+    fn claude_settings_creates_when_absent() {
+        let report = merge_claude_settings(None, &bin()).unwrap();
+        assert_eq!(report.action, ClaudeSettingsAction::Created);
+        let content = report.new_content.expect("should write");
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let arr = parsed["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["matcher"], "Write|Edit|MultiEdit");
+        let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.starts_with("/usr/local/bin/polaris"));
+        assert!(cmd.ends_with("hook index"));
+    }
+
+    #[test]
+    fn claude_settings_preserves_unrelated_top_level_keys() {
+        let existing = r#"{
+  "permissions": { "allow": ["Bash"] },
+  "env": { "FOO": "bar" }
+}"#;
+        let report = merge_claude_settings(Some(existing), &bin()).unwrap();
+        assert_eq!(report.action, ClaudeSettingsAction::Updated);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&report.new_content.unwrap()).unwrap();
+        assert_eq!(parsed["permissions"]["allow"][0], "Bash");
+        assert_eq!(parsed["env"]["FOO"], "bar");
+        assert!(parsed["hooks"]["PostToolUse"].is_array());
+    }
+
+    #[test]
+    fn claude_settings_preserves_sibling_hooks_in_same_matcher() {
+        // A non-polaris hook lives in the same matcher block we'll touch.
+        let existing = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          { "type": "command", "command": "/usr/bin/my-formatter" }
+        ]
+      }
+    ]
+  }
+}"#;
+        let report = merge_claude_settings(Some(existing), &bin()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&report.new_content.unwrap()).unwrap();
+        let blocks = parsed["hooks"]["PostToolUse"].as_array().unwrap();
+        // Two matcher blocks: the user's (preserved verbatim) and ours (canonical matcher).
+        assert_eq!(blocks.len(), 2);
+        let user_block = blocks.iter().find(|b| b["matcher"] == "Write|Edit").unwrap();
+        assert_eq!(
+            user_block["hooks"][0]["command"],
+            "/usr/bin/my-formatter"
+        );
+        let polaris_block = blocks.iter().find(|b| b["matcher"] == "Write|Edit|MultiEdit").unwrap();
+        let cmd = polaris_block["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.contains("polaris"));
+    }
+
+    #[test]
+    fn claude_settings_drops_stale_polaris_entries_and_appends_canonical() {
+        // Two stale polaris entries under different matchers — both should be dropped,
+        // one canonical entry appended.
+        let existing = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          { "type": "command", "command": "/old/path/polaris hook index" }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          { "type": "command", "command": "/other/old/polaris hook index" }
+        ]
+      }
+    ]
+  }
+}"#;
+        let report = merge_claude_settings(Some(existing), &bin()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&report.new_content.unwrap()).unwrap();
+        let blocks = parsed["hooks"]["PostToolUse"].as_array().unwrap();
+        // Both stale matcher blocks were empty after polaris removal → pruned.
+        // Only our canonical block remains.
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["matcher"], "Write|Edit|MultiEdit");
+        let cmd = blocks[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.starts_with("/usr/local/bin/polaris"));
+    }
+
+    #[test]
+    fn claude_settings_unchanged_when_already_current() {
+        let first = merge_claude_settings(None, &bin())
+            .unwrap()
+            .new_content
+            .unwrap();
+        let report = merge_claude_settings(Some(&first), &bin()).unwrap();
+        assert_eq!(report.action, ClaudeSettingsAction::Unchanged);
+        assert!(report.new_content.is_none());
+    }
+
+    #[test]
+    fn claude_settings_errors_on_invalid_json() {
+        let result = merge_claude_settings(Some("not json {"), &bin());
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
+    }
+
+    #[test]
+    fn claude_settings_errors_when_top_level_is_not_object() {
+        let result = merge_claude_settings(Some("[1, 2, 3]"), &bin());
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 }

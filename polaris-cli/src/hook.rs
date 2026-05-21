@@ -83,6 +83,7 @@ pub fn under_indexed_root(target: &Path, indexed_paths: &[String]) -> bool {
 #[derive(Debug)]
 pub struct HookIndexReport {
     /// Number of files added or modified by this index call.
+    #[allow(dead_code)]
     pub indexed_new_or_modified: usize,
 }
 

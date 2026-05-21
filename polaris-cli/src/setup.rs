@@ -272,7 +272,7 @@ pub fn remove_polaris_hooks_from_settings(existing: &str) -> Result<Option<Strin
     Ok(Some(new_content_str + "\n"))
 }
 
-/// Returns true if the given hook entry's `command` basename is `polaris`.
+/// Returns true if the given hook entry's `command` basename is `polaris` or `polaris-*` (e.g., test binaries with hash suffixes).
 fn is_polaris_owned(entry: &serde_json::Value) -> bool {
     let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) else {
         return false;
@@ -283,7 +283,7 @@ fn is_polaris_owned(entry: &serde_json::Value) -> bool {
     std::path::Path::new(first_token)
         .file_name()
         .and_then(|s| s.to_str())
-        .map(|s| s == "polaris")
+        .map(|s| s == "polaris" || s.starts_with("polaris-"))
         .unwrap_or(false)
 }
 
@@ -651,6 +651,26 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
                     "  {}  .claude/settings.json already configured",
                     style("✓").green(),
                 );
+            }
+        }
+    } else {
+        // --no-hooks: remove any polaris-owned hook entries if the file exists.
+        let settings_path = path.join(".claude").join("settings.json");
+        if let Some(existing) = read_optional(&settings_path)? {
+            match remove_polaris_hooks_from_settings(&existing)? {
+                Some(new_content) => {
+                    std::fs::write(&settings_path, new_content)?;
+                    println!(
+                        "  {}  Removed polaris hook from .claude/settings.json",
+                        style("✓").green(),
+                    );
+                }
+                None => {
+                    println!(
+                        "  {}  .claude/settings.json has no polaris hook to remove",
+                        style("✓").green(),
+                    );
+                }
             }
         }
     }
@@ -1292,6 +1312,38 @@ second
             hooks[0]["command"],
             "/usr/bin/my-formatter",
             "sibling hook should be the survivor"
+        );
+    }
+
+    #[test]
+    fn run_no_hooks_removes_existing_polaris_entries() {
+        let dir = TempDir::new().unwrap();
+        // First install hooks.
+        run(dir.path(), false, false).unwrap();
+        let settings_path = dir.path().join(".claude").join("settings.json");
+        let installed = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(installed.contains("polaris"), "precondition: hook installed");
+
+        // Then run with --no-hooks; the polaris hook entry should be removed.
+        run(dir.path(), false, true).unwrap();
+        // File still exists (we don't delete the file, only our entries).
+        assert!(settings_path.exists());
+        let after = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(
+            !after.contains("polaris"),
+            "polaris entries should be removed from .claude/settings.json"
+        );
+    }
+
+    #[test]
+    fn run_no_hooks_is_noop_when_settings_absent() {
+        let dir = TempDir::new().unwrap();
+        // Run --no-hooks on a fresh project (no .claude/ at all).
+        run(dir.path(), false, true).unwrap();
+        let settings_path = dir.path().join(".claude").join("settings.json");
+        assert!(
+            !settings_path.exists(),
+            ".claude/settings.json should not be created by --no-hooks"
         );
     }
 }

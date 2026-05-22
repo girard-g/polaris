@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use polaris_core::config::PolarisConfig;
 use polaris_core::error::{PolarisError, Result};
 
 /// Lines we ensure are present in `.gitignore`. Order is the order they appear
@@ -511,7 +512,13 @@ pub fn merge_agent_instructions(existing: Option<&str>) -> Result<AgentReport> {
 }
 
 /// Entry point for the `setup` command.
-pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
+///
+/// `cfg` is the `PolarisConfig` `main.rs` already loaded (respecting the
+/// user's `polaris.toml` + CLI overrides). The initial-index step uses
+/// `cfg.embedding_dim`/`cfg.model_id`/`cfg.db_path` so a re-run of
+/// `polaris setup` after the user customized their config indexes into the
+/// same DB and with the same embedding parameters as `polaris index docs`.
+pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
     use console::style;
 
     if !path.exists() {
@@ -678,7 +685,7 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
                 );
             }
         }
-        run_initial_index(path)?;
+        run_initial_index(cfg, path)?;
     } else {
         // --no-hooks: remove any polaris-owned hook entries if the file exists.
         let settings_path = path.join(".claude").join("settings.json");
@@ -730,9 +737,8 @@ pub fn run(path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
 /// this, `polaris setup ./my-proj` would store `my-proj/docs/foo.md` and
 /// the hook's cwd-relative gate (looking for `docs/foo.md`) would silently
 /// no-op. The RAII guard restores the prior CWD on return.
-fn run_initial_index(setup_path: &Path) -> Result<()> {
-    use polaris_core::config::PolarisConfig;
-    use polaris_core::db::{self, Database};
+fn run_initial_index(cfg: &PolarisConfig, setup_path: &Path) -> Result<()> {
+    use polaris_core::db::Database;
     use polaris_core::embedding::EmbeddingEngine;
     use polaris_core::indexer::Indexer;
     use std::path::PathBuf;
@@ -775,10 +781,9 @@ fn run_initial_index(setup_path: &Path) -> Result<()> {
     let _cwd_guard = CwdGuard(prev_cwd);
 
     let target = Path::new("docs");
-    let mut cfg = PolarisConfig::default();
-    cfg.db_path = PathBuf::from("polaris.db");
-
-    db::register_vec_extension();
+    // `register_vec_extension` is called by `main.rs::run` before dispatching,
+    // so we don't re-register here. Use the passed-in cfg directly so the
+    // user's polaris.toml (db_path, embedding_dim, model_id) is respected.
 
     let attempt = || -> Result<()> {
         let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
@@ -1065,7 +1070,7 @@ second
     #[test]
     fn run_creates_files_in_empty_dir() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
 
         let mcp = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&mcp).unwrap();
@@ -1080,11 +1085,11 @@ second
     #[test]
     fn run_is_idempotent() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
         let mcp_first = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let gi_first = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
 
-        run(dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
         let mcp_second = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let gi_second = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
 
@@ -1094,7 +1099,7 @@ second
 
     #[test]
     fn run_errors_when_path_missing() {
-        let result = run(Path::new("/this/path/should/not/exist/polaris-test-zzz"), false, true);
+        let result = run(&PolarisConfig::default(), Path::new("/this/path/should/not/exist/polaris-test-zzz"), false, true);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
@@ -1103,14 +1108,14 @@ second
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "x").unwrap();
-        let result = run(&file, false, true);
+        let result = run(&PolarisConfig::default(), &file, false, true);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
     #[test]
     fn run_writes_all_three_agent_files() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
 
         for filename in AGENT_FILES {
             let path = dir.path().join(filename);
@@ -1137,7 +1142,7 @@ second
         let existing_user_rules = "# My project rules\n\nUse Rust 2024 edition.\nNo unsafe blocks.\n";
         std::fs::write(dir.path().join("CLAUDE.md"), existing_user_rules).unwrap();
 
-        run(dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
         // Original content preserved at the top.
@@ -1149,7 +1154,7 @@ second
     #[test]
     fn run_skips_agent_files_with_no_agents() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), true, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), true, true).unwrap();
 
         for filename in AGENT_FILES {
             let path = dir.path().join(filename);
@@ -1166,7 +1171,7 @@ second
     #[test]
     fn run_is_idempotent_with_agent_files() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
 
         let mut first: Vec<(String, String)> = Vec::new();
         for filename in AGENT_FILES {
@@ -1176,7 +1181,7 @@ second
             ));
         }
 
-        run(dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
 
         for (filename, before) in &first {
             let after = std::fs::read_to_string(dir.path().join(filename)).unwrap();
@@ -1305,7 +1310,7 @@ second
     fn run_writes_claude_settings_by_default() {
         let dir = TempDir::new().unwrap();
         // Use no_hooks=false to exercise the new path.
-        run(dir.path(), false, false).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, false).unwrap();
 
         let settings_path = dir.path().join(".claude").join("settings.json");
         assert!(settings_path.exists(), ".claude/settings.json should be created");
@@ -1321,7 +1326,7 @@ second
     #[test]
     fn run_skips_claude_settings_with_no_hooks() {
         let dir = TempDir::new().unwrap();
-        run(dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
 
         let settings_path = dir.path().join(".claude").join("settings.json");
         assert!(
@@ -1553,7 +1558,7 @@ second
         std::fs::write(&settings_path, seeded).unwrap();
 
         // Run with --no-hooks; the polaris hook entry should be removed.
-        run(dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
 
         // File still exists (we don't delete the file, only our entries).
         assert!(settings_path.exists());
@@ -1568,7 +1573,7 @@ second
     fn run_no_hooks_is_noop_when_settings_absent() {
         let dir = TempDir::new().unwrap();
         // Run --no-hooks on a fresh project (no .claude/ at all).
-        run(dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
         let settings_path = dir.path().join(".claude").join("settings.json");
         assert!(
             !settings_path.exists(),
@@ -1590,7 +1595,7 @@ second
         )
         .unwrap();
 
-        run(dir.path(), false, false).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, false).unwrap();
 
         // The DB lives at <setup-path>/polaris.db (run_initial_index sets it
         // explicitly to that location).
@@ -1630,7 +1635,7 @@ second
         // Mimic `polaris setup ./myproj` from `parent`.
         let prev_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(parent.path()).unwrap();
-        let result = run(Path::new(proj_name), false, false);
+        let result = run(&PolarisConfig::default(), Path::new(proj_name), false, false);
         std::env::set_current_dir(prev_cwd).unwrap();
         result.unwrap();
 

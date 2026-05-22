@@ -225,7 +225,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Chunks { path } => cmd_chunks(cfg, &path).await,
         Command::Setup { path, no_agents, no_hooks } => {
             let target = path.unwrap_or_else(|| std::path::PathBuf::from("."));
-            setup::run(&target, no_agents, no_hooks)
+            setup::run(&cfg, &target, no_agents, no_hooks)
         }
         Command::Savings { history, limit, output } => {
             savings::run(
@@ -246,7 +246,7 @@ async fn run(cli: Cli) -> Result<()> {
                 ))?
         }
         Command::Hook { subcommand } => match subcommand {
-            HookCommand::Index => hook::run_index(),
+            HookCommand::Index => hook::run_index(&cfg),
         },
     }
 }

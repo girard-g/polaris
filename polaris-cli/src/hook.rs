@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use polaris_core::config::PolarisConfig;
-use polaris_core::db::{register_vec_extension, Database};
+use polaris_core::db::Database;
 use polaris_core::embedding::EmbeddingEngine;
 use polaris_core::error::{PolarisError, Result};
 use polaris_core::indexer::Indexer;
@@ -162,21 +162,24 @@ impl Drop for CwdGuard {
 /// failures (DB locked, etc.) bubble up as `Err`; the caller decides whether
 /// to surface them — `run_index` swallows them into stderr.
 ///
-/// `cwd` is the working directory Claude Code reported in the payload.
-/// We use it to compute the relative form of `file_path` for matching against
-/// indexed roots that store relative paths.
+/// `cwd` is the working directory Claude Code reported in the payload; we
+/// use it to compute the relative form of `file_path` for matching against
+/// indexed roots that store relative paths. `cfg` is the `PolarisConfig`
+/// already loaded by `main.rs` (respecting the user's `polaris.toml` and CLI
+/// overrides) — using it here means the hook indexes into the same DB and
+/// with the same embedding/model parameters as the rest of the CLI.
 pub fn perform_index(
     file_path: &Path,
     cwd: Option<&Path>,
-    db_path: &Path,
+    cfg: &PolarisConfig,
 ) -> Result<HookIndexReport> {
     if !is_markdown(file_path) {
         return Ok(HookIndexReport { indexed_new_or_modified: 0 });
     }
 
-    let cfg = PolarisConfig::default();
-    register_vec_extension();
-    let db = Database::open(db_path, cfg.embedding_dim, &cfg.model_id)?;
+    // `register_vec_extension` is called by `main.rs::run` before dispatching,
+    // so we don't re-register here.
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
 
     // TODO(perf): O(n) on every hook fire — fine at typical scale (hundreds to
     // low thousands of docs) but worth replacing with a dedicated roots table
@@ -222,20 +225,26 @@ pub fn perform_index(
 /// Entry point for `polaris hook index`. Reads the payload from stdin and
 /// delegates to `run_index_for_payload`. Always returns `Ok(())` so the
 /// process exits 0; errors are logged to stderr by the inner helper.
-pub fn run_index() -> Result<()> {
+///
+/// `cfg` is the `PolarisConfig` `main.rs` already loaded — passing it in
+/// (rather than re-loading via `PolarisConfig::default()`) means the hook
+/// respects the user's `polaris.toml` (`db_path`, `embedding_dim`,
+/// `model_id`) so it targets the same DB and embedding setup as the rest of
+/// the CLI.
+pub fn run_index(cfg: &PolarisConfig) -> Result<()> {
     let mut buf = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
         eprintln!("polaris hook index: failed to read stdin: {e}");
         return Ok(());
     }
-    let db_path = PolarisConfig::default().db_path;
-    run_index_for_payload(&buf, &db_path)
+    run_index_for_payload(&buf, cfg)
 }
 
-/// Pure-ish helper that takes the stdin payload and the DB path. Swallows
-/// every error into a stderr line and returns `Ok(())`. Exposed for tests so
-/// we can exercise the silent-failure discipline without spinning up stdin.
-pub fn run_index_for_payload(payload: &str, db_path: &Path) -> Result<()> {
+/// Pure-ish helper that takes the stdin payload and the loaded config.
+/// Swallows every error into a stderr line and returns `Ok(())`. Exposed
+/// for tests so we can exercise the silent-failure discipline without
+/// spinning up stdin.
+pub fn run_index_for_payload(payload: &str, cfg: &PolarisConfig) -> Result<()> {
     let parsed = match parse_payload(payload) {
         Ok(p) => p,
         Err(e) => {
@@ -244,7 +253,7 @@ pub fn run_index_for_payload(payload: &str, db_path: &Path) -> Result<()> {
         }
     };
 
-    if let Err(e) = perform_index(&parsed.file_path, parsed.cwd.as_deref(), db_path) {
+    if let Err(e) = perform_index(&parsed.file_path, parsed.cwd.as_deref(), cfg) {
         eprintln!(
             "polaris hook index: failed to index {}: {e}",
             parsed.file_path.display(),
@@ -267,6 +276,16 @@ mod tests {
         } else {
             format!("C:{p}")
         }
+    }
+
+    /// Build a `PolarisConfig` with an explicit DB path for tests. Other
+    /// fields default — sufficient for the silent-failure and integration
+    /// tests, which only need `cfg.db_path` to point somewhere specific
+    /// (or nowhere, to provoke a DB-open failure).
+    fn cfg_with_db(db_path: PathBuf) -> PolarisConfig {
+        let mut cfg = PolarisConfig::default();
+        cfg.db_path = db_path;
+        cfg
     }
 
     #[test]
@@ -516,7 +535,8 @@ mod tests {
 
         // DB stores absolute paths here (tempdir is absolute), so cwd=None
         // is fine — the gate's absolute branch will match.
-        let report = perform_index(&new_file, None, &db_path).expect("hook should succeed");
+        let report = perform_index(&new_file, None, &cfg_with_db(db_path.clone()))
+            .expect("hook should succeed");
         assert!(
             report.indexed_new_or_modified > 0,
             "expected indexing to record at least one new/modified file; report={report:?}"
@@ -568,7 +588,8 @@ mod tests {
         let vendor_md = vendor_dir.join("README.md");
         std::fs::write(&vendor_md, "# Vendor\n").unwrap();
 
-        let report = perform_index(&vendor_md, None, &db_path).expect("hook should succeed");
+        let report = perform_index(&vendor_md, None, &cfg_with_db(db_path.clone()))
+            .expect("hook should succeed");
         assert_eq!(report.indexed_new_or_modified, 0);
 
         // Confirm vendor README did NOT enter the DB.
@@ -584,7 +605,8 @@ mod tests {
     #[test]
     fn run_index_with_payload_returns_ok_even_on_invalid_json() {
         // We use a public helper rather than mocking stdin: same logic path.
-        let result = run_index_for_payload("not json {", Path::new("/nonexistent/polaris.db"));
+        let cfg = cfg_with_db(PathBuf::from("/nonexistent/polaris.db"));
+        let result = run_index_for_payload("not json {", &cfg);
         assert!(result.is_ok(), "should swallow errors and return Ok");
     }
 
@@ -595,7 +617,8 @@ mod tests {
             "tool_name": "Edit",
             "tool_input": { "file_path": "/this/does/not/exist.md" }
         }"#;
-        let result = run_index_for_payload(json, Path::new("/nonexistent/polaris.db"));
+        let cfg = cfg_with_db(PathBuf::from("/nonexistent/polaris.db"));
+        let result = run_index_for_payload(json, &cfg);
         assert!(result.is_ok(), "should swallow errors and return Ok");
     }
 
@@ -606,7 +629,8 @@ mod tests {
             "tool_name": "Edit",
             "tool_input": { "file_path": "/p/foo.rs" }
         }"#;
-        let result = run_index_for_payload(json, Path::new("/nonexistent/polaris.db"));
+        let cfg = cfg_with_db(PathBuf::from("/nonexistent/polaris.db"));
+        let result = run_index_for_payload(json, &cfg);
         assert!(result.is_ok());
     }
 }

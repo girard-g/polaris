@@ -688,7 +688,17 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool) ->
         run_initial_index(cfg, path)?;
     } else {
         // --no-hooks: remove any polaris-owned hook entries if the file exists.
-        let settings_path = path.join(".claude").join("settings.json");
+        // Mirror the install branch's guard: refuse to operate on a `.claude`
+        // that exists but isn't a directory, rather than crashing with an
+        // opaque NotADirectory error from `read_optional`.
+        let claude_dir = path.join(".claude");
+        if claude_dir.exists() && !claude_dir.is_dir() {
+            return Err(PolarisError::Setup(format!(
+                "{} exists but is not a directory",
+                claude_dir.display()
+            )));
+        }
+        let settings_path = claude_dir.join("settings.json");
         if let Some(existing) = read_optional(&settings_path)? {
             match remove_polaris_hooks_from_settings(&existing)? {
                 Some(new_content) => {
@@ -1579,6 +1589,18 @@ second
             !settings_path.exists(),
             ".claude/settings.json should not be created by --no-hooks"
         );
+    }
+
+    #[test]
+    fn run_no_hooks_errors_when_claude_is_a_regular_file() {
+        // Mirror coverage for the install-branch guard: if `.claude` exists
+        // but is a regular file, the uninstall branch must surface a clear
+        // PolarisError::Setup rather than the opaque NotADirectory error
+        // that `read_optional(.claude/settings.json)` would otherwise hit.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".claude"), "this is a file, not a dir\n").unwrap();
+        let result = run(&PolarisConfig::default(), dir.path(), false, true);
+        assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
     #[test]

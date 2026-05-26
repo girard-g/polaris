@@ -1,8 +1,19 @@
 # Changelog
 
+All notable changes to Polaris are documented in this file.
+
 ## [Unreleased]
 
 ### Added
+- **Claude Code auto-index hook.** `polaris setup` now installs a
+  `PostToolUse` hook into `.claude/settings.json` that fires after
+  `Write`, `Edit`, or `MultiEdit`. When the touched file is `.md`
+  and lives under an already-indexed root, it is re-indexed
+  automatically — no `polaris watch` needed for Claude Code users.
+  Pass `--no-hooks` to opt out; re-run `polaris setup --no-hooks`
+  to remove an existing hook.
+- `polaris hook index` internal subcommand (reads hook payload on
+  stdin, re-indexes the touched file). Not intended for direct use.
 - `polaris savings` subcommand reporting cumulative tokens saved by
   going through Polaris instead of `grep + read`. Renders a summary
   block by default, a per-query history with `--history`, and JSON

@@ -121,8 +121,9 @@ pub fn merge_claude_settings(
 ) -> Result<ClaudeSettingsReport> {
     use serde_json::{json, Map, Value};
 
-    // Quote the binary path so spaces in the installation path (common on
-    // Windows: `C:\Program Files\...`) survive Claude Code's shell parsing.
+    // POSIX shell quoting (single-quotes) so spaces in the path survive
+    // Claude Code's shell parsing on macOS/Linux. Windows behaviour is
+    // unverified — see docs/mcp-server.md "Known limitations".
     // `is_polaris_owned` uses the matching `shell_words::split` to recover
     // the original tokens.
     let bin_str = binary_path.to_string_lossy();
@@ -685,7 +686,12 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool) ->
                 );
             }
         }
-        run_initial_index(cfg, path)?;
+        if matches!(
+            report.action,
+            ClaudeSettingsAction::Created | ClaudeSettingsAction::Updated
+        ) {
+            run_initial_index(cfg, path)?;
+        }
     } else {
         // --no-hooks: remove any polaris-owned hook entries if the file exists.
         // Mirror the install branch's guard: refuse to operate on a `.claude`

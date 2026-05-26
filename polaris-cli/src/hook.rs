@@ -119,9 +119,15 @@ pub fn format_search_hook_output(result: &polaris_core::db::SearchResult) -> Str
         result.content.clone()
     };
 
+    let quoted_content: String = content
+        .lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     format!(
-        "[Polaris] {}{} (score: {:.2})\n> {}",
-        result.file_path, heading, result.score, content
+        "[Polaris] {}{} (score: {:.2})\n{}",
+        result.file_path, heading, result.score, quoted_content
     )
 }
 
@@ -410,6 +416,11 @@ pub fn perform_search(
         std::env::set_current_dir(c).ok()?;
         Some(CwdGuard(prev))
     });
+
+    // Don't create an empty DB or load the model if no index exists yet.
+    if !cfg.db_path.exists() {
+        return Ok(None);
+    }
 
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
@@ -966,6 +977,35 @@ mod tests {
         let output = format_search_hook_output(&result);
         let content_line = output.lines().nth(1).unwrap();
         assert!(content_line.len() <= 510, "content line too long: {}", content_line.len());
+    }
+
+    #[test]
+    fn format_search_hook_output_multiline_content_all_quoted() {
+        use polaris_core::db::SearchResult;
+        let result = SearchResult {
+            chunk_id: 1,
+            content: "Line one\nLine two\nLine three".to_string(),
+            heading_context: "H".to_string(),
+            file_path: "docs/foo.md".to_string(),
+            score: 0.7,
+            source_db: None,
+        };
+        let output = format_search_hook_output(&result);
+        for line in output.lines().skip(1) {
+            assert!(line.starts_with("> "), "unquoted line: {line}");
+        }
+    }
+
+    #[test]
+    fn perform_search_skips_when_no_db_exists() {
+        let cfg = cfg_with_db(PathBuf::from("/nonexistent/path/polaris.db"));
+        let result = perform_search(
+            "how does the indexer work in polaris?",
+            None,
+            &cfg,
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none(), "should no-op when DB doesn't exist");
     }
 
     #[test]

@@ -92,6 +92,38 @@ pub fn parse_search_payload(json: &str) -> Result<SearchPayload> {
     })
 }
 
+const MIN_PROMPT_WORDS: usize = 5;
+const MAX_PROMPT_WORDS: usize = 150;
+const MAX_CONTENT_CHARS: usize = 500;
+
+/// Returns true if the prompt is in the sweet spot for search: not too short
+/// (confirmations like "yes") and not too long (error pastes / code dumps).
+pub fn prompt_passes_length_gate(prompt: &str) -> bool {
+    let count = prompt.split_whitespace().count();
+    count >= MIN_PROMPT_WORDS && count <= MAX_PROMPT_WORDS
+}
+
+/// Format a single search result for hook stdout injection.
+pub fn format_search_hook_output(result: &polaris_core::db::SearchResult) -> String {
+    let heading = if result.heading_context.is_empty() {
+        String::new()
+    } else {
+        format!(" § {}", result.heading_context)
+    };
+
+    let content = if result.content.len() > MAX_CONTENT_CHARS {
+        let truncated: String = result.content.chars().take(MAX_CONTENT_CHARS).collect();
+        format!("{truncated}…")
+    } else {
+        result.content.clone()
+    };
+
+    format!(
+        "[Polaris] {}{} (score: {:.2})\n> {}",
+        result.file_path, heading, result.score, content
+    )
+}
+
 /// Returns true if the path looks like a markdown file we should consider
 /// indexing. Strict `ext == "md"` to match
 /// `polaris-core::indexer::discover_markdown_files`, which is case-sensitive
@@ -782,6 +814,91 @@ mod tests {
         let cfg = cfg_with_db(PathBuf::from("/nonexistent/polaris.db"));
         let result = run_index_for_payload(json, &cfg);
         assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // length gate tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prompt_passes_length_gate_normal() {
+        assert!(prompt_passes_length_gate("how does the indexer work in polaris?"));
+    }
+
+    #[test]
+    fn prompt_fails_length_gate_too_short() {
+        assert!(!prompt_passes_length_gate("yes"));
+        assert!(!prompt_passes_length_gate("go ahead"));
+        assert!(!prompt_passes_length_gate("good work done now"));
+    }
+
+    #[test]
+    fn prompt_fails_length_gate_too_long() {
+        let long = "word ".repeat(151);
+        assert!(!prompt_passes_length_gate(&long));
+    }
+
+    #[test]
+    fn prompt_passes_length_gate_at_boundary() {
+        let five_words = "one two three four five";
+        assert!(prompt_passes_length_gate(five_words));
+        let one_fifty = "word ".repeat(150);
+        assert!(prompt_passes_length_gate(one_fifty.trim()));
+    }
+
+    // -----------------------------------------------------------------------
+    // format_search_hook_output tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_search_hook_output_basic() {
+        use polaris_core::db::SearchResult;
+        let result = SearchResult {
+            chunk_id: 1,
+            content: "Bank is the per-project handle.".to_string(),
+            heading_context: "Component Responsibilities".to_string(),
+            file_path: "docs/architecture.md".to_string(),
+            score: 0.82,
+            source_db: None,
+        };
+        let output = format_search_hook_output(&result);
+        assert!(output.starts_with("[Polaris]"));
+        assert!(output.contains("docs/architecture.md"));
+        assert!(output.contains("§ Component Responsibilities"));
+        assert!(output.contains("0.82"));
+        assert!(output.contains("Bank is the per-project handle."));
+    }
+
+    #[test]
+    fn format_search_hook_output_truncates_long_content() {
+        use polaris_core::db::SearchResult;
+        let long_content = "a".repeat(600);
+        let result = SearchResult {
+            chunk_id: 1,
+            content: long_content,
+            heading_context: "Heading".to_string(),
+            file_path: "docs/foo.md".to_string(),
+            score: 0.5,
+            source_db: None,
+        };
+        let output = format_search_hook_output(&result);
+        let content_line = output.lines().nth(1).unwrap();
+        assert!(content_line.len() <= 510, "content line too long: {}", content_line.len());
+    }
+
+    #[test]
+    fn format_search_hook_output_empty_heading() {
+        use polaris_core::db::SearchResult;
+        let result = SearchResult {
+            chunk_id: 1,
+            content: "Some content".to_string(),
+            heading_context: String::new(),
+            file_path: "docs/foo.md".to_string(),
+            score: 0.6,
+            source_db: None,
+        };
+        let output = format_search_hook_output(&result);
+        assert!(!output.contains("§"), "should omit § for empty heading");
     }
 
     // -----------------------------------------------------------------------

@@ -367,3 +367,7 @@ These commands are invoked by Claude Code hooks and are not intended for direct 
 ### `polaris hook index`
 
 Reads a `PostToolUse` hook payload (JSON) on stdin and re-indexes the touched file if it passes the markdown extension and indexed-root gates. Always exits 0 — failures go to stderr only.
+
+### `polaris hook search`
+
+Reads a `UserPromptSubmit` hook payload (JSON) on stdin, searches the index, and prints the top result to stdout for Claude Code context injection. Applies a length gate (5–150 words) and score threshold (≥ 0.4). Always exits 0 — failures go to stderr only.

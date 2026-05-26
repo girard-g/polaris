@@ -34,7 +34,7 @@ polaris-cli/src/
 
 ### `polaris-cli/src/hook.rs`
 
-Internal `polaris hook <subcommand>` entry points invoked by Claude Code hooks. Reads JSON payloads from stdin, applies extension and indexed-root gates, calls into `polaris-core::indexer` for single-file index passes, and swallows all errors into stderr to maintain a 0 exit code (Claude Code surfaces non-zero hook exits as warning banners).
+Internal `polaris hook <subcommand>` entry points invoked by Claude Code hooks. `hook index` (PostToolUse) re-indexes edited markdown files. `hook search` (UserPromptSubmit) searches the index and prints the top result to stdout for context injection. Both read JSON payloads from stdin, apply their respective gates, and swallow all errors into stderr to maintain a 0 exit code.
 
 ### `polaris-cli/src/main.rs`
 - CLI argument parsing via clap

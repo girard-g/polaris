@@ -144,17 +144,36 @@ Error: <embedding error message>
 
 ## Hook integration (Claude Code)
 
-When you run `polaris setup` in a project, polaris writes two hooks into `.claude/settings.json`:
+When you run `polaris setup` in a project, polaris installs an **auto-index** hook into `.claude/settings.json`:
 
-1. **Auto-index** (`PostToolUse`): fires after Claude Code's `Write`, `Edit`, or `MultiEdit` tools complete. Re-runs `polaris index` for the touched file if (a) the path ends in `.md` and (b) the file lives under a directory the index already covers.
+- **Auto-index** (`PostToolUse`): fires after Claude Code's `Write`, `Edit`, or `MultiEdit` tools complete. Re-runs `polaris index` for the touched file if (a) the path ends in `.md` and (b) the file lives under a directory the index already covers. Gate check is ~5 ms; actual indexing (when triggered) is ~300 ms.
 
-2. **Auto-search** (`UserPromptSubmit`): fires on every user message. Searches the indexed documentation and injects the top result as context before Claude responds. Two gates prevent pollution: prompts shorter than 5 words or longer than 150 words are skipped (confirmations and error pastes make poor queries), and results below the raw relevance threshold are silently dropped.
+An optional **auto-search** hook is available with `--search-hook`:
+
+```bash
+polaris setup --search-hook
+```
+
+- **Auto-search** (`UserPromptSubmit`): fires on every user message. Searches the indexed documentation and injects the top result as context before Claude responds. Two gates prevent pollution: prompts shorter than 5 words or longer than 150 words are skipped, and results below the raw relevance threshold are silently dropped.
 
 Both hooks are non-fatal: they log to stderr and always exit 0, so a transient hiccup never surfaces as a warning banner or interrupts your session.
 
-To opt out, run `polaris setup --no-hooks`. To remove the hooks from a project that already has them installed, re-run `polaris setup --no-hooks` — it strips all polaris entries from `.claude/settings.json` while leaving any other hooks intact.
+To opt out of all hooks, run `polaris setup --no-hooks`. To remove hooks from a project that already has them, re-run `polaris setup --no-hooks` — it strips all polaris entries from `.claude/settings.json` while leaving any other hooks intact. Re-running `polaris setup` without `--search-hook` removes the search hook while keeping the index hook.
 
 The hooks are a Claude Code feature; Codex, Cursor, and Gemini CLI users keep using the MCP `search` tool and can run `polaris watch` if they want background auto-indexing.
+
+### Search hook performance
+
+The search hook loads the ONNX embedding model (~140 MB) on every qualifying prompt, adding ~1 second of latency before Claude starts responding. This is a deliberate trade-off: guaranteed doc grounding vs. speed.
+
+| Scenario | Latency | What runs |
+|---|---|---|
+| Short prompt (< 5 words) | ~5 ms | Process start → length gate → exit |
+| No index (DB absent) | ~5 ms | Process start → length gate → DB check → exit |
+| Full search | ~1000 ms | Process start → gates → DB open → model load → search → format |
+| MCP `polaris.search` | ~50–100 ms | Already warm model → search → format |
+
+**Recommendation:** Most users should rely on the MCP `search` tool (warm model, ~50 ms) and the auto-index hook (keeps docs fresh). Use `--search-hook` when you want every prompt to be automatically grounded in documentation and accept the ~1 s cost.
 
 ### Known limitations
 

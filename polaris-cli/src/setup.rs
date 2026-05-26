@@ -112,13 +112,14 @@ const POLARIS_POST_TOOL_USE_MATCHER: &str = "Write|Edit|MultiEdit";
 /// `<binary_path> hook index`.
 ///
 /// Strategy: drop every polaris-owned hook entry from every matcher block under
-/// every event (currently `PostToolUse` and `UserPromptSubmit`; we walk the
-/// whole `hooks.*` map), prune any matcher block whose `hooks[]` becomes empty,
-/// then append our canonical matcher block to `hooks.PostToolUse` and our
-/// search hook block to `hooks.UserPromptSubmit`.
+/// every event (we walk the whole `hooks.*` map), prune any matcher block whose
+/// `hooks[]` becomes empty, then append our canonical matcher block to
+/// `hooks.PostToolUse` and (when `search_hook` is true) our search hook block
+/// to `hooks.UserPromptSubmit`.
 pub fn merge_claude_settings(
     existing: Option<&str>,
     binary_path: &Path,
+    search_hook: bool,
 ) -> Result<ClaudeSettingsReport> {
     use serde_json::{json, Map, Value};
 
@@ -197,23 +198,28 @@ pub fn merge_claude_settings(
     };
     blocks.push(canonical_block);
 
-    // Append the search hook to UserPromptSubmit (no matcher — this event
-    // type doesn't support matchers and fires on every prompt).
-    let search_command = format!("{} hook search", shell_words::quote(&bin_str));
-    let search_block = json!({
-        "hooks": [
-            { "type": "command", "command": search_command }
-        ]
-    });
-    let user_prompt_submit = hooks_map
-        .entry("UserPromptSubmit".to_string())
-        .or_insert_with(|| json!([]));
-    let Value::Array(ups_blocks) = user_prompt_submit else {
-        return Err(PolarisError::Setup(
-            "expected `hooks.UserPromptSubmit` to be an array in .claude/settings.json".into(),
-        ));
-    };
-    ups_blocks.push(search_block);
+    // Append the search hook to UserPromptSubmit only when --search-hook is
+    // set. The search hook loads the ONNX model on every prompt (~1s overhead),
+    // so it's opt-in. The cleanup pass above already strips stale polaris
+    // entries from UserPromptSubmit, so omitting this block effectively removes
+    // the search hook when the user re-runs setup without --search-hook.
+    if search_hook {
+        let search_command = format!("{} hook search", shell_words::quote(&bin_str));
+        let search_block = json!({
+            "hooks": [
+                { "type": "command", "command": search_command }
+            ]
+        });
+        let user_prompt_submit = hooks_map
+            .entry("UserPromptSubmit".to_string())
+            .or_insert_with(|| json!([]));
+        let Value::Array(ups_blocks) = user_prompt_submit else {
+            return Err(PolarisError::Setup(
+                "expected `hooks.UserPromptSubmit` to be an array in .claude/settings.json".into(),
+            ));
+        };
+        ups_blocks.push(search_block);
+    }
 
     let new_content_str = serde_json::to_string_pretty(&Value::Object(root))
         .map_err(|e| PolarisError::Setup(format!("failed to serialize .claude/settings.json: {e}")))?;
@@ -538,7 +544,7 @@ pub fn merge_agent_instructions(existing: Option<&str>) -> Result<AgentReport> {
 /// `cfg.embedding_dim`/`cfg.model_id`/`cfg.db_path` so a re-run of
 /// `polaris setup` after the user customized their config indexes into the
 /// same DB and with the same embedding parameters as `polaris index docs`.
-pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool) -> Result<()> {
+pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, search_hook: bool) -> Result<()> {
     use console::style;
 
     if !path.exists() {
@@ -679,7 +685,7 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool) ->
         }
         let settings_path = claude_dir.join("settings.json");
         let existing_settings = read_optional(&settings_path)?;
-        let report = merge_claude_settings(existing_settings.as_deref(), &binary_path)?;
+        let report = merge_claude_settings(existing_settings.as_deref(), &binary_path, search_hook)?;
         match (&report.new_content, &report.action) {
             (Some(content), ClaudeSettingsAction::Created) => {
                 std::fs::write(&settings_path, content)?;
@@ -1105,7 +1111,7 @@ second
     #[test]
     fn run_creates_files_in_empty_dir() {
         let dir = TempDir::new().unwrap();
-        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true, false).unwrap();
 
         let mcp = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&mcp).unwrap();
@@ -1120,11 +1126,11 @@ second
     #[test]
     fn run_is_idempotent() {
         let dir = TempDir::new().unwrap();
-        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true, false).unwrap();
         let mcp_first = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let gi_first = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
 
-        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true, false).unwrap();
         let mcp_second = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let gi_second = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
 
@@ -1134,7 +1140,7 @@ second
 
     #[test]
     fn run_errors_when_path_missing() {
-        let result = run(&PolarisConfig::default(), Path::new("/this/path/should/not/exist/polaris-test-zzz"), false, true);
+        let result = run(&PolarisConfig::default(), Path::new("/this/path/should/not/exist/polaris-test-zzz"), false, true, false);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
@@ -1143,14 +1149,14 @@ second
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "x").unwrap();
-        let result = run(&PolarisConfig::default(), &file, false, true);
+        let result = run(&PolarisConfig::default(), &file, false, true, false);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
     #[test]
     fn run_writes_all_three_agent_files() {
         let dir = TempDir::new().unwrap();
-        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true, false).unwrap();
 
         for filename in AGENT_FILES {
             let path = dir.path().join(filename);
@@ -1177,7 +1183,7 @@ second
         let existing_user_rules = "# My project rules\n\nUse Rust 2024 edition.\nNo unsafe blocks.\n";
         std::fs::write(dir.path().join("CLAUDE.md"), existing_user_rules).unwrap();
 
-        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true, false).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
         // Original content preserved at the top.
@@ -1189,7 +1195,7 @@ second
     #[test]
     fn run_skips_agent_files_with_no_agents() {
         let dir = TempDir::new().unwrap();
-        run(&PolarisConfig::default(), dir.path(), true, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), true, true, false).unwrap();
 
         for filename in AGENT_FILES {
             let path = dir.path().join(filename);
@@ -1206,7 +1212,7 @@ second
     #[test]
     fn run_is_idempotent_with_agent_files() {
         let dir = TempDir::new().unwrap();
-        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true, false).unwrap();
 
         let mut first: Vec<(String, String)> = Vec::new();
         for filename in AGENT_FILES {
@@ -1216,7 +1222,7 @@ second
             ));
         }
 
-        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true, false).unwrap();
 
         for (filename, before) in &first {
             let after = std::fs::read_to_string(dir.path().join(filename)).unwrap();
@@ -1226,7 +1232,7 @@ second
 
     #[test]
     fn claude_settings_creates_when_absent() {
-        let report = merge_claude_settings(None, &bin()).unwrap();
+        let report = merge_claude_settings(None, &bin(), false).unwrap();
         assert_eq!(report.action, ClaudeSettingsAction::Created);
         let content = report.new_content.expect("should write");
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -1244,7 +1250,7 @@ second
   "permissions": { "allow": ["Bash"] },
   "env": { "FOO": "bar" }
 }"#;
-        let report = merge_claude_settings(Some(existing), &bin()).unwrap();
+        let report = merge_claude_settings(Some(existing), &bin(), false).unwrap();
         assert_eq!(report.action, ClaudeSettingsAction::Updated);
         let parsed: serde_json::Value =
             serde_json::from_str(&report.new_content.unwrap()).unwrap();
@@ -1268,7 +1274,7 @@ second
     ]
   }
 }"#;
-        let report = merge_claude_settings(Some(existing), &bin()).unwrap();
+        let report = merge_claude_settings(Some(existing), &bin(), false).unwrap();
         let parsed: serde_json::Value =
             serde_json::from_str(&report.new_content.unwrap()).unwrap();
         let blocks = parsed["hooks"]["PostToolUse"].as_array().unwrap();
@@ -1306,7 +1312,7 @@ second
     ]
   }
 }"#;
-        let report = merge_claude_settings(Some(existing), &bin()).unwrap();
+        let report = merge_claude_settings(Some(existing), &bin(), false).unwrap();
         let parsed: serde_json::Value =
             serde_json::from_str(&report.new_content.unwrap()).unwrap();
         let blocks = parsed["hooks"]["PostToolUse"].as_array().unwrap();
@@ -1320,24 +1326,24 @@ second
 
     #[test]
     fn claude_settings_unchanged_when_already_current() {
-        let first = merge_claude_settings(None, &bin())
+        let first = merge_claude_settings(None, &bin(), false)
             .unwrap()
             .new_content
             .unwrap();
-        let report = merge_claude_settings(Some(&first), &bin()).unwrap();
+        let report = merge_claude_settings(Some(&first), &bin(), false).unwrap();
         assert_eq!(report.action, ClaudeSettingsAction::Unchanged);
         assert!(report.new_content.is_none());
     }
 
     #[test]
     fn claude_settings_errors_on_invalid_json() {
-        let result = merge_claude_settings(Some("not json {"), &bin());
+        let result = merge_claude_settings(Some("not json {"), &bin(), false);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
     #[test]
     fn claude_settings_errors_when_top_level_is_not_object() {
-        let result = merge_claude_settings(Some("[1, 2, 3]"), &bin());
+        let result = merge_claude_settings(Some("[1, 2, 3]"), &bin(), false);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
@@ -1345,7 +1351,7 @@ second
     fn run_writes_claude_settings_by_default() {
         let dir = TempDir::new().unwrap();
         // Use no_hooks=false to exercise the new path.
-        run(&PolarisConfig::default(), dir.path(), false, false).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, false, false).unwrap();
 
         let settings_path = dir.path().join(".claude").join("settings.json");
         assert!(settings_path.exists(), ".claude/settings.json should be created");
@@ -1361,7 +1367,7 @@ second
     #[test]
     fn run_skips_claude_settings_with_no_hooks() {
         let dir = TempDir::new().unwrap();
-        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true, false).unwrap();
 
         let settings_path = dir.path().join(".claude").join("settings.json");
         assert!(
@@ -1522,7 +1528,7 @@ second
         // The written command must be shell-parseable and round-trip through
         // `is_polaris_owned` so re-runs and uninstall keep working.
         let bin = std::path::PathBuf::from("/opt/some path/polaris");
-        let report = merge_claude_settings(None, &bin).unwrap();
+        let report = merge_claude_settings(None, &bin, false).unwrap();
         let content = report.new_content.expect("should write");
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         let cmd = parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
@@ -1537,7 +1543,7 @@ second
         // Round trip: re-merging should detect this as already-current and
         // return Unchanged. That only works if `is_polaris_owned` parses the
         // quoted form correctly.
-        let report2 = merge_claude_settings(Some(&content), &bin).unwrap();
+        let report2 = merge_claude_settings(Some(&content), &bin, false).unwrap();
         assert_eq!(report2.action, ClaudeSettingsAction::Unchanged);
         assert!(report2.new_content.is_none());
     }
@@ -1593,7 +1599,7 @@ second
         std::fs::write(&settings_path, seeded).unwrap();
 
         // Run with --no-hooks; the polaris hook entry should be removed.
-        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true, false).unwrap();
 
         // File still exists (we don't delete the file, only our entries).
         assert!(settings_path.exists());
@@ -1608,7 +1614,7 @@ second
     fn run_no_hooks_is_noop_when_settings_absent() {
         let dir = TempDir::new().unwrap();
         // Run --no-hooks on a fresh project (no .claude/ at all).
-        run(&PolarisConfig::default(), dir.path(), false, true).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, true, false).unwrap();
         let settings_path = dir.path().join(".claude").join("settings.json");
         assert!(
             !settings_path.exists(),
@@ -1624,7 +1630,7 @@ second
         // that `read_optional(.claude/settings.json)` would otherwise hit.
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".claude"), "this is a file, not a dir\n").unwrap();
-        let result = run(&PolarisConfig::default(), dir.path(), false, true);
+        let result = run(&PolarisConfig::default(), dir.path(), false, true, false);
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
@@ -1642,7 +1648,7 @@ second
         )
         .unwrap();
 
-        run(&PolarisConfig::default(), dir.path(), false, false).unwrap();
+        run(&PolarisConfig::default(), dir.path(), false, false, false).unwrap();
 
         // The DB lives at <setup-path>/polaris.db (run_initial_index sets it
         // explicitly to that location).
@@ -1660,8 +1666,21 @@ second
     }
 
     #[test]
+    fn merge_settings_default_omits_search_hook() {
+        let report = merge_claude_settings(None, Path::new("/usr/bin/polaris"), false).unwrap();
+        let content = report.new_content.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let hooks = parsed["hooks"].as_object().unwrap();
+        assert!(hooks.get("PostToolUse").is_some(), "PostToolUse should be present");
+        assert!(
+            hooks.get("UserPromptSubmit").is_none(),
+            "UserPromptSubmit should not be present without --search-hook"
+        );
+    }
+
+    #[test]
     fn merge_settings_creates_both_hook_events() {
-        let report = merge_claude_settings(None, Path::new("/usr/bin/polaris")).unwrap();
+        let report = merge_claude_settings(None, Path::new("/usr/bin/polaris"), true).unwrap();
         let content = report.new_content.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         let hooks = parsed["hooks"].as_object().unwrap();
@@ -1679,17 +1698,18 @@ second
 
     #[test]
     fn merge_settings_idempotent_both_hooks() {
-        let first = merge_claude_settings(None, Path::new("/usr/bin/polaris")).unwrap();
+        let first = merge_claude_settings(None, Path::new("/usr/bin/polaris"), true).unwrap();
         let second = merge_claude_settings(
             first.new_content.as_deref(),
             Path::new("/usr/bin/polaris"),
+            true,
         ).unwrap();
         assert_eq!(second.action, ClaudeSettingsAction::Unchanged);
     }
 
     #[test]
     fn remove_settings_strips_both_hook_events() {
-        let report = merge_claude_settings(None, Path::new("/usr/bin/polaris")).unwrap();
+        let report = merge_claude_settings(None, Path::new("/usr/bin/polaris"), true).unwrap();
         let content = report.new_content.unwrap();
         let result = remove_polaris_hooks_from_settings(&content).unwrap().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -1728,7 +1748,7 @@ second
         // Mimic `polaris setup ./myproj` from `parent`.
         let prev_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(parent.path()).unwrap();
-        let result = run(&PolarisConfig::default(), Path::new(proj_name), false, false);
+        let result = run(&PolarisConfig::default(), Path::new(proj_name), false, false, false);
         std::env::set_current_dir(prev_cwd).unwrap();
         result.unwrap();
 

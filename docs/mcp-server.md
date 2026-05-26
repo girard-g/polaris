@@ -144,11 +144,17 @@ Error: <embedding error message>
 
 ## Hook integration (Claude Code)
 
-When you run `polaris setup` in a project, polaris also writes a `PostToolUse` hook into `.claude/settings.json`. The hook fires after Claude Code's `Write`, `Edit`, or `MultiEdit` tools complete; it re-runs `polaris index` for the touched file if (a) the path ends in `.md` and (b) the file lives under a directory the index already covers. Failures are non-fatal: the hook logs to stderr and always exits 0, so a transient hiccup never surfaces as a warning banner in Claude Code or interrupts your session.
+When you run `polaris setup` in a project, polaris writes two hooks into `.claude/settings.json`:
 
-To opt out, run `polaris setup --no-hooks`. To remove the hook from a project that already has it installed, re-run `polaris setup --no-hooks` — it strips the polaris entries from `.claude/settings.json` while leaving any other hooks intact.
+1. **Auto-index** (`PostToolUse`): fires after Claude Code's `Write`, `Edit`, or `MultiEdit` tools complete. Re-runs `polaris index` for the touched file if (a) the path ends in `.md` and (b) the file lives under a directory the index already covers.
 
-The hook is a Claude Code feature; Codex, Cursor, and Gemini CLI users keep using the MCP `search` tool and can run `polaris watch` if they want background auto-indexing.
+2. **Auto-search** (`UserPromptSubmit`): fires on every user message. Searches the indexed documentation and injects the top result as context before Claude responds. Two gates prevent pollution: prompts shorter than 5 words or longer than 150 words are skipped (confirmations and error pastes make poor queries), and results with a normalised score below 0.4 are silently dropped.
+
+Both hooks are non-fatal: they log to stderr and always exit 0, so a transient hiccup never surfaces as a warning banner or interrupts your session.
+
+To opt out, run `polaris setup --no-hooks`. To remove the hooks from a project that already has them installed, re-run `polaris setup --no-hooks` — it strips all polaris entries from `.claude/settings.json` while leaving any other hooks intact.
+
+The hooks are a Claude Code feature; Codex, Cursor, and Gemini CLI users keep using the MCP `search` tool and can run `polaris watch` if they want background auto-indexing.
 
 ### Known limitations
 

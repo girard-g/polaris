@@ -395,7 +395,11 @@ pub fn run_index_for_payload(payload: &str, cfg: &PolarisConfig) -> Result<()> {
 // Search hook (`polaris hook search`)
 // ---------------------------------------------------------------------------
 
-const SCORE_THRESHOLD: f32 = 0.4;
+/// Minimum raw RRF score for the search result to be injected. Raw RRF
+/// scores are small (roughly 1/(rrf_k+rank) per source); with the default
+/// rrf_k=60, a top-1 hit in both KNN and BM25 scores ~0.033. This threshold
+/// filters out results that matched in only one source at a poor rank.
+const RAW_SCORE_THRESHOLD: f32 = 0.02;
 
 /// Run a single-result search against the Polaris index.
 ///
@@ -433,12 +437,12 @@ pub fn perform_search(
         cfg.rrf_k,
     );
 
-    let results = search.search(prompt, 1)?;
+    let results = search.search_raw(prompt, 1)?;
     let Some(top) = results.into_iter().next() else {
         return Ok(None);
     };
 
-    if top.score < SCORE_THRESHOLD {
+    if top.score < RAW_SCORE_THRESHOLD {
         return Ok(None);
     }
 

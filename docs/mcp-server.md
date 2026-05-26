@@ -148,7 +148,7 @@ When you run `polaris setup` in a project, polaris writes two hooks into `.claud
 
 1. **Auto-index** (`PostToolUse`): fires after Claude Code's `Write`, `Edit`, or `MultiEdit` tools complete. Re-runs `polaris index` for the touched file if (a) the path ends in `.md` and (b) the file lives under a directory the index already covers.
 
-2. **Auto-search** (`UserPromptSubmit`): fires on every user message. Searches the indexed documentation and injects the top result as context before Claude responds. Two gates prevent pollution: prompts shorter than 5 words or longer than 150 words are skipped (confirmations and error pastes make poor queries), and results with a normalised score below 0.4 are silently dropped.
+2. **Auto-search** (`UserPromptSubmit`): fires on every user message. Searches the indexed documentation and injects the top result as context before Claude responds. Two gates prevent pollution: prompts shorter than 5 words or longer than 150 words are skipped (confirmations and error pastes make poor queries), and results below the raw relevance threshold are silently dropped.
 
 Both hooks are non-fatal: they log to stderr and always exit 0, so a transient hiccup never surfaces as a warning banner or interrupts your session.
 

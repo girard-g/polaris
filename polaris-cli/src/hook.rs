@@ -108,35 +108,93 @@ pub fn under_indexed_root(
 
     for p in indexed_paths {
         let p_path = Path::new(p);
-        let parent_present = p_path
-            .parent()
-            .map(|pp| !pp.as_os_str().is_empty())
-            .unwrap_or(false);
 
-        if parent_present {
-            // Indexed path has a directory prefix; match by directory prefix.
-            let parent = p_path.parent().unwrap();
-            if parent.is_absolute() {
-                if target.starts_with(parent) {
-                    return Some(target.to_path_buf());
+        if p_path.is_absolute() {
+            // Absolute DB paths: match by immediate parent. We can't infer
+            // the original `polaris index <root>` from the stored file path,
+            // so walking ancestors would over-match. Files directly under the
+            // filesystem root (`/foo.md`) are treated as single-file roots.
+            match meaningful_parent(p_path) {
+                Some(parent) => {
+                    if target.starts_with(parent) {
+                        return Some(target.to_path_buf());
+                    }
                 }
-            } else if target_rel.starts_with(parent) {
-                return Some(target_rel.clone());
+                None => {
+                    // Single-file under fs root — exact match only.
+                    if target == p_path {
+                        return Some(target.to_path_buf());
+                    }
+                }
             }
         } else {
-            // Single-file indexed root (e.g. `polaris index README.md` from
-            // the project root → DB row keyed `README.md`). Match the file
-            // exactly so the hook re-indexes it when edited.
-            if p_path.is_absolute() {
-                if target == p_path {
-                    return Some(target.to_path_buf());
+            // Relative DB paths: walk up to the first directory component
+            // (the indexed root). For `docs/sub/seed.md` → `docs`, so
+            // `docs/new.md` matches even when the DB has no direct children
+            // of `docs/`. Single-component paths (`README.md`) require exact
+            // match.
+            match topmost_relative_dir(p_path) {
+                Some(root) => {
+                    if target_rel.starts_with(root) {
+                        return Some(target_rel.clone());
+                    }
                 }
-            } else if target_rel == p_path {
-                return Some(target_rel.clone());
+                None => {
+                    if target_rel == p_path {
+                        return Some(target_rel.clone());
+                    }
+                }
             }
         }
     }
     None
+}
+
+/// For an absolute path, return its parent directory if that parent is above
+/// the filesystem root. Returns `None` for files directly under the fs root
+/// (`/foo.md`, `C:\foo.md`) — those are single-file roots.
+fn meaningful_parent(path: &Path) -> Option<&Path> {
+    let parent = path.parent()?;
+    if is_fs_root(parent) || parent.as_os_str().is_empty() {
+        None
+    } else {
+        Some(parent)
+    }
+}
+
+/// For a relative path, walk up to the first (shallowest) directory component.
+/// Returns `None` for single-component paths (`README.md`).
+///
+/// `docs/sub/file.md` → `Some("docs")`
+/// `docs/file.md` → `Some("docs")`
+/// `README.md` → `None`
+fn topmost_relative_dir(path: &Path) -> Option<&Path> {
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        current = parent;
+    }
+    // `current` is now the first component. If it's the same as the input,
+    // there was no directory component at all.
+    if current == path {
+        None
+    } else {
+        Some(current)
+    }
+}
+
+fn is_fs_root(path: &Path) -> bool {
+    use std::path::Component;
+    let mut components = path.components();
+    match components.next() {
+        Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+        _ => return false,
+    }
+    // After the root/prefix, there should be nothing left (or just a RootDir
+    // following a Prefix on Windows: `C:\`).
+    components.all(|c| matches!(c, Component::RootDir))
 }
 
 /// Outcome of one `perform_index` call. Used in tests; production code only
@@ -486,6 +544,66 @@ mod tests {
         assert_eq!(
             under_indexed_root(target, None, &indexed),
             Some(PathBuf::from(&p)),
+        );
+    }
+
+    #[test]
+    fn under_indexed_root_matches_ancestor_of_deeply_nested_indexed_file() {
+        // DB only has docs/sub/seed.md. A new file at docs/new.md should still
+        // match because docs/ is an ancestor of the indexed path.
+        let indexed = vec!["docs/sub/seed.md".to_string()];
+        assert_eq!(
+            under_indexed_root(Path::new("docs/new.md"), None, &indexed),
+            Some(PathBuf::from("docs/new.md")),
+        );
+    }
+
+    #[test]
+    fn under_indexed_root_ancestor_walk_does_not_overmatch() {
+        // Ancestor walk must not match unrelated top-level directories.
+        let indexed = vec!["docs/sub/deep/seed.md".to_string()];
+        assert_eq!(
+            under_indexed_root(Path::new("other/new.md"), None, &indexed),
+            None,
+        );
+    }
+
+    #[test]
+    fn under_indexed_root_absolute_uses_immediate_parent() {
+        // Absolute paths use immediate parent only (we can't infer the
+        // original `polaris index <root>` from stored file paths). So
+        // /proj/docs/sub/seed.md matches /proj/docs/sub/new.md but NOT
+        // /proj/docs/new.md. The relative branch handles the common case
+        // (polaris index docs) via ancestor walk.
+        let indexed_str = abs("/proj/docs/sub/seed.md");
+        let sibling_str = abs("/proj/docs/sub/new.md");
+        let higher_str = abs("/proj/docs/new.md");
+        let indexed = vec![indexed_str];
+
+        assert_eq!(
+            under_indexed_root(Path::new(&sibling_str), None, &indexed),
+            Some(PathBuf::from(&sibling_str)),
+            "same-dir sibling should match"
+        );
+        assert_eq!(
+            under_indexed_root(Path::new(&higher_str), None, &indexed),
+            None,
+            "higher-level file should not match (known limitation for absolute paths)"
+        );
+    }
+
+    #[test]
+    fn under_indexed_root_absolute_root_level_file_does_not_wildcard() {
+        // DB has /foo.md (file directly under filesystem root). This must NOT
+        // match every absolute path — it should behave like single-file.
+        let indexed_str = abs("/foo.md");
+        let target_str = abs("/bar.md");
+        let indexed = vec![indexed_str];
+        let target = Path::new(&target_str);
+        assert_eq!(
+            under_indexed_root(target, None, &indexed),
+            None,
+            "root-level absolute file must not become a wildcard"
         );
     }
 

@@ -121,7 +121,9 @@ polaris setup ./my-proj  # configure a specific directory
 
 Creates `.mcp.json` (pointing at the running polaris binary) and adds polaris-related entries to `.gitignore` (`polaris.db`, `polaris.db-shm`, `polaris.db-wal`, `.fastembed_cache/`, `.mcp.json` itself). Idempotent: re-running is safe.
 
-`polaris setup` also writes a marker-delimited Polaris MCP block into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` at the project root, steering compatible coding agents toward `polaris.search` for documentation queries. Existing user content in those files is preserved (the block is delimited by `<!-- polaris:begin --> … <!-- polaris:end -->` markers and only that range is rewritten on re-run). Pass `--no-agents` to skip these three files. Pass `--no-hooks` to skip writing `.claude/settings.json` and the initial index pass (re-run with `--no-hooks` to remove the hook from a project that already has it).
+`polaris setup` also writes a marker-delimited Polaris MCP block into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` at the project root, steering compatible coding agents toward `polaris.search` for documentation queries. Existing user content in those files is preserved (the block is delimited by `<!-- polaris:begin --> … <!-- polaris:end -->` markers and only that range is rewritten on re-run). Pass `--no-agents` to skip these three files.
+
+Additionally, `polaris setup` installs a Claude Code **auto-index hook** into `.claude/settings.json`. The hook fires after every `Write`, `Edit`, or `MultiEdit` and re-indexes the touched file if it is a `.md` file under an already-indexed root. This keeps the search index current without needing `polaris watch`. Pass `--no-hooks` to skip hook installation (and the initial index pass). Re-run `polaris setup --no-hooks` on a project that already has the hook to remove it.
 
 ### Index
 
@@ -135,7 +137,7 @@ Only `.md` files are indexed. Unchanged files (same SHA256) are skipped automati
 
 ### Watch
 
-For Claude Code users, `polaris setup` now installs an auto-index hook into `.claude/settings.json` — every time the agent edits a `.md` file, the index refreshes automatically. You only need `polaris watch` for non-Claude-Code workflows or to pick up changes made outside the agent (manual edits in another editor, `git pull`, etc.).
+Claude Code users don't need `polaris watch` — the auto-index hook installed by `polaris setup` re-indexes `.md` files on every edit automatically. Use `polaris watch` for non-Claude-Code workflows (Cursor, Codex, manual edits, `git pull`, etc.).
 
 ```bash
 polaris watch ./docs                # watch and auto re-index on changes

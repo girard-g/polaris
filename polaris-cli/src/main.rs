@@ -189,6 +189,20 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    // Hook subcommands must always exit 0 — swallow config/init errors so
+    // a broken polaris.toml never surfaces a Claude Code warning banner.
+    if let Command::Hook { subcommand } = &cli.command {
+        db::register_vec_extension();
+        let cfg = PolarisConfig::load(cli.config.as_deref()).unwrap_or_else(|e| {
+            eprintln!("polaris hook: config load failed, using defaults: {e}");
+            PolarisConfig::default()
+        });
+        return match subcommand {
+            HookCommand::Index => hook::run_index(&cfg),
+            HookCommand::Search => hook::run_search(&cfg),
+        };
+    }
+
     let mut cfg = PolarisConfig::load(cli.config.as_deref())?;
 
     let mut dbs = cli.db.into_iter();
@@ -247,10 +261,7 @@ async fn run(cli: Cli) -> Result<()> {
                     format!("update task panicked: {e}")
                 ))?
         }
-        Command::Hook { subcommand } => match subcommand {
-            HookCommand::Index => hook::run_index(&cfg),
-            HookCommand::Search => hook::run_search(&cfg),
-        },
+        Command::Hook { .. } => unreachable!("handled above"),
     }
 }
 

@@ -370,4 +370,4 @@ Reads a `PostToolUse` hook payload (JSON) on stdin and re-indexes the touched fi
 
 ### `polaris hook search`
 
-Reads a `UserPromptSubmit` hook payload (JSON) on stdin, searches the index, and prints the top result to stdout for Claude Code context injection. Applies a length gate (5–150 words) and score threshold (≥ 0.4). Always exits 0 — failures go to stderr only.
+Reads a `UserPromptSubmit` hook payload (JSON) on stdin, searches the index, and prints the top result to stdout for Claude Code context injection. Applies a length gate (5–150 words) and a raw RRF score threshold. Always exits 0 — failures go to stderr only.

@@ -190,12 +190,10 @@ pub fn merge_claude_settings(
     let post_tool_use = hooks_map
         .entry("PostToolUse".to_string())
         .or_insert_with(|| json!([]));
-    let Value::Array(blocks) = post_tool_use else {
-        return Err(PolarisError::Setup(
-            "expected `hooks.PostToolUse` to be an array in .claude/settings.json".into(),
-        ));
-    };
-    blocks.push(canonical_block);
+    if !post_tool_use.is_array() {
+        *post_tool_use = json!([]);
+    }
+    post_tool_use.as_array_mut().unwrap().push(canonical_block);
 
     // Append the search hook to UserPromptSubmit (no matcher — this event
     // type doesn't support matchers and fires on every prompt).
@@ -208,12 +206,10 @@ pub fn merge_claude_settings(
     let user_prompt_submit = hooks_map
         .entry("UserPromptSubmit".to_string())
         .or_insert_with(|| json!([]));
-    let Value::Array(ups_blocks) = user_prompt_submit else {
-        return Err(PolarisError::Setup(
-            "expected `hooks.UserPromptSubmit` to be an array in .claude/settings.json".into(),
-        ));
-    };
-    ups_blocks.push(search_block);
+    if !user_prompt_submit.is_array() {
+        *user_prompt_submit = json!([]);
+    }
+    user_prompt_submit.as_array_mut().unwrap().push(search_block);
 
     let new_content_str = serde_json::to_string_pretty(&Value::Object(root))
         .map_err(|e| PolarisError::Setup(format!("failed to serialize .claude/settings.json: {e}")))?;

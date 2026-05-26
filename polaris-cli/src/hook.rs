@@ -1076,4 +1076,83 @@ mod tests {
         let result = run_search_for_payload(json, &cfg);
         assert!(result.is_ok());
     }
+
+    // -----------------------------------------------------------------------
+    // Integration tests (need ONNX model download)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
+    fn perform_search_returns_result_for_relevant_query() {
+        use polaris_core::db::register_vec_extension;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("guide.md"),
+            "# Installation Guide\n\nTo install polaris, run `cargo install polaris`.\n",
+        ).unwrap();
+
+        let cfg = PolarisConfig::default();
+        let db_path = dir.path().join("polaris.db");
+        register_vec_extension();
+        let db = Database::open(&db_path, cfg.embedding_dim, &cfg.model_id).unwrap();
+        let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id).unwrap());
+        let indexer = Indexer::new(
+            engine,
+            cfg.max_chunk_tokens,
+            cfg.chunk_overlap_chars,
+            cfg.max_file_size,
+        );
+        indexer.index_path(&db, &docs, true, false, false, None).unwrap();
+        drop(db);
+
+        let result = perform_search(
+            "how do I install polaris on my machine?",
+            Some(dir.path()),
+            &cfg_with_db(db_path),
+        ).unwrap();
+        assert!(result.is_some(), "expected a search result for relevant query");
+        let output = result.unwrap();
+        assert!(output.starts_with("[Polaris]"));
+        assert!(output.contains("guide.md"));
+    }
+
+    #[test]
+    #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
+    fn perform_search_returns_none_for_irrelevant_query() {
+        use polaris_core::db::register_vec_extension;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("guide.md"),
+            "# Installation Guide\n\nTo install polaris, run `cargo install polaris`.\n",
+        ).unwrap();
+
+        let cfg = PolarisConfig::default();
+        let db_path = dir.path().join("polaris.db");
+        register_vec_extension();
+        let db = Database::open(&db_path, cfg.embedding_dim, &cfg.model_id).unwrap();
+        let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id).unwrap());
+        let indexer = Indexer::new(
+            engine,
+            cfg.max_chunk_tokens,
+            cfg.chunk_overlap_chars,
+            cfg.max_file_size,
+        );
+        indexer.index_path(&db, &docs, true, false, false, None).unwrap();
+        drop(db);
+
+        let result = perform_search(
+            "quantum mechanics wave function collapse explanation please",
+            Some(dir.path()),
+            &cfg_with_db(db_path),
+        ).unwrap();
+        assert!(result.is_none(), "irrelevant query should be below score threshold");
+    }
 }

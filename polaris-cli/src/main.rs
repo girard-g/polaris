@@ -121,6 +121,9 @@ enum Command {
         /// Do not install (or remove) the Claude Code auto-index hook in .claude/settings.json
         #[arg(long)]
         no_hooks: bool,
+        /// Also install the UserPromptSubmit search hook (adds ~1s latency per prompt)
+        #[arg(long)]
+        search_hook: bool,
     },
 
     /// Show cumulative tokens saved using polaris vs grep+read
@@ -239,9 +242,9 @@ async fn run(cli: Cli) -> Result<()> {
             cmd_watch(cfg, &paths, !no_recursive).await
         }
         Command::Chunks { path } => cmd_chunks(cfg, &path).await,
-        Command::Setup { path, no_agents, no_hooks } => {
+        Command::Setup { path, no_agents, no_hooks, search_hook } => {
             let target = path.unwrap_or_else(|| std::path::PathBuf::from("."));
-            setup::run(&cfg, &target, no_agents, no_hooks)
+            setup::run(&cfg, &target, no_agents, no_hooks, search_hook)
         }
         Command::Savings { history, limit, output } => {
             savings::run(

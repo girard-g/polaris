@@ -28,6 +28,7 @@ polaris setup ./my-proj  # configure a specific directory
 |------|---------|-------------|
 | `--no-agents` | false | Skip writing `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` |
 | `--no-hooks` | false | Skip writing `.claude/settings.json` and the initial index pass. Re-run on a previously-set-up project to remove the polaris hook entries (the file itself stays). |
+| `--search-hook` | false | Also install the `UserPromptSubmit` search hook that injects doc context on every prompt. Adds ~1 s latency per qualifying message (ONNX model load). See [Search hook performance](mcp-server.md#search-hook-performance). |
 
 **Behaviour:**
 

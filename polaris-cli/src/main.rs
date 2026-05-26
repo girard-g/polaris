@@ -164,6 +164,8 @@ enum Command {
 enum HookCommand {
     /// Re-index a single file based on a PostToolUse hook payload on stdin.
     Index,
+    /// Search the index based on a UserPromptSubmit hook payload on stdin.
+    Search,
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +249,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Hook { subcommand } => match subcommand {
             HookCommand::Index => hook::run_index(&cfg),
+            HookCommand::Search => hook::run_search(&cfg),
         },
     }
 }

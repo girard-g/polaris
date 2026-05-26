@@ -60,6 +60,38 @@ pub fn parse_payload(json: &str) -> Result<HookPayload> {
     })
 }
 
+/// Payload for the `UserPromptSubmit` hook.
+#[derive(Debug)]
+pub struct SearchPayload {
+    pub prompt: String,
+    pub cwd: Option<PathBuf>,
+}
+
+/// Parse a `UserPromptSubmit` hook payload into the fields we need.
+pub fn parse_search_payload(json: &str) -> Result<SearchPayload> {
+    use serde_json::Value;
+
+    let parsed: Value = serde_json::from_str(json)
+        .map_err(|e| PolarisError::Setup(format!("hook payload is not valid JSON: {e}")))?;
+    let Value::Object(root) = &parsed else {
+        return Err(PolarisError::Setup(
+            "hook payload top level is not an object".into(),
+        ));
+    };
+    let prompt = root
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| PolarisError::Setup("hook payload missing prompt".into()))?;
+    let cwd = root
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    Ok(SearchPayload {
+        prompt: prompt.to_string(),
+        cwd,
+    })
+}
+
 /// Returns true if the path looks like a markdown file we should consider
 /// indexing. Strict `ext == "md"` to match
 /// `polaris-core::indexer::discover_markdown_files`, which is case-sensitive
@@ -750,5 +782,51 @@ mod tests {
         let cfg = cfg_with_db(PathBuf::from("/nonexistent/polaris.db"));
         let result = run_index_for_payload(json, &cfg);
         assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_search_payload tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_search_payload_extracts_prompt_and_cwd() {
+        let json = r#"{
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "how does the indexer work?",
+            "cwd": "/proj"
+        }"#;
+        let payload = parse_search_payload(json).unwrap();
+        assert_eq!(payload.prompt, "how does the indexer work?");
+        assert_eq!(payload.cwd, Some(PathBuf::from("/proj")));
+    }
+
+    #[test]
+    fn parse_search_payload_cwd_optional() {
+        let json = r#"{
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "what is polaris?"
+        }"#;
+        let payload = parse_search_payload(json).unwrap();
+        assert_eq!(payload.prompt, "what is polaris?");
+        assert_eq!(payload.cwd, None);
+    }
+
+    #[test]
+    fn parse_search_payload_errors_on_missing_prompt() {
+        let json = r#"{
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "/proj"
+        }"#;
+        assert!(parse_search_payload(json).is_err());
+    }
+
+    #[test]
+    fn parse_search_payload_errors_on_invalid_json() {
+        assert!(parse_search_payload("not json {").is_err());
+    }
+
+    #[test]
+    fn parse_search_payload_errors_on_non_object() {
+        assert!(parse_search_payload("[1,2]").is_err());
     }
 }

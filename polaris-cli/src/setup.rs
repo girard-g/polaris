@@ -112,9 +112,10 @@ const POLARIS_POST_TOOL_USE_MATCHER: &str = "Write|Edit|MultiEdit";
 /// `<binary_path> hook index`.
 ///
 /// Strategy: drop every polaris-owned hook entry from every matcher block under
-/// every event (currently just `PostToolUse`; we walk the whole `hooks.*` map
-/// to be Phase 2-ready), prune any matcher block whose `hooks[]` becomes empty,
-/// then append our canonical matcher block to `hooks.PostToolUse`.
+/// every event (currently `PostToolUse` and `UserPromptSubmit`; we walk the
+/// whole `hooks.*` map), prune any matcher block whose `hooks[]` becomes empty,
+/// then append our canonical matcher block to `hooks.PostToolUse` and our
+/// search hook block to `hooks.UserPromptSubmit`.
 pub fn merge_claude_settings(
     existing: Option<&str>,
     binary_path: &Path,
@@ -195,6 +196,24 @@ pub fn merge_claude_settings(
         ));
     };
     blocks.push(canonical_block);
+
+    // Append the search hook to UserPromptSubmit (no matcher — this event
+    // type doesn't support matchers and fires on every prompt).
+    let search_command = format!("{} hook search", shell_words::quote(&bin_str));
+    let search_block = json!({
+        "hooks": [
+            { "type": "command", "command": search_command }
+        ]
+    });
+    let user_prompt_submit = hooks_map
+        .entry("UserPromptSubmit".to_string())
+        .or_insert_with(|| json!([]));
+    let Value::Array(ups_blocks) = user_prompt_submit else {
+        return Err(PolarisError::Setup(
+            "expected `hooks.UserPromptSubmit` to be an array in .claude/settings.json".into(),
+        ));
+    };
+    ups_blocks.push(search_block);
 
     let new_content_str = serde_json::to_string_pretty(&Value::Object(root))
         .map_err(|e| PolarisError::Setup(format!("failed to serialize .claude/settings.json: {e}")))?;
@@ -1638,6 +1657,52 @@ second
             "docs/foo.md should be indexed; got {:?}",
             docs
         );
+    }
+
+    #[test]
+    fn merge_settings_creates_both_hook_events() {
+        let report = merge_claude_settings(None, Path::new("/usr/bin/polaris")).unwrap();
+        let content = report.new_content.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let hooks = parsed["hooks"].as_object().unwrap();
+
+        let ptu = hooks["PostToolUse"].as_array().unwrap();
+        assert_eq!(ptu.len(), 1);
+        assert_eq!(ptu[0]["matcher"].as_str().unwrap(), "Write|Edit|MultiEdit");
+        assert!(ptu[0]["hooks"][0]["command"].as_str().unwrap().contains("hook index"));
+
+        let ups = hooks["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 1);
+        assert!(ups[0].get("matcher").is_none(), "UserPromptSubmit must not have a matcher");
+        assert!(ups[0]["hooks"][0]["command"].as_str().unwrap().contains("hook search"));
+    }
+
+    #[test]
+    fn merge_settings_idempotent_both_hooks() {
+        let first = merge_claude_settings(None, Path::new("/usr/bin/polaris")).unwrap();
+        let second = merge_claude_settings(
+            first.new_content.as_deref(),
+            Path::new("/usr/bin/polaris"),
+        ).unwrap();
+        assert_eq!(second.action, ClaudeSettingsAction::Unchanged);
+    }
+
+    #[test]
+    fn remove_settings_strips_both_hook_events() {
+        let report = merge_claude_settings(None, Path::new("/usr/bin/polaris")).unwrap();
+        let content = report.new_content.unwrap();
+        let result = remove_polaris_hooks_from_settings(&content).unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let hooks = parsed["hooks"].as_object().unwrap();
+        // Both should be empty arrays or absent after removal.
+        for key in ["PostToolUse", "UserPromptSubmit"] {
+            if let Some(arr) = hooks.get(key) {
+                assert!(
+                    arr.as_array().map(|a| a.is_empty()).unwrap_or(true),
+                    "{key} should be empty after removal"
+                );
+            }
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ use polaris_core::db::Database;
 use polaris_core::embedding::EmbeddingEngine;
 use polaris_core::error::{PolarisError, Result};
 use polaris_core::indexer::Indexer;
+use polaris_core::search::SearchEngine;
 
 /// The slice of a Claude Code hook payload we actually use.
 #[derive(Debug)]
@@ -380,6 +381,87 @@ pub fn run_index_for_payload(payload: &str, cfg: &PolarisConfig) -> Result<()> {
             "polaris hook index: failed to index {}: {e}",
             parsed.file_path.display(),
         );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Search hook (`polaris hook search`)
+// ---------------------------------------------------------------------------
+
+const SCORE_THRESHOLD: f32 = 0.4;
+
+/// Run a single-result search against the Polaris index.
+///
+/// Returns `Ok(Some(formatted_output))` when a result passes both the
+/// length gate and score threshold, `Ok(None)` for a silent no-op,
+/// and `Err` for infrastructure failures (DB open, embedding load).
+pub fn perform_search(
+    prompt: &str,
+    cwd: Option<&Path>,
+    cfg: &PolarisConfig,
+) -> Result<Option<String>> {
+    if !prompt_passes_length_gate(prompt) {
+        return Ok(None);
+    }
+
+    let _cwd_guard = cwd.and_then(|c| {
+        let prev = std::env::current_dir().ok()?;
+        std::env::set_current_dir(c).ok()?;
+        Some(CwdGuard(prev))
+    });
+
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+    let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
+    let search = SearchEngine::new(
+        &engine,
+        &db,
+        cfg.mmr_lambda,
+        cfg.mmr_candidate_multiplier,
+        cfg.heading_boost,
+        cfg.rrf_k,
+    );
+
+    let results = search.search(prompt, 1)?;
+    let Some(top) = results.into_iter().next() else {
+        return Ok(None);
+    };
+
+    if top.score < SCORE_THRESHOLD {
+        return Ok(None);
+    }
+
+    Ok(Some(format_search_hook_output(&top)))
+}
+
+/// Entry point for `polaris hook search`. Reads the payload from stdin,
+/// delegates to `run_search_for_payload`. Always returns `Ok(())`.
+pub fn run_search(cfg: &PolarisConfig) -> Result<()> {
+    let mut buf = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+        eprintln!("polaris hook search: failed to read stdin: {e}");
+        return Ok(());
+    }
+    run_search_for_payload(&buf, cfg)
+}
+
+/// Parse the payload, run the search, print to stdout. Swallows all errors
+/// into stderr lines and returns `Ok(())`.
+pub fn run_search_for_payload(payload: &str, cfg: &PolarisConfig) -> Result<()> {
+    let parsed = match parse_search_payload(payload) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("polaris hook search: {e}");
+            return Ok(());
+        }
+    };
+
+    match perform_search(&parsed.prompt, parsed.cwd.as_deref(), cfg) {
+        Ok(Some(output)) => print!("{output}"),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("polaris hook search: failed to search: {e}");
+        }
     }
     Ok(())
 }
@@ -945,5 +1027,53 @@ mod tests {
     #[test]
     fn parse_search_payload_errors_on_non_object() {
         assert!(parse_search_payload("[1,2]").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // perform_search tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn perform_search_skips_short_prompt() {
+        let cfg = cfg_with_db(PathBuf::from("/nonexistent/polaris.db"));
+        let result = perform_search("yes", None, &cfg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn perform_search_skips_long_prompt() {
+        let cfg = cfg_with_db(PathBuf::from("/nonexistent/polaris.db"));
+        let long = "word ".repeat(151);
+        let result = perform_search(&long, None, &cfg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // run_search_for_payload tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn run_search_for_payload_returns_ok_on_invalid_json() {
+        let cfg = cfg_with_db(PathBuf::from("/nonexistent/polaris.db"));
+        let result = run_search_for_payload("not json {", &cfg);
+        assert!(result.is_ok(), "should swallow errors and return Ok");
+    }
+
+    #[test]
+    fn run_search_for_payload_returns_ok_on_missing_prompt() {
+        let json = r#"{"hook_event_name": "UserPromptSubmit", "cwd": "/proj"}"#;
+        let cfg = cfg_with_db(PathBuf::from("/nonexistent/polaris.db"));
+        let result = run_search_for_payload(json, &cfg);
+        assert!(result.is_ok(), "should swallow parse errors and return Ok");
+    }
+
+    #[test]
+    fn run_search_for_payload_returns_ok_on_short_prompt() {
+        let json = r#"{"prompt": "yes", "cwd": "/proj"}"#;
+        let cfg = cfg_with_db(PathBuf::from("/nonexistent/polaris.db"));
+        let result = run_search_for_payload(json, &cfg);
+        assert!(result.is_ok());
     }
 }

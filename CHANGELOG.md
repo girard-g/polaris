@@ -11,9 +11,22 @@ All notable changes to Polaris are documented in this file.
   and lives under an already-indexed root, it is re-indexed
   automatically — no `polaris watch` needed for Claude Code users.
   Pass `--no-hooks` to opt out; re-run `polaris setup --no-hooks`
-  to remove an existing hook.
+  to remove an existing hook. Gate check is ~5 ms; actual re-index
+  (when triggered) is ~300 ms.
+- **Claude Code auto-search hook (opt-in).** `polaris setup --search-hook`
+  installs a `UserPromptSubmit` hook that searches the index on every
+  user message and injects the top result as context before Claude
+  responds. Two gates prevent pollution: a length gate (5–150 words)
+  skips confirmations and error pastes, and a raw RRF score threshold
+  drops irrelevant hits. Adds ~1 s latency per qualifying prompt
+  (ONNX model load); off by default. Re-running `polaris setup`
+  without `--search-hook` removes it.
+- `--search-hook` flag on `polaris setup`.
 - `polaris hook index` internal subcommand (reads hook payload on
   stdin, re-indexes the touched file). Not intended for direct use.
+- `polaris hook search` internal subcommand (reads prompt payload on
+  stdin, searches the index, prints the top result to stdout for
+  Claude Code context injection). Not intended for direct use.
 - `polaris savings` subcommand reporting cumulative tokens saved by
   going through Polaris instead of `grep + read`. Renders a summary
   block by default, a per-query history with `--history`, and JSON
@@ -32,6 +45,16 @@ All notable changes to Polaris are documented in this file.
   re-runs only refresh the block.
 
 ### Changed
+- Hook subcommands (`polaris hook index`, `polaris hook search`) are
+  now dispatched before config validation in `main.rs`. A broken
+  `polaris.toml` falls back to defaults with a stderr warning instead
+  of crashing with a non-zero exit — Claude Code never shows a
+  warning banner from hook failures.
+- `under_indexed_root` now walks ancestors for relative DB paths:
+  if the index only contains `docs/sub/seed.md`, a new file at
+  `docs/new.md` is correctly recognized as under the indexed tree.
+  Absolute paths still use immediate-parent matching (documented
+  known limitation).
 - SQLite schema bumped from v2 to v3. Existing databases migrate
   automatically on first open; the v1→v2→v3 chain is exercised in
   tests.

@@ -17,7 +17,7 @@ pub const BYTES_PER_TOKEN: f64 = 4.0;
 const COST_MODEL_NAME: &str = "Opus4.7";
 
 /// Hardcoded input price (US dollars per 1,000,000 tokens) for the cost block.
-const COST_PRICE_USD_PER_MTOK: f64 = 15.0;
+const COST_PRICE_USD_PER_MTOK: f64 = 5.0;
 
 /// Render `SavingsAggregate` as the plain-text summary block.
 pub fn format_summary(agg: &SavingsAggregate) -> String {
@@ -40,8 +40,14 @@ pub fn format_summary(agg: &SavingsAggregate) -> String {
         "  Total searches      {}  (mcp {} / cli {})\n",
         agg.total_searches, agg.by_source.mcp.searches, agg.by_source.cli.searches,
     ));
-    out.push_str(&format!("  Tokens delivered   {}\n", fmt_count(delivered_tok)));
-    out.push_str(&format!("  Baseline           {}\n", fmt_count(baseline_tok)));
+    out.push_str(&format!(
+        "  Tokens delivered   {}\n",
+        fmt_count(delivered_tok)
+    ));
+    out.push_str(&format!(
+        "  Baseline           {}\n",
+        fmt_count(baseline_tok)
+    ));
     out.push_str(&format!(
         "  Tokens saved       {}  ~{:.1}× cheaper\n",
         fmt_count(saved_tok),
@@ -59,15 +65,21 @@ pub fn format_summary(agg: &SavingsAggregate) -> String {
     ));
     out.push_str(&format!(
         "  {:<15} : {:<8}-> ${:.2}\n",
-        "without polaris", fmt_count(baseline_tok), round_cents(cost.cost_without_usd),
+        "without polaris",
+        fmt_count(baseline_tok),
+        round_cents(cost.cost_without_usd),
     ));
     out.push_str(&format!(
         "  {:<15} : {:<8}-> ${:.2}\n",
-        "with polaris", fmt_count(delivered_tok), round_cents(cost.cost_with_usd),
+        "with polaris",
+        fmt_count(delivered_tok),
+        round_cents(cost.cost_with_usd),
     ));
     out.push_str(&format!(
         "  {:<15} : {:<8}-> ${:.2}\n",
-        "saved", fmt_count(saved_tok), round_cents(cost.saved_usd),
+        "saved",
+        fmt_count(saved_tok),
+        round_cents(cost.saved_usd),
     ));
 
     out
@@ -117,10 +129,8 @@ struct CostBreakdown {
 fn cost_breakdown(agg: &SavingsAggregate) -> CostBreakdown {
     let delivered_tok = bytes_to_tokens(agg.total_result_bytes);
     let baseline_tok = bytes_to_tokens(agg.total_baseline_bytes);
-    let cost_without_usd =
-        baseline_tok as f64 * COST_PRICE_USD_PER_MTOK / 1_000_000.0;
-    let cost_with_usd =
-        delivered_tok as f64 * COST_PRICE_USD_PER_MTOK / 1_000_000.0;
+    let cost_without_usd = baseline_tok as f64 * COST_PRICE_USD_PER_MTOK / 1_000_000.0;
+    let cost_with_usd = delivered_tok as f64 * COST_PRICE_USD_PER_MTOK / 1_000_000.0;
     let saved_usd = (cost_without_usd - cost_with_usd).max(0.0);
     CostBreakdown {
         model: COST_MODEL_NAME,
@@ -151,7 +161,11 @@ fn fmt_count(n: usize) -> String {
 }
 
 fn fmt_iso_date(ts: i64) -> String {
-    fmt_iso_seconds(ts).split('T').next().unwrap_or("").to_string()
+    fmt_iso_seconds(ts)
+        .split('T')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 fn fmt_iso_seconds(ts: i64) -> String {
@@ -163,7 +177,10 @@ fn fmt_iso_seconds(ts: i64) -> String {
     let minute = (rem % 3600) / 60;
     let second = rem % 60;
     let (y, m, d) = days_to_ymd(days as i64);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hour, minute, second)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hour, minute, second
+    )
 }
 
 /// Convert "days since 1970-01-01" to a (year, month, day) tuple. Civil-from-days
@@ -248,7 +265,11 @@ fn baseline_from_paths(repo_root: &Path, paths: &[PathBuf]) -> usize {
     paths
         .iter()
         .filter_map(|p| {
-            let absolute = if p.is_absolute() { p.clone() } else { repo_root.join(p) };
+            let absolute = if p.is_absolute() {
+                p.clone()
+            } else {
+                repo_root.join(p)
+            };
             std::fs::metadata(&absolute).ok().map(|m| m.len() as usize)
         })
         .sum()
@@ -306,34 +327,51 @@ fn summary_json(agg: &SavingsAggregate) -> serde_json::Value {
 }
 
 fn history_json(rows: &[SearchLogRow]) -> serde_json::Value {
-    let arr: Vec<_> = rows.iter().map(|r| {
-        serde_json::json!({
-            "id": r.id,
-            "ts": fmt_iso_seconds(r.ts),
-            "source": r.source.as_str(),
-            "query": r.query,
-            "top_k": r.top_k,
-            "result_bytes": r.result_bytes,
-            "baseline_bytes": r.baseline_bytes,
+    let arr: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "ts": fmt_iso_seconds(r.ts),
+                "source": r.source.as_str(),
+                "query": r.query,
+                "top_k": r.top_k,
+                "result_bytes": r.result_bytes,
+                "baseline_bytes": r.baseline_bytes,
+            })
         })
-    }).collect();
+        .collect();
     serde_json::Value::Array(arr)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polaris_core::db::{LogSource, SavingsAggregate, SavingsBySource, SavingsCounters, SearchLogRow, SearchResult};
+    use polaris_core::db::{
+        LogSource, SavingsAggregate, SavingsBySource, SavingsCounters, SearchLogRow, SearchResult,
+    };
 
-    fn agg_with(cli: (usize, usize, usize), mcp: (usize, usize, usize), since: Option<i64>) -> SavingsAggregate {
+    fn agg_with(
+        cli: (usize, usize, usize),
+        mcp: (usize, usize, usize),
+        since: Option<i64>,
+    ) -> SavingsAggregate {
         SavingsAggregate {
             total_searches: cli.0 + mcp.0,
             total_result_bytes: cli.1 + mcp.1,
             total_baseline_bytes: cli.2 + mcp.2,
             tracking_since_ts: since,
             by_source: SavingsBySource {
-                cli: SavingsCounters { searches: cli.0, result_bytes: cli.1, baseline_bytes: cli.2 },
-                mcp: SavingsCounters { searches: mcp.0, result_bytes: mcp.1, baseline_bytes: mcp.2 },
+                cli: SavingsCounters {
+                    searches: cli.0,
+                    result_bytes: cli.1,
+                    baseline_bytes: cli.2,
+                },
+                mcp: SavingsCounters {
+                    searches: mcp.0,
+                    result_bytes: mcp.1,
+                    baseline_bytes: mcp.2,
+                },
             },
         }
     }
@@ -347,7 +385,11 @@ mod tests {
 
     #[test]
     fn format_summary_populated() {
-        let agg = agg_with((1, 4_000, 100_000), (2, 8_000, 200_000), Some(1_700_000_000));
+        let agg = agg_with(
+            (1, 4_000, 100_000),
+            (2, 8_000, 200_000),
+            Some(1_700_000_000),
+        );
         let out = format_summary(&agg);
         assert!(out.contains("Total searches      3"));
         assert!(out.contains("(mcp 2 / cli 1)"));
@@ -380,10 +422,7 @@ mod tests {
         let out = format_history(&[row]);
         assert!(out.contains("…"));
         // Truncated string itself should be present (49 a's + ellipsis).
-        let line_with_query = out
-            .lines()
-            .find(|l| l.contains("aaaa"))
-            .unwrap();
+        let line_with_query = out.lines().find(|l| l.contains("aaaa")).unwrap();
         assert!(line_with_query.contains(&format!("{}…", "a".repeat(49))));
     }
 
@@ -399,7 +438,11 @@ mod tests {
     fn cost_breakdown_math() {
         // delivered = 4_000 + 8_000 = 12_000 bytes → 3_000 tokens
         // baseline  = 100_000 + 200_000 = 300_000 bytes → 75_000 tokens
-        let agg = agg_with((1, 4_000, 100_000), (2, 8_000, 200_000), Some(1_700_000_000));
+        let agg = agg_with(
+            (1, 4_000, 100_000),
+            (2, 8_000, 200_000),
+            Some(1_700_000_000),
+        );
         let cb = cost_breakdown(&agg);
         assert_eq!(cb.model, "Opus4.7");
         assert!((cb.price_usd_per_mtok - 15.0).abs() < 1e-9);
@@ -415,7 +458,11 @@ mod tests {
     fn format_summary_includes_cost_block() {
         // Same aggregate as format_summary_populated:
         // delivered = 3_000 tokens, baseline = 75_000 tokens.
-        let agg = agg_with((1, 4_000, 100_000), (2, 8_000, 200_000), Some(1_700_000_000));
+        let agg = agg_with(
+            (1, 4_000, 100_000),
+            (2, 8_000, 200_000),
+            Some(1_700_000_000),
+        );
         let out = format_summary(&agg);
 
         // Header line, rendered verbatim from the constants.
@@ -447,7 +494,11 @@ mod tests {
     #[test]
     fn summary_json_includes_cost_fields() {
         // Same aggregate as cost_breakdown_math: 75_000 tok baseline, 3_000 tok delivered.
-        let agg = agg_with((1, 4_000, 100_000), (2, 8_000, 200_000), Some(1_700_000_000));
+        let agg = agg_with(
+            (1, 4_000, 100_000),
+            (2, 8_000, 200_000),
+            Some(1_700_000_000),
+        );
         let v = summary_json(&agg);
 
         assert_eq!(v["cost_model"], "Opus4.7");
@@ -464,7 +515,10 @@ mod tests {
             "unexpected cost_with_polaris_usd: {v}",
         );
         // Spec: saved_usd is intentionally NOT in JSON (trivial subtraction).
-        assert!(v.get("cost_saved_usd").is_none(), "saved_usd should not be in JSON");
+        assert!(
+            v.get("cost_saved_usd").is_none(),
+            "saved_usd should not be in JSON"
+        );
     }
 
     #[test]
@@ -491,8 +545,10 @@ mod tests {
 
         {
             let db = Database::open(&db_path, 4, "test-model").unwrap();
-            db.insert_search_log(1_700_000_000, LogSource::Cli, "q1", 5, 400, 8_000).unwrap();
-            db.insert_search_log(1_700_000_100, LogSource::Mcp, "q2", 2, 200, 4_000).unwrap();
+            db.insert_search_log(1_700_000_000, LogSource::Cli, "q1", 5, 400, 8_000)
+                .unwrap();
+            db.insert_search_log(1_700_000_100, LogSource::Mcp, "q2", 2, 200, 4_000)
+                .unwrap();
         }
 
         // Capture stdout via a pipe-style helper. For simplicity we just call run()
@@ -547,7 +603,10 @@ mod tests {
         ];
         let (bytes, paths) = measure_result(&results);
         assert_eq!(bytes, 11);
-        assert_eq!(paths, vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/b.md")]);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/b.md")]
+        );
     }
 
     #[tokio::test]
@@ -558,7 +617,11 @@ mod tests {
         let docs = dir.path().join("docs");
         std::fs::create_dir(&docs).unwrap();
         let doc_a = docs.join("a.md");
-        std::fs::write(&doc_a, "Lorem ipsum dolor sit amet, consectetur adipiscing elit.").unwrap();
+        std::fs::write(
+            &doc_a,
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+        )
+        .unwrap();
 
         let index_path = dir.path().join("polaris.db");
         let embed = polaris_core::SharedEmbedding::load("nomic-embed-text-v1.5", 64).unwrap();
@@ -598,6 +661,9 @@ mod tests {
         assert_eq!(agg.total_searches, 1);
         assert_eq!(agg.by_source.cli.searches, 1);
         assert_eq!(agg.by_source.cli.result_bytes, 11);
-        assert!(agg.by_source.cli.baseline_bytes >= 50, "baseline should reflect the file size");
+        assert!(
+            agg.by_source.cli.baseline_bytes >= 50,
+            "baseline should reflect the file size"
+        );
     }
 }

@@ -445,13 +445,13 @@ mod tests {
         );
         let cb = cost_breakdown(&agg);
         assert_eq!(cb.model, "Opus4.7");
-        assert!((cb.price_usd_per_mtok - 15.0).abs() < 1e-9);
-        // 75_000 * 15 / 1_000_000 = 1.125
-        assert!((cb.cost_without_usd - 1.125).abs() < 1e-9);
-        // 3_000 * 15 / 1_000_000 = 0.045
-        assert!((cb.cost_with_usd - 0.045).abs() < 1e-9);
-        // 1.125 - 0.045 = 1.08
-        assert!((cb.saved_usd - 1.08).abs() < 1e-9);
+        assert!((cb.price_usd_per_mtok - 5.0).abs() < 1e-9);
+        // 75_000 * 5 / 1_000_000 = 0.375
+        assert!((cb.cost_without_usd - 0.375).abs() < 1e-9);
+        // 3_000 * 5 / 1_000_000 = 0.015
+        assert!((cb.cost_with_usd - 0.015).abs() < 1e-9);
+        // 0.375 - 0.015 = 0.36
+        assert!((cb.saved_usd - 0.36).abs() < 1e-9);
     }
 
     #[test]
@@ -467,7 +467,7 @@ mod tests {
 
         // Header line, rendered verbatim from the constants.
         assert!(
-            out.contains("Opus4.7 (15$ for 1_000_000 tokens)"),
+            out.contains("Opus4.7 (5$ for 1_000_000 tokens)"),
             "missing cost header. Output was:\n{out}",
         );
 
@@ -476,17 +476,17 @@ mod tests {
         //   75.0K  → 5 chars + 3 spaces padding
         //   3.0K   → 4 chars + 4 spaces padding
         //   72.0K  → 5 chars + 3 spaces padding
-        // Costs: 1.125 → $1.13, 0.045 → $0.05, 1.08 → $1.08.
+        // Costs: 0.375 → $0.38, 0.015 → $0.02, 0.36 → $0.36.
         assert!(
-            out.contains("without polaris : 75.0K   -> $1.13"),
+            out.contains("without polaris : 75.0K   -> $0.38"),
             "missing 'without polaris' row. Output was:\n{out}",
         );
         assert!(
-            out.contains("with polaris    : 3.0K    -> $0.05"),
+            out.contains("with polaris    : 3.0K    -> $0.02"),
             "missing 'with polaris' row. Output was:\n{out}",
         );
         assert!(
-            out.contains("saved           : 72.0K   -> $1.08"),
+            out.contains("saved           : 72.0K   -> $0.36"),
             "missing 'saved' row. Output was:\n{out}",
         );
     }
@@ -503,15 +503,15 @@ mod tests {
 
         assert_eq!(v["cost_model"], "Opus4.7");
         assert!(
-            (v["cost_price_usd_per_mtok"].as_f64().unwrap() - 15.0).abs() < 1e-9,
+            (v["cost_price_usd_per_mtok"].as_f64().unwrap() - 5.0).abs() < 1e-9,
             "unexpected price: {v}",
         );
         assert!(
-            (v["cost_without_polaris_usd"].as_f64().unwrap() - 1.125).abs() < 1e-6,
+            (v["cost_without_polaris_usd"].as_f64().unwrap() - 0.375).abs() < 1e-6,
             "unexpected cost_without_polaris_usd: {v}",
         );
         assert!(
-            (v["cost_with_polaris_usd"].as_f64().unwrap() - 0.045).abs() < 1e-6,
+            (v["cost_with_polaris_usd"].as_f64().unwrap() - 0.015).abs() < 1e-6,
             "unexpected cost_with_polaris_usd: {v}",
         );
         // Spec: saved_usd is intentionally NOT in JSON (trivial subtraction).

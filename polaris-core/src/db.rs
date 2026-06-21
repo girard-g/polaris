@@ -762,6 +762,54 @@ impl Database {
         }))
     }
 
+    /// Expand a chunk into a reading-order context window.
+    ///
+    /// Keyed by `chunk_id` (the `chunk_id` field of a [`SearchResult`]). Returns
+    /// the target chunk plus up to `radius` neighbor chunks on each side **from
+    /// the same document**, in document order, joined by blank lines. Fewer than
+    /// `radius` neighbors on a side (document start/end) is fine. Neighbors never
+    /// cross into another document, even if globally adjacent.
+    ///
+    /// Returns `Err(PolarisError::Database(QueryReturnedNoRows))` if `chunk_id`
+    /// is not present in this database. See [`assemble_window`] for the
+    /// `max_chars` budgeting (neighbors are kept whole or dropped outermost-first;
+    /// only the target itself is ever truncated, char-boundary).
+    pub fn chunk_window(&self, chunk_id: i64, radius: usize, max_chars: usize) -> Result<String> {
+        // Resolve the parent document and the target's ordinal. A missing id
+        // makes query_row yield QueryReturnedNoRows → Err (the "not found" path).
+        let (document_id, chunk_index): (i64, i64) = self.conn.query_row(
+            "SELECT document_id, chunk_index FROM chunks WHERE id = ?1",
+            params![chunk_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+
+        let radius = i64::try_from(radius).unwrap_or(i64::MAX);
+        let lo = chunk_index.saturating_sub(radius);
+        let hi = chunk_index.saturating_add(radius);
+
+        // Fetch the contiguous window from this document only, in reading order.
+        let mut stmt = self.conn.prepare(
+            "SELECT chunk_index, content FROM chunks
+             WHERE document_id = ?1 AND chunk_index BETWEEN ?2 AND ?3
+             ORDER BY chunk_index ASC",
+        )?;
+        let rows: Vec<(i64, String)> = stmt
+            .query_map(params![document_id, lo, hi], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        // Locate the target within the ordered window. It is always present
+        // (same document, chunk_index within [lo, hi] for radius >= 0).
+        let target_pos = rows
+            .iter()
+            .position(|(ci, _)| *ci == chunk_index)
+            .expect("target chunk is always within its own window");
+        let parts: Vec<String> = rows.into_iter().map(|(_, c)| c).collect();
+
+        Ok(assemble_window(&parts, target_pos, max_chars))
+    }
+
     // -----------------------------------------------------------------------
     // Transaction helpers
     // -----------------------------------------------------------------------
@@ -1015,6 +1063,57 @@ fn is_leap(y: u32) -> bool {
     (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
+/// Join a window of chunks around `target_pos` into a `max_chars`-capped string.
+///
+/// `parts` is the contiguous window in reading order; `parts[target_pos]` is the
+/// matched chunk and is always included. Neighbors are added whole, expanding
+/// outward from the target (nearest first, left before right on a tie), and are
+/// dropped — outermost first — when they would push the total (including the
+/// `"\n\n"` separators) past `max_chars`. The kept parts are joined by `"\n\n"`.
+///
+/// Only the target itself is ever truncated: when it alone exceeds `max_chars`
+/// it is cut to `max_chars` on a char boundary and returned with no neighbors.
+fn assemble_window(parts: &[String], target_pos: usize, max_chars: usize) -> String {
+    const SEP: usize = 2; // "\n\n"
+
+    let target_len = parts[target_pos].chars().count();
+    // Target alone doesn't fit → return it truncated on a char boundary.
+    if target_len >= max_chars {
+        return parts[target_pos].chars().take(max_chars).collect();
+    }
+
+    let mut lo = target_pos;
+    let mut hi = target_pos;
+    let mut len = target_len;
+    let mut grow_left = target_pos > 0;
+    let mut grow_right = target_pos + 1 < parts.len();
+
+    while grow_left || grow_right {
+        if grow_left {
+            let add = SEP + parts[lo - 1].chars().count();
+            if len + add <= max_chars {
+                len += add;
+                lo -= 1;
+                grow_left = lo > 0;
+            } else {
+                grow_left = false;
+            }
+        }
+        if grow_right {
+            let add = SEP + parts[hi + 1].chars().count();
+            if len + add <= max_chars {
+                len += add;
+                hi += 1;
+                grow_right = hi + 1 < parts.len();
+            } else {
+                grow_right = false;
+            }
+        }
+    }
+
+    parts[lo..=hi].join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1033,6 +1132,121 @@ mod tests {
     /// Shorthand: insert a chunk with a 4-element embedding.
     fn insert_chunk(db: &Database, doc_id: i64, content: &str, emb: [f32; 4]) -> i64 {
         db.insert_chunk(doc_id, content, "", 0, content.len(), 0, &emb).unwrap()
+    }
+
+    /// Shorthand: insert a chunk at an explicit `chunk_index` with a zero embedding.
+    fn insert_chunk_at(db: &Database, doc_id: i64, content: &str, idx: usize) -> i64 {
+        db.insert_chunk(doc_id, content, "", 0, content.len(), idx, &[0.0; 4]).unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // chunk_window
+    // -----------------------------------------------------------------------
+
+    /// Insert one document with `n` chunks named c0..c{n-1}; return their chunk ids.
+    fn doc_with_chunks(db: &Database, path: &str, n: usize) -> Vec<i64> {
+        let doc = db.insert_document(path, "h", None, 0).unwrap();
+        (0..n).map(|i| insert_chunk_at(db, doc, &format!("c{i}"), i)).collect()
+    }
+
+    #[test]
+    fn chunk_window_middle_returns_target_plus_radius_in_order() {
+        let db = setup();
+        let ids = doc_with_chunks(&db, "a.md", 5);
+        let w = db.chunk_window(ids[2], 1, 10_000).unwrap();
+        assert_eq!(w, "c1\n\nc2\n\nc3");
+    }
+
+    #[test]
+    fn chunk_window_first_chunk_has_no_left_bleed() {
+        let db = setup();
+        let ids = doc_with_chunks(&db, "a.md", 5);
+        let w = db.chunk_window(ids[0], 1, 10_000).unwrap();
+        assert_eq!(w, "c0\n\nc1");
+    }
+
+    #[test]
+    fn chunk_window_last_chunk_has_no_right_bleed() {
+        let db = setup();
+        let ids = doc_with_chunks(&db, "a.md", 5);
+        let w = db.chunk_window(ids[4], 1, 10_000).unwrap();
+        assert_eq!(w, "c3\n\nc4");
+    }
+
+    #[test]
+    fn chunk_window_never_crosses_document_boundary() {
+        let db = setup();
+        let doc_a = db.insert_document("a.md", "h", None, 0).unwrap();
+        let a0 = insert_chunk_at(&db, doc_a, "a0", 0);
+        let a1 = insert_chunk_at(&db, doc_a, "a1", 1);
+        let doc_b = db.insert_document("b.md", "h", None, 0).unwrap();
+        let b0 = insert_chunk_at(&db, doc_b, "b0", 0);
+        let _b1 = insert_chunk_at(&db, doc_b, "b1", 1);
+
+        // Wide radius from a's last chunk must not pull in doc b's chunks.
+        let w = db.chunk_window(a1, 5, 10_000).unwrap();
+        assert_eq!(w, "a0\n\na1");
+        // ...and from b's first chunk must not pull in doc a's chunks.
+        let w = db.chunk_window(b0, 5, 10_000).unwrap();
+        assert_eq!(w, "b0\n\nb1");
+        let _ = a0;
+    }
+
+    #[test]
+    fn chunk_window_radius_zero_returns_only_target() {
+        let db = setup();
+        let ids = doc_with_chunks(&db, "a.md", 5);
+        let w = db.chunk_window(ids[2], 0, 10_000).unwrap();
+        assert_eq!(w, "c2");
+    }
+
+    #[test]
+    fn chunk_window_drops_outer_neighbors_keeping_target_whole() {
+        let db = setup();
+        let doc = db.insert_document("a.md", "h", None, 0).unwrap();
+        insert_chunk_at(&db, doc, "aaaa", 0);
+        let target = insert_chunk_at(&db, doc, "BB", 1);
+        insert_chunk_at(&db, doc, "cccc", 2);
+
+        // Budget too small for any neighbor → target alone (kept whole).
+        let w = db.chunk_window(target, 1, 4).unwrap();
+        assert_eq!(w, "BB");
+
+        // Budget fits exactly one neighbor (nearest-first → left) but not both.
+        // "aaaa"(4) + "\n\n"(2) + "BB"(2) = 8.
+        let w = db.chunk_window(target, 1, 8).unwrap();
+        assert_eq!(w, "aaaa\n\nBB");
+    }
+
+    #[test]
+    fn chunk_window_truncates_oversized_target_to_max_chars() {
+        let db = setup();
+        let doc = db.insert_document("a.md", "h", None, 0).unwrap();
+        insert_chunk_at(&db, doc, "x", 0);
+        let target = insert_chunk_at(&db, doc, "abcdefghij", 1);
+        insert_chunk_at(&db, doc, "y", 2);
+
+        let w = db.chunk_window(target, 1, 4).unwrap();
+        assert_eq!(w, "abcd");
+    }
+
+    #[test]
+    fn chunk_window_truncates_on_char_boundary_not_byte() {
+        let db = setup();
+        let doc = db.insert_document("a.md", "h", None, 0).unwrap();
+        // 5 'é' = 10 bytes, 5 chars. Truncating to 3 chars must not split a char.
+        let target = insert_chunk_at(&db, doc, "ééééé", 0);
+        let w = db.chunk_window(target, 0, 3).unwrap();
+        assert_eq!(w, "ééé");
+        assert_eq!(w.chars().count(), 3);
+    }
+
+    #[test]
+    fn chunk_window_unknown_id_returns_err() {
+        let db = setup();
+        doc_with_chunks(&db, "a.md", 2);
+        let r = db.chunk_window(999_999, 1, 100);
+        assert!(matches!(r, Err(PolarisError::Database(_))));
     }
 
     // -----------------------------------------------------------------------

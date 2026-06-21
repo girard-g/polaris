@@ -172,6 +172,22 @@ impl Bank {
         engine.search_raw(query, opts.top_k)
     }
 
+    /// Expand a search hit into a reading-order context window.
+    ///
+    /// Keyed by `chunk_id` (the [`SearchResult::chunk_id`] of a prior hit) — the
+    /// caller never needs the chunk's positional index. Returns the target chunk
+    /// plus up to `radius` neighbor chunks on each side **from the same
+    /// document**, in document order, joined by blank lines and capped at
+    /// `max_chars` characters (char boundary). Neighbors are kept whole or
+    /// dropped outermost-first; only the target itself is ever truncated.
+    ///
+    /// Returns `Err` if `chunk_id` is not present in this bank. Synchronous;
+    /// call via `spawn_blocking` from async contexts, like the other methods.
+    pub fn chunk_window(&self, chunk_id: i64, radius: usize, max_chars: usize) -> Result<String> {
+        let db = self.inner.db.lock().expect("bank db poisoned");
+        db.chunk_window(chunk_id, radius, max_chars)
+    }
+
     /// Append one row to the search log.
     ///
     /// Used by the CLI and MCP server to record per-search counters.

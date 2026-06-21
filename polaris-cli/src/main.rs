@@ -86,6 +86,18 @@ enum Command {
         output: OutputFormat,
     },
 
+    /// Expand a chunk into its reading-order context window (debug retrieval)
+    Window {
+        /// Chunk id (from `polaris search <query> --output json`)
+        chunk_id: i64,
+        /// Number of neighbor chunks to include on each side
+        #[arg(short = 'r', long, default_value = "1")]
+        radius: usize,
+        /// Maximum characters in the returned window (includes separators)
+        #[arg(short = 'c', long, default_value = "2000")]
+        max_chars: usize,
+    },
+
     /// Start the MCP server over stdio
     Serve,
 
@@ -236,6 +248,9 @@ async fn run(cli: Cli) -> Result<()> {
             cmd_index(cfg, &path, !no_recursive, force, dry_run).await
         }
         Command::Search { query, top_k, output } => cmd_search(cfg, &query, top_k, output).await,
+        Command::Window { chunk_id, radius, max_chars } => {
+            cmd_window(cfg, chunk_id, radius, max_chars).await
+        }
         Command::Serve => cmd_serve(cfg).await,
         Command::Status { output } => cmd_status(cfg, output).await,
         Command::Watch { paths, no_recursive } => {
@@ -523,6 +538,42 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: Outpu
     }
 
     print!("{}", format_results_terminal(&results, query));
+    Ok(())
+}
+
+/// `polaris window <chunk_id>` — print the reading-order context window for a chunk.
+///
+/// Targets the primary database (`cfg.db_path`); chunk ids are unique only within
+/// one index, so the id must come from a search against that same database.
+/// No embedding model is loaded — this only reads the chunks table.
+async fn cmd_window(
+    cfg: PolarisConfig,
+    chunk_id: i64,
+    radius: usize,
+    max_chars: usize,
+) -> Result<()> {
+    if !cfg.db_path.exists() {
+        return Err(PolarisError::Indexing(format!(
+            "no index at {}  —  run `polaris index <path>` first",
+            cfg.db_path.display()
+        )));
+    }
+
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+
+    // Friendlier message than the bare QueryReturnedNoRows error on a bad id.
+    if db.get_chunk_with_metadata(chunk_id)?.is_none() {
+        return Err(PolarisError::Indexing(format!(
+            "no chunk with id {chunk_id} in {}  —  get ids from `polaris search <query> --output json`",
+            cfg.db_path.display()
+        )));
+    }
+
+    let window = db.chunk_window(chunk_id, radius, max_chars)?;
+    print!("{window}");
+    if !window.ends_with('\n') {
+        println!();
+    }
     Ok(())
 }
 

@@ -151,6 +151,37 @@ Score is the final hybrid-search score (RRF + heading boost, after MMR rerank) n
 
 ---
 
+### `polaris window <chunk_id>`
+
+Expand a single chunk into its reading-order context window: the target chunk plus its immediate neighbours **from the same document**, joined by blank lines. Useful for debugging retrieval quality and for RAG consumers that need more context than one chunk.
+
+Get a `chunk_id` from a JSON search against the same index:
+
+```bash
+polaris search "free vs pro split" --output json   # copy a "chunk_id"
+polaris window 686 --radius 1 --max-chars 2000
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-r, --radius <N>` | 1 | Neighbour chunks to include on each side |
+| `-c, --max-chars <N>` | 2000 | Max characters in the window (separators included) |
+
+Neighbours are included whole or dropped — outermost first — to fit `max_chars`; only the target chunk itself is ever truncated (on a char boundary), and only when it alone exceeds `max_chars`. Fewer neighbours at a document's start/end is normal, and the window never crosses into another document.
+
+Chunk ids are unique only within a single index, so `window` operates on the primary database (`--db`/config). When searching multiple databases (`--db` repeated), ids from the merged results may not all resolve against one window database.
+
+**Error cases (stderr, exit 1):**
+
+| Situation | Message |
+|-----------|---------|
+| DB file doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| Unknown chunk id | `no chunk with id <id> in <path>  —  get ids from \`polaris search <query> --output json\`` |
+
+---
+
 ### `polaris serve`
 
 Start an MCP server over stdio. Used by Claude Code (and other MCP clients) to call Polaris tools.

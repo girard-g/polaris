@@ -788,10 +788,14 @@ impl Database {
         let hi = chunk_index.saturating_add(radius);
 
         // Fetch the contiguous window from this document only, in reading order.
+        // Select `id` so the target is located by its unique chunk_id rather than
+        // by chunk_index — the schema does not constrain (document_id, chunk_index)
+        // to be unique, so locating by ordinal would rely on an unenforced
+        // invariant. The `id` tiebreak keeps ordering deterministic regardless.
         let mut stmt = self.conn.prepare(
-            "SELECT chunk_index, content FROM chunks
+            "SELECT id, content FROM chunks
              WHERE document_id = ?1 AND chunk_index BETWEEN ?2 AND ?3
-             ORDER BY chunk_index ASC",
+             ORDER BY chunk_index ASC, id ASC",
         )?;
         let rows: Vec<(i64, String)> = stmt
             .query_map(params![document_id, lo, hi], |r| {
@@ -799,11 +803,11 @@ impl Database {
             })?
             .collect::<rusqlite::Result<_>>()?;
 
-        // Locate the target within the ordered window. It is always present
-        // (same document, chunk_index within [lo, hi] for radius >= 0).
+        // Locate the target by its chunk_id. Always present (same document,
+        // chunk_index within [lo, hi] for radius >= 0).
         let target_pos = rows
             .iter()
-            .position(|(ci, _)| *ci == chunk_index)
+            .position(|(id, _)| *id == chunk_id)
             .expect("target chunk is always within its own window");
         let parts: Vec<String> = rows.into_iter().map(|(_, c)| c).collect();
 

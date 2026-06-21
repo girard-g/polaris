@@ -552,6 +552,9 @@ async fn cmd_window(
     radius: usize,
     max_chars: usize,
 ) -> Result<()> {
+    // Single-DB command: chunk ids resolve against the primary index only.
+    warn_extra_dbs_ignored(&cfg);
+
     if !cfg.db_path.exists() {
         return Err(PolarisError::Indexing(format!(
             "no index at {}  —  run `polaris index <path>` first",

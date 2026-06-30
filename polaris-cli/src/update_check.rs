@@ -2,9 +2,6 @@
 //! The network fetch lives in a detached child process; every render path here
 //! only reads a local cache file, so it never blocks the caller.
 
-// ponytail: later tasks (MCP serve) call banner_once; dead_dead on remaining items dropped once all wired
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};

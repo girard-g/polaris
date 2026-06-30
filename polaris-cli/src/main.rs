@@ -197,9 +197,11 @@ async fn main() {
     let cli = Cli::parse();
 
     // Detached refresh child: do the blocking GitHub call and exit. Must run
-    // before any config/tracing setup — it needs none of it.
+    // before any config/tracing setup — it needs none of it. self_update uses
+    // reqwest::blocking, which panics if driven on the async runtime thread, so
+    // offload to a blocking thread (same as the `update` command does).
     if let Command::UpdateRefresh = cli.command {
-        update_check::run_refresh();
+        let _ = tokio::task::spawn_blocking(update_check::run_refresh).await;
         return;
     }
 
@@ -222,8 +224,7 @@ async fn main() {
         is_hook,
         is_long_running,
         is_json,
-        std::env::var_os("CI").is_some(),
-        std::env::var_os("POLARIS_NO_UPDATE_CHECK").is_some(),
+        update_check::check_disabled(),
     );
 
     let result = run(cli).await;

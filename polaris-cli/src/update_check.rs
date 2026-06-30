@@ -124,9 +124,20 @@ pub fn run_refresh() {
     write_cache(&row);
 }
 
+/// True when the user has explicitly opted out of update checks (env var) or
+/// we're in CI. Gates the network fetch and every notice surface — NOT the
+/// display-only suppressions (hook/json/serve/watch), which still warm the cache.
+pub fn check_disabled() -> bool {
+    std::env::var_os("POLARIS_NO_UPDATE_CHECK").is_some()
+        || std::env::var_os("CI").is_some()
+}
+
 /// Spawn a detached refresh child if the cache is missing or stale. Returns
 /// immediately; the child does the network call after we have exited.
 pub fn refresh_if_stale() {
+    if check_disabled() {
+        return;
+    }
     if !should_refresh(&read_cache(), now_unix()) {
         return;
     }

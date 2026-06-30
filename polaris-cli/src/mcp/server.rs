@@ -121,8 +121,8 @@ impl PolarisServer {
 
         let results = match search_outcome {
             Ok(Ok(results)) => results,
-            Ok(Err(e)) => return format!("{banner}Error: {e}"),
-            Err(e) => return format!("{banner}Error: task failed: {e}"),
+            Ok(Err(e)) => return format!("Error: {e}{banner}"),
+            Err(e) => return format!("Error: task failed: {e}{banner}"),
         };
 
         let formatted = SearchEngine::format_results(&results);
@@ -136,7 +136,7 @@ impl PolarisServer {
             &results,
         );
 
-        format!("{banner}{formatted}")
+        format!("{formatted}{banner}")
     }
 
     /// Index markdown files from a directory or file path.
@@ -157,7 +157,7 @@ impl PolarisServer {
         let bank = self.state.bank.clone();
 
         if !path.exists() {
-            return format!("{banner}Error: path not found: {}", params.path);
+            return format!("Error: path not found: {}{banner}", params.path);
         }
 
         let progress_token = meta.get_progress_token();
@@ -204,7 +204,7 @@ impl PolarisServer {
             }
         }).await;
 
-        format!("{banner}{}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
+        format!("{}{banner}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
     }
 
     /// Get current status of the Polaris index.
@@ -229,7 +229,7 @@ impl PolarisServer {
             }
         }).await;
 
-        format!("{banner}{}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
+        format!("{}{banner}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
     }
 }
 

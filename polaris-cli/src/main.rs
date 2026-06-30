@@ -231,8 +231,14 @@ async fn main() {
     let result = run(cli).await;
 
     // Warm the cache for next time (detached, instant) and surface any pending
-    // update as a single stderr line. Reads only a local file.
-    let pending = update_check::refresh_and_pending();
+    // update as a single stderr line. Reads only a local file. Skip for the
+    // long-running commands: `serve` already warms at boot, and both run this
+    // only at shutdown where the work is wasted.
+    let pending = if is_long_running {
+        None
+    } else {
+        update_check::refresh_and_pending()
+    };
     if !notice_suppressed {
         if let Some(latest) = pending {
             eprintln!(

@@ -150,6 +150,20 @@ pub fn pending_update() -> Option<String> {
     pending_from(crate::update::current_version(), &read_cache())
 }
 
+/// Should the human-facing stderr notice be withheld for this invocation?
+/// `is_long_running` covers `serve`/`watch` (they block, and the MCP path has
+/// its own notice); `is_hook` covers agent-fed hook output; `is_json` covers
+/// machine-readable command output.
+pub fn suppressed(
+    is_hook: bool,
+    is_long_running: bool,
+    is_json: bool,
+    ci: bool,
+    optout: bool,
+) -> bool {
+    is_hook || is_long_running || is_json || ci || optout
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +243,17 @@ mod tests {
         let row = merge_refresh(None, &None, 42);
         assert_eq!(row.latest, "");
         assert_eq!(row.checked_at, 42);
+    }
+
+    #[test]
+    fn suppressed_rules() {
+        // plain interactive command → show
+        assert!(!suppressed(false, false, false, false, false));
+        // each independent reason suppresses
+        assert!(suppressed(true, false, false, false, false));  // hook
+        assert!(suppressed(false, true, false, false, false));  // serve/watch
+        assert!(suppressed(false, false, true, false, false));  // --output json
+        assert!(suppressed(false, false, false, true, false));  // CI
+        assert!(suppressed(false, false, false, false, true));  // opt-out env
     }
 }

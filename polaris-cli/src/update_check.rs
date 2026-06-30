@@ -59,8 +59,11 @@ fn merge_refresh(fetched: Option<String>, prev: &Option<CacheFile>, now: u64) ->
     CacheFile { latest, checked_at: now }
 }
 
-/// One-time session banner: returns `"{note}\n\n"` exactly once (first caller
+/// One-time session banner: returns `"\n\n{note}"` exactly once (first caller
 /// that wins the CAS), `""` every time after. `note == None` → always `""`.
+/// It's a *suffix* (appended after the tool output) so an error response still
+/// begins with `Error:` — the only failure signal, since rmcp returns these as
+/// `isError: false`.
 pub fn banner_once(note: &Option<String>, shown: &AtomicBool) -> String {
     match note {
         Some(n)
@@ -68,7 +71,7 @@ pub fn banner_once(note: &Option<String>, shown: &AtomicBool) -> String {
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok() =>
         {
-            format!("{n}\n\n")
+            format!("\n\n{n}")
         }
         _ => String::new(),
     }
@@ -253,7 +256,7 @@ mod tests {
         let note = Some("Polaris 2.3.0 available — run 'polaris update'.".to_string());
         let shown = AtomicBool::new(false);
         assert_eq!(banner_once(&note, &shown),
-                   "Polaris 2.3.0 available — run 'polaris update'.\n\n");
+                   "\n\nPolaris 2.3.0 available — run 'polaris update'.");
         assert_eq!(banner_once(&note, &shown), ""); // silent thereafter
     }
 

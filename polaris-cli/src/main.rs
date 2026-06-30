@@ -209,7 +209,38 @@ async fn main() {
     // diagnostics→stderr — uphold it uniformly.
     init_tracing();
 
-    if let Err(e) = run(cli).await {
+    // Decide notice visibility from the parsed command before `run` consumes it.
+    let is_hook = matches!(cli.command, Command::Hook { .. });
+    let is_long_running = matches!(cli.command, Command::Serve | Command::Watch { .. });
+    let is_json = matches!(
+        cli.command,
+        Command::Search { output: OutputFormat::Json, .. }
+            | Command::Status { output: OutputFormat::Json, .. }
+            | Command::Savings { output: OutputFormat::Json, .. }
+    ) || matches!(cli.command, Command::Update { .. }); // update already reports versions
+    let notice_suppressed = update_check::suppressed(
+        is_hook,
+        is_long_running,
+        is_json,
+        std::env::var_os("CI").is_some(),
+        std::env::var_os("POLARIS_NO_UPDATE_CHECK").is_some(),
+    );
+
+    let result = run(cli).await;
+
+    // Warm the cache for next time (detached, instant) and surface any pending
+    // update as a single stderr line. Reads only a local file.
+    update_check::refresh_if_stale();
+    if !notice_suppressed {
+        if let Some(latest) = update_check::pending_update() {
+            eprintln!(
+                "{}  polaris {latest} available — run 'polaris update'",
+                style("◆").cyan().bold(),
+            );
+        }
+    }
+
+    if let Err(e) = result {
         eprintln!("{} {e}", style("✗").red().bold());
         std::process::exit(1);
     }

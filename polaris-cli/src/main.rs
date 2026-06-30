@@ -4,6 +4,7 @@ mod setup;
 mod savings;
 mod tui;
 mod update;
+mod update_check;
 
 use std::path::PathBuf;
 use std::sync::Arc;

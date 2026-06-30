@@ -51,14 +51,10 @@ pub struct PolarisServer {
 
 impl PolarisServer {
     pub fn new(state: PolarisState) -> Self {
-        // Warm the cache for next session; read the current note (local file).
-        crate::update_check::refresh_if_stale();
-        let update_note = if crate::update_check::check_disabled() {
-            None
-        } else {
-            crate::update_check::pending_update()
-                .map(|v| format!("Polaris {v} available — run 'polaris update'."))
-        };
+        // Warm the cache for next session and read the current note in one pass
+        // (returns None when checks are disabled, so no extra gate needed here).
+        let update_note = crate::update_check::refresh_and_pending()
+            .map(|v| format!("Polaris {v} available — run 'polaris update'."));
         Self {
             state,
             tool_router: Self::tool_router(),

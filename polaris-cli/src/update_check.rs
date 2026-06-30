@@ -148,15 +148,12 @@ pub fn check_disabled() -> bool {
     env_flag("POLARIS_NO_UPDATE_CHECK") || env_flag("CI")
 }
 
-/// Spawn a detached refresh child if the cache is missing or stale. Returns
-/// immediately; the child does the network call after we have exited.
-pub fn refresh_if_stale() {
-    if check_disabled() {
-        return;
-    }
-    if !should_refresh(&read_cache(), now_unix()) {
-        return;
-    }
+/// Spawn the detached `update-refresh` child (the caller has already decided
+/// the cache is stale). Reaps it on a short-lived thread so a long-lived
+/// `serve` parent doesn't accumulate a zombie, and bounds its life to ~30s so a
+/// stalled GitHub connection can't linger forever (self_update's blocking
+/// client has no timeout). Short CLI parents exit first and init reaps.
+fn spawn_refresh() {
     let Ok(exe) = std::env::current_exe() else { return };
     // ponytail: one 24h-stale moment with N concurrent commands can spawn N
     // children before any stamps checked_at; harmless (rare, idempotent write).
@@ -167,18 +164,14 @@ pub fn refresh_if_stale() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
-    // Reap the child so the long-lived `serve` parent doesn't accumulate a
-    // zombie, and bound its life so a stalled GitHub connection can't linger
-    // forever (self_update's blocking client has no timeout). Short CLI parents
-    // exit first and init reaps; the reaper thread matters for `serve`.
-    // ponytail: a reaper thread is the smallest fix covering both; ~30s ceiling.
+    // ponytail: a reaper thread is the smallest fix for both the zombie and the
+    // no-timeout hang; ~30s ceiling.
     if let Ok(mut child) = child {
         std::thread::spawn(move || {
             for _ in 0..60 {
                 match child.try_wait() {
-                    Ok(Some(_)) => return,
                     Ok(None) => std::thread::sleep(std::time::Duration::from_millis(500)),
-                    Err(_) => return,
+                    _ => return, // exited or errored — stop polling
                 }
             }
             let _ = child.kill();
@@ -187,9 +180,19 @@ pub fn refresh_if_stale() {
     }
 }
 
-/// `Some(latest)` if a newer release than the running binary is cached.
-pub fn pending_update() -> Option<String> {
-    pending_from(crate::update::current_version(), &read_cache())
+/// Warm the cache (spawn a detached refresh if it's stale) and return the
+/// pending update version, if any — reading the cache exactly once. Returns
+/// `None` and does nothing when checks are disabled (opt-out env / CI), so
+/// every notice surface inherits the gate for free.
+pub fn refresh_and_pending() -> Option<String> {
+    if check_disabled() {
+        return None;
+    }
+    let cache = read_cache();
+    if should_refresh(&cache, now_unix()) {
+        spawn_refresh();
+    }
+    pending_from(crate::update::current_version(), &cache)
 }
 
 /// Should the human-facing stderr notice be withheld for this invocation?

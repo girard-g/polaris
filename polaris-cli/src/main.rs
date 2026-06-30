@@ -174,6 +174,10 @@ enum Command {
         #[command(subcommand)]
         subcommand: HookCommand,
     },
+
+    /// Internal: refresh the update-check cache. Not intended for direct use.
+    #[command(hide = true)]
+    UpdateRefresh,
 }
 
 #[derive(Subcommand)]
@@ -191,6 +195,13 @@ enum HookCommand {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // Detached refresh child: do the blocking GitHub call and exit. Must run
+    // before any config/tracing setup — it needs none of it.
+    if let Command::UpdateRefresh = cli.command {
+        update_check::run_refresh();
+        return;
+    }
 
     // Always log to stderr: keeps stdout clean for command output (JSON for
     // `search`/`status --output json`, MCP framing for `serve`, hook payload
@@ -281,6 +292,7 @@ async fn run(cli: Cli) -> Result<()> {
                 ))?
         }
         Command::Hook { .. } => unreachable!("handled above"),
+        Command::UpdateRefresh => unreachable!("handled in main"),
     }
 }
 

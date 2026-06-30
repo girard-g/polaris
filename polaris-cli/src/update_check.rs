@@ -2,11 +2,14 @@
 //! The network fetch lives in a detached child process; every render path here
 //! only reads a local cache file, so it never blocks the caller.
 
-// ponytail: later tasks (network fetch + MCP serve) call every pub item here
+// ponytail: later tasks (MCP serve) call banner_once; dead_dead on remaining items dropped once all wired
 #![allow(dead_code)]
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use self_update::backends::github::Update as GhUpdate;
 use serde::{Deserialize, Serialize};
 
 /// Re-check GitHub at most this often (seconds).
@@ -47,6 +50,16 @@ pub fn pending_from(current: &str, cache: &Option<CacheFile>) -> Option<String> 
     }
 }
 
+/// Build the cache row to write after a refresh attempt. On a failed fetch
+/// (`fetched == None`) keep the previous `latest` so we never erase a known
+/// update; always advance `checked_at` so failures still back off a full TTL.
+fn merge_refresh(fetched: Option<String>, prev: &Option<CacheFile>, now: u64) -> CacheFile {
+    let latest = fetched
+        .or_else(|| prev.as_ref().map(|c| c.latest.clone()))
+        .unwrap_or_default();
+    CacheFile { latest, checked_at: now }
+}
+
 /// One-time session banner: returns `"{note}\n\n"` exactly once (first caller
 /// that wins the CAS), `""` every time after. `note == None` → always `""`.
 pub fn banner_once(note: &Option<String>, shown: &AtomicBool) -> String {
@@ -60,6 +73,81 @@ pub fn banner_once(note: &Option<String>, shown: &AtomicBool) -> String {
         }
         _ => String::new(),
     }
+}
+
+fn cache_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    Some(base.join("polaris").join("update-check.json"))
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn read_cache() -> Option<CacheFile> {
+    let path = cache_path()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    parse_cache(&raw)
+}
+
+fn write_cache(c: &CacheFile) {
+    let Some(path) = cache_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(c) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// Blocking GitHub Releases call. `None` on unsupported platform or any error.
+fn fetch_latest() -> Option<String> {
+    let asset = crate::update::target_triple()?;
+    let updater = GhUpdate::configure()
+        .repo_owner("girard-g")
+        .repo_name("polaris")
+        .bin_name("polaris")
+        .target(asset)
+        .current_version(crate::update::current_version())
+        .build()
+        .ok()?;
+    let release = updater.get_latest_release().ok()?;
+    Some(release.version.trim_start_matches('v').to_string())
+}
+
+/// Entry point for the hidden `update-refresh` child process.
+pub fn run_refresh() {
+    let prev = read_cache();
+    let row = merge_refresh(fetch_latest(), &prev, now_unix());
+    write_cache(&row);
+}
+
+/// Spawn a detached refresh child if the cache is missing or stale. Returns
+/// immediately; the child does the network call after we have exited.
+pub fn refresh_if_stale() {
+    if !should_refresh(&read_cache(), now_unix()) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    // ponytail: one 24h-stale moment with N concurrent commands can spawn N
+    // children before any stamps checked_at; harmless (rare, idempotent write).
+    // Add a lockfile only if it ever matters.
+    let _ = std::process::Command::new(exe)
+        .arg("update-refresh")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// `Some(latest)` if a newer release than the running binary is cached.
+pub fn pending_update() -> Option<String> {
+    pending_from(crate::update::current_version(), &read_cache())
 }
 
 #[cfg(test)]
@@ -118,5 +206,28 @@ mod tests {
     fn banner_none_is_empty() {
         let shown = AtomicBool::new(false);
         assert_eq!(banner_once(&None, &shown), "");
+    }
+
+    #[test]
+    fn merge_keeps_latest_on_failed_fetch() {
+        let prev = cache("2.3.0", 100);
+        let row = merge_refresh(None, &prev, 9_999);
+        assert_eq!(row.latest, "2.3.0");   // preserved
+        assert_eq!(row.checked_at, 9_999); // still stamped → backs off
+    }
+
+    #[test]
+    fn merge_takes_new_version_on_success() {
+        let prev = cache("2.3.0", 100);
+        let row = merge_refresh(Some("2.4.0".to_string()), &prev, 9_999);
+        assert_eq!(row.latest, "2.4.0");
+        assert_eq!(row.checked_at, 9_999);
+    }
+
+    #[test]
+    fn merge_empty_when_no_data() {
+        let row = merge_refresh(None, &None, 42);
+        assert_eq!(row.latest, "");
+        assert_eq!(row.checked_at, 42);
     }
 }

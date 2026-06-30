@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use rmcp::{
     Peer, RoleServer, ServerHandler, ServiceExt,
@@ -41,14 +42,30 @@ pub struct PolarisState {
 pub struct PolarisServer {
     state: PolarisState,
     tool_router: ToolRouter<Self>,
+    /// One-line "newer version available" note, computed once at boot. `None`
+    /// when up to date or the check is unavailable.
+    update_note: Option<String>,
+    /// Flips to `true` the first time the note is emitted this session.
+    note_shown: Arc<AtomicBool>,
 }
 
 impl PolarisServer {
     pub fn new(state: PolarisState) -> Self {
+        // Warm the cache for next session; read the current note (local file).
+        crate::update_check::refresh_if_stale();
+        let update_note = crate::update_check::pending_update()
+            .map(|v| format!("Polaris {v} available — run 'polaris update'."));
         Self {
             state,
             tool_router: Self::tool_router(),
+            update_note,
+            note_shown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// One-time session banner prefix, `""` after the first emission.
+    fn session_banner(&self) -> String {
+        crate::update_check::banner_once(&self.update_note, &self.note_shown)
     }
 
     /// Start the MCP server over stdio.
@@ -86,6 +103,7 @@ impl PolarisServer {
                        looks poor."
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
+        let banner = self.session_banner();
         let config = Arc::clone(&self.state.config);
         let top_k = (params.top_k.unwrap_or(5) as usize).min(config.max_top_k);
         let query = params.query.clone();
@@ -103,8 +121,8 @@ impl PolarisServer {
 
         let results = match search_outcome {
             Ok(Ok(results)) => results,
-            Ok(Err(e)) => return format!("Error: {e}"),
-            Err(e) => return format!("Error: task failed: {e}"),
+            Ok(Err(e)) => return format!("{banner}Error: {e}"),
+            Err(e) => return format!("{banner}Error: task failed: {e}"),
         };
 
         let formatted = SearchEngine::format_results(&results);
@@ -118,7 +136,7 @@ impl PolarisServer {
             &results,
         );
 
-        formatted
+        format!("{banner}{formatted}")
     }
 
     /// Index markdown files from a directory or file path.
@@ -132,13 +150,14 @@ impl PolarisServer {
         peer: Peer<RoleServer>,
         meta: Meta,
     ) -> String {
+        let banner = self.session_banner();
         let path = PathBuf::from(&params.path);
         let recursive = params.recursive.unwrap_or(true);
         let force = params.force.unwrap_or(false);
         let bank = self.state.bank.clone();
 
         if !path.exists() {
-            return format!("Error: path not found: {}", params.path);
+            return format!("{banner}Error: path not found: {}", params.path);
         }
 
         let progress_token = meta.get_progress_token();
@@ -185,7 +204,7 @@ impl PolarisServer {
             }
         }).await;
 
-        result.unwrap_or_else(|e| format!("Error: task failed: {e}"))
+        format!("{banner}{}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
     }
 
     /// Get current status of the Polaris index.
@@ -194,6 +213,7 @@ impl PolarisServer {
         description = "Returns statistics about the current index: document count, chunk count, database size, and embedding configuration."
     )]
     async fn status(&self, _params: Parameters<StatusParams>) -> String {
+        let banner = self.session_banner();
         let config = Arc::clone(&self.state.config);
         let bank = self.state.bank.clone();
 
@@ -209,7 +229,7 @@ impl PolarisServer {
             }
         }).await;
 
-        result.unwrap_or_else(|e| format!("Error: task failed: {e}"))
+        format!("{banner}{}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
     }
 }
 

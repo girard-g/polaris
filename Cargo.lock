@@ -2423,11 +2423,12 @@ dependencies = [
 
 [[package]]
 name = "polaris-cli"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "anyhow",
  "clap",
  "console 0.15.11",
+ "dirs 5.0.1",
  "indicatif 0.17.11",
  "notify-debouncer-mini",
  "polaris-core",
@@ -2446,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "polaris-core"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "anyhow",
  "console 0.15.11",

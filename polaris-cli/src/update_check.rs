@@ -25,9 +25,11 @@ pub fn parse_cache(s: &str) -> Option<CacheFile> {
     serde_json::from_str(s).ok()
 }
 
-/// True when the last attempt is older than the TTL.
+/// True when the last attempt is older than the TTL. A `checked_at` in the
+/// future (wall clock stepped backward) is also stale, so a backward clock
+/// jump can't freeze the cache as "fresh forever".
 pub fn is_stale(checked_at: u64, now: u64) -> bool {
-    now.saturating_sub(checked_at) >= TTL_SECS
+    now < checked_at || now - checked_at >= TTL_SECS
 }
 
 /// True when there is no cache, or the cache is stale.
@@ -73,10 +75,11 @@ pub fn banner_once(note: &Option<String>, shown: &AtomicBool) -> String {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    Some(base.join("polaris").join("update-check.json"))
+    // `dirs::cache_dir()` (already used by polaris-core) resolves the platform
+    // cache root and filters empty/relative XDG values — and unlike a hand-rolled
+    // `$HOME/.cache`, it returns %LOCALAPPDATA% on Windows and ~/Library/Caches
+    // on macOS, both supported release targets.
+    Some(dirs::cache_dir()?.join("polaris").join("update-check.json"))
 }
 
 fn now_unix() -> u64 {
@@ -98,7 +101,12 @@ fn write_cache(c: &CacheFile) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string(c) {
-        let _ = std::fs::write(path, json);
+        // Atomic replace: write a temp sibling then rename, so a concurrent
+        // reader never observes a truncated file (rename is atomic on POSIX).
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 }
 
@@ -124,12 +132,20 @@ pub fn run_refresh() {
     write_cache(&row);
 }
 
+/// True when env var `name` is set to a truthy value. Treats unset and the
+/// usual falsey strings (empty/`0`/`false`/`no`) as off, so `CI=false` or
+/// `POLARIS_NO_UPDATE_CHECK=0` does NOT disable checks.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no"))
+        .unwrap_or(false)
+}
+
 /// True when the user has explicitly opted out of update checks (env var) or
 /// we're in CI. Gates the network fetch and every notice surface — NOT the
 /// display-only suppressions (hook/json/serve/watch), which still warm the cache.
 pub fn check_disabled() -> bool {
-    std::env::var_os("POLARIS_NO_UPDATE_CHECK").is_some()
-        || std::env::var_os("CI").is_some()
+    env_flag("POLARIS_NO_UPDATE_CHECK") || env_flag("CI")
 }
 
 /// Spawn a detached refresh child if the cache is missing or stale. Returns
@@ -145,12 +161,30 @@ pub fn refresh_if_stale() {
     // ponytail: one 24h-stale moment with N concurrent commands can spawn N
     // children before any stamps checked_at; harmless (rare, idempotent write).
     // Add a lockfile only if it ever matters.
-    let _ = std::process::Command::new(exe)
+    let child = std::process::Command::new(exe)
         .arg("update-refresh")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+    // Reap the child so the long-lived `serve` parent doesn't accumulate a
+    // zombie, and bound its life so a stalled GitHub connection can't linger
+    // forever (self_update's blocking client has no timeout). Short CLI parents
+    // exit first and init reaps; the reaper thread matters for `serve`.
+    // ponytail: a reaper thread is the smallest fix covering both; ~30s ceiling.
+    if let Ok(mut child) = child {
+        std::thread::spawn(move || {
+            for _ in 0..60 {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(500)),
+                    Err(_) => return,
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+    }
 }
 
 /// `Some(latest)` if a newer release than the running binary is cached.
@@ -161,15 +195,10 @@ pub fn pending_update() -> Option<String> {
 /// Should the human-facing stderr notice be withheld for this invocation?
 /// `is_long_running` covers `serve`/`watch` (they block, and the MCP path has
 /// its own notice); `is_hook` covers agent-fed hook output; `is_json` covers
-/// machine-readable command output.
-pub fn suppressed(
-    is_hook: bool,
-    is_long_running: bool,
-    is_json: bool,
-    ci: bool,
-    optout: bool,
-) -> bool {
-    is_hook || is_long_running || is_json || ci || optout
+/// machine-readable command output; `disabled` is [`check_disabled`] (opt-out
+/// env / CI), the single source of truth for the env gate.
+pub fn suppressed(is_hook: bool, is_long_running: bool, is_json: bool, disabled: bool) -> bool {
+    is_hook || is_long_running || is_json || disabled
 }
 
 #[cfg(test)]
@@ -198,6 +227,7 @@ mod tests {
     fn staleness() {
         assert!(!is_stale(1_000, 1_000 + TTL_SECS - 1)); // within window
         assert!(is_stale(1_000, 1_000 + TTL_SECS + 1));  // past window
+        assert!(is_stale(2_000, 1_000));                 // clock stepped backward → stale
     }
 
     #[test]
@@ -256,12 +286,11 @@ mod tests {
     #[test]
     fn suppressed_rules() {
         // plain interactive command → show
-        assert!(!suppressed(false, false, false, false, false));
+        assert!(!suppressed(false, false, false, false));
         // each independent reason suppresses
-        assert!(suppressed(true, false, false, false, false));  // hook
-        assert!(suppressed(false, true, false, false, false));  // serve/watch
-        assert!(suppressed(false, false, true, false, false));  // --output json
-        assert!(suppressed(false, false, false, true, false));  // CI
-        assert!(suppressed(false, false, false, false, true));  // opt-out env
+        assert!(suppressed(true, false, false, false));  // hook
+        assert!(suppressed(false, true, false, false));  // serve/watch
+        assert!(suppressed(false, false, true, false));  // --output json
+        assert!(suppressed(false, false, false, true));  // disabled (opt-out / CI)
     }
 }

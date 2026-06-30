@@ -28,6 +28,9 @@ notify-debouncer-mini = "0.4"
 # Self-update (GitHub Releases backend, rustls TLS)
 self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls"] }
 
+# Platform cache dir for the update-check cache (already used by polaris-core)
+dirs = "5"
+
 # POSIX-shell quoting/splitting for the Claude Code hook command string
 # (must survive binary paths with spaces and round-trip through `is_polaris_owned`)
 shell-words = "1.1"

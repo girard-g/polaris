@@ -219,7 +219,8 @@ async fn main() {
         Command::Search { output: OutputFormat::Json, .. }
             | Command::Status { output: OutputFormat::Json, .. }
             | Command::Savings { output: OutputFormat::Json, .. }
-    ) || matches!(cli.command, Command::Update { .. }); // update already reports versions
+            | Command::Update { .. } // update already reports versions
+    );
     let notice_suppressed = update_check::suppressed(
         is_hook,
         is_long_running,
@@ -231,9 +232,9 @@ async fn main() {
 
     // Warm the cache for next time (detached, instant) and surface any pending
     // update as a single stderr line. Reads only a local file.
-    update_check::refresh_if_stale();
+    let pending = update_check::refresh_and_pending();
     if !notice_suppressed {
-        if let Some(latest) = update_check::pending_update() {
+        if let Some(latest) = pending {
             eprintln!(
                 "{}  polaris {latest} available — run 'polaris update'",
                 style("◆").cyan().bold(),

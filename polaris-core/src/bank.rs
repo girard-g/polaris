@@ -315,6 +315,7 @@ impl Bank {
         &self,
         docs: Vec<InMemoryDoc>,
         removed: &[PathBuf],
+        force: bool,
     ) -> Result<IndexReport> {
         let started = Instant::now();
         let db = self.inner.db.lock().expect("bank db poisoned");
@@ -352,7 +353,7 @@ impl Bank {
             let sub = self
                 .inner
                 .indexer
-                .index_files_items(&db, &items, false, false, None)?;
+                .index_files_items(&db, &items, force, false, None)?;
             report.added.extend(sub.added);
             report.modified.extend(sub.modified);
             report.unchanged.extend(sub.unchanged);

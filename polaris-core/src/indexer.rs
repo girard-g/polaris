@@ -440,16 +440,18 @@ impl Indexer {
             .filter(|(path, _)| path == &root_norm || path.starts_with(&root_prefix))
             .collect();
 
-        // 3. Build normalised-path set for detecting removals.
-        let discovered_paths: std::collections::HashSet<String> = discovered
-            .iter()
-            .filter_map(|p| normalise_path(p))
-            .collect();
-
-        // 4. Handle removals (before delegating to index_files so the DB is clean).
+        // 3. Handle removals (before delegating to index_files so the DB is clean).
+        //
+        // A row is removed only when its source file no longer exists on disk —
+        // NOT merely because this run's discovery (currently `.md`-only) didn't
+        // find it. Otherwise a markdown-only run would erase rows indexed by
+        // other means (e.g. Pro's PDF/code indexing). `Path::join` replaces the
+        // base when the joined path is itself absolute, so this resolves
+        // correctly whether stored paths are root-relative or absolute.
         let mut removal_report = IndexReport::default();
         for db_path in existing.keys() {
-            if !discovered_paths.contains(db_path.as_str()) {
+            let on_disk = root.join(db_path);
+            if !on_disk.exists() {
                 if dry_run {
                     removal_report.removed.push(PathBuf::from(db_path));
                 } else {

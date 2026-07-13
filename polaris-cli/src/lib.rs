@@ -362,7 +362,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Emit a warning when extra `--db` flags are supplied to a write-only command.
-fn warn_extra_dbs_ignored(cfg: &PolarisConfig) {
+///
+/// `pub` so the `polaris-pro` binary can print the identical warning from its
+/// unified `index` pass instead of replicating the message.
+pub fn warn_extra_dbs_ignored(cfg: &PolarisConfig) {
     if !cfg.extra_db_paths.is_empty() {
         eprintln!(
             "  {}  multiple --db flags ignored for this command; using {}",
@@ -1102,7 +1105,13 @@ fn print_watch_report(report: &IndexReport) {
 // Tracing setup
 // ---------------------------------------------------------------------------
 
-fn init_tracing() {
+/// Install the stderr tracing subscriber (`polaris=info` by default, overridable
+/// via `RUST_LOG`).
+///
+/// `pub` so the `polaris-pro` binary can install the same subscriber on its
+/// direct `index` path — which never goes through [`run`] — so `tracing::warn!`s
+/// from the ingest pass are actually printed.
+pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("polaris=info"));
 

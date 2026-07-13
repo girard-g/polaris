@@ -6,6 +6,10 @@ rust-version.workspace = true
 description = "Lightweight RAG CLI + MCP server (Polaris)"
 license = "MIT"
 
+[lib]
+name = "polaris_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "polaris"
 path = "src/main.rs"

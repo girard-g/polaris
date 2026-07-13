@@ -35,7 +35,7 @@ fn index_documents_stores_supplied_markdown_and_skips_unchanged() {
     };
 
     // (1) Supplied markdown is stored & chunked under the ORIGINAL path.
-    let report = bank.index_documents(vec![doc()], &[]).unwrap();
+    let report = bank.index_documents(vec![doc()], &[], false).unwrap();
     assert_eq!(report.added.len(), 1);
 
     let chunks = bank.chunks_for(&PathBuf::from("docs/manual.pdf")).unwrap();
@@ -59,11 +59,20 @@ fn index_documents_stores_supplied_markdown_and_skips_unchanged() {
     assert!(hits.iter().any(|h| h.file_path.ends_with("manual.pdf")));
 
     // (2) Unchanged supplied hash is skipped on re-run (not re-embedded).
-    let r2 = bank.index_documents(vec![doc()], &[]).unwrap();
+    let r2 = bank.index_documents(vec![doc()], &[], false).unwrap();
     assert_eq!(
         r2.added.len() + r2.modified.len(),
         0,
         "unchanged hash should be skipped"
     );
     assert_eq!(r2.unchanged.len(), 1);
+
+    // (3) --force re-writes the SAME unchanged hash (the fix: force must honor
+    //     through to the embedding-write path, not be swallowed as unchanged).
+    let r3 = bank.index_documents(vec![doc()], &[], true).unwrap();
+    assert_eq!(
+        r3.added.len() + r3.modified.len(),
+        1,
+        "force must re-index an unchanged hash"
+    );
 }

@@ -369,6 +369,15 @@ impl Bank {
     pub fn repo_root(&self) -> &Path {
         &self.inner.config.repo_root
     }
+
+    /// All indexed `(path, content_hash)` pairs, as stored.
+    ///
+    /// A thin read-only view over the inner database, used by external
+    /// ingestion (e.g. `polaris-pro`) to skip re-ingesting unchanged sources.
+    pub fn document_hashes(&self) -> Result<Vec<(String, String)>> {
+        let db = self.inner.db.lock().expect("bank db poisoned");
+        db.get_all_document_hashes()
+    }
 }
 
 /// A set of banks searched as one fused result.

@@ -8,7 +8,7 @@ use crate::config::{IndexOpts, SearchOpts};
 use crate::db::{ChunkRecord, Database, DbStats, SearchResult};
 use crate::embedding::SharedEmbedding;
 use crate::error::{PolarisError, Result};
-use crate::indexer::{IndexReport, Indexer};
+use crate::indexer::{IndexReport, Indexer, WorkItem};
 use crate::search::SearchEngine;
 
 /// Configuration for opening a single bank.
@@ -58,6 +58,22 @@ impl Default for BankConfig {
             rrf_k: 60,
         }
     }
+}
+
+/// One document whose Markdown is supplied in memory rather than read from disk.
+///
+/// Fed to [`Bank::index_documents`] by an external ingestion crate (e.g. after
+/// converting a PDF/DOCX to Markdown). The caller owns discovery, conversion and
+/// hashing; the document is stored under its original `source_path`.
+pub struct InMemoryDoc {
+    /// Original source path, e.g. `docs/manual.pdf` (stored verbatim, not a temp path).
+    pub source_path: PathBuf,
+    /// Already-converted Markdown content.
+    pub markdown: String,
+    /// Caller-computed content hash, used for skip-unchanged detection.
+    pub hash: String,
+    /// Optional document title.
+    pub title: Option<String>,
 }
 
 /// A single bank: one indexed corpus with its own SQLite index.
@@ -267,10 +283,76 @@ impl Bank {
             }
         }
 
-        // 2. Changed files: delegate to index_files (preserves cross-file batching).
+        // 2. Changed files: delegate to the item-based pipeline (preserves cross-file batching).
         if !changed.is_empty() {
-            let sub = self.inner.indexer.index_files(&db, changed, false, false, None)?;
+            let items: Vec<WorkItem> = changed.iter().cloned().map(WorkItem::from_path).collect();
+            let sub = self
+                .inner
+                .indexer
+                .index_files_items(&db, &items, false, false, None)?;
             // Merge sub-report, preserving our own `removed` list.
+            report.added.extend(sub.added);
+            report.modified.extend(sub.modified);
+            report.unchanged.extend(sub.unchanged);
+            report.errors.extend(sub.errors);
+            report.total_chunks += sub.total_chunks;
+            report.total_bytes += sub.total_bytes;
+        }
+
+        report.elapsed = started.elapsed();
+        Ok(report)
+    }
+
+    /// Index already-generated Markdown supplied in memory, and delete `removed`
+    /// paths, through the same chunk→embed→store→skip-unchanged pipeline as
+    /// [`Bank::index_diff`] — nothing is read from disk.
+    ///
+    /// The caller owns discovery, conversion and hashing (see [`InMemoryDoc`]).
+    /// Each document is stored under its original `source_path`. Used by the
+    /// `polaris-pro` ingestion crate to feed converted PDFs/DOCX/etc. into the
+    /// pipeline without a temp file.
+    pub fn index_documents(
+        &self,
+        docs: Vec<InMemoryDoc>,
+        removed: &[PathBuf],
+    ) -> Result<IndexReport> {
+        let started = Instant::now();
+        let db = self.inner.db.lock().expect("bank db poisoned");
+        let mut report = IndexReport::default();
+
+        // 1. Removals: delete each document (cascades chunks + FTS + vec_chunks).
+        for path in removed {
+            let norm = match crate::indexer::normalise_path(path) {
+                Some(n) => n,
+                None => {
+                    report.errors.push((
+                        path.clone(),
+                        format!("non-UTF-8 path: {}", path.display()),
+                    ));
+                    continue;
+                }
+            };
+            match db.delete_document(&norm) {
+                Ok(_) => report.removed.push(path.clone()),
+                Err(e) => report.errors.push((path.clone(), e.to_string())),
+            }
+        }
+
+        // 2. Supplied docs → in-memory work items → shared Phase A/B/C pipeline.
+        if !docs.is_empty() {
+            let items: Vec<WorkItem> = docs
+                .into_iter()
+                .map(|d| WorkItem {
+                    path: d.source_path,
+                    content: Some(d.markdown),
+                    hash: Some(d.hash),
+                    title: d.title,
+                })
+                .collect();
+            let sub = self
+                .inner
+                .indexer
+                .index_files_items(&db, &items, false, false, None)?;
             report.added.extend(sub.added);
             report.modified.extend(sub.modified);
             report.unchanged.extend(sub.unchanged);

@@ -93,6 +93,31 @@ struct FileData {
     chunks: Vec<Chunk>,
 }
 
+/// A unit of work for the indexing pipeline.
+///
+/// `content`/`hash`/`title` supplied (`Some`) ⇒ used as-is, skipping the disk
+/// read / hashing / title-extraction — the seam used to feed already-generated
+/// Markdown from in-memory ingestion (e.g. a converted PDF). All `None` ⇒ read
+/// and hash from `path` on disk, the default file path.
+pub(crate) struct WorkItem {
+    pub path: PathBuf,
+    pub content: Option<String>,
+    pub hash: Option<String>,
+    pub title: Option<String>,
+}
+
+impl WorkItem {
+    /// An on-disk item: content, hash and title are read/derived from `path`.
+    pub(crate) fn from_path(path: PathBuf) -> Self {
+        Self {
+            path,
+            content: None,
+            hash: None,
+            title: None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public indexer entry point
 // ---------------------------------------------------------------------------
@@ -148,10 +173,12 @@ impl Indexer {
     /// Runs the same Phase A (parallel hash+chunk) → Phase B (cross-file
     /// batched embedding) → Phase C (single-transaction write) pipeline as
     /// `index_path`, preserving batching efficiency.
-    pub(crate) fn index_files(
+    /// Item-based core of the indexing pipeline. Each [`WorkItem`] either carries
+    /// pre-supplied content/hash (in-memory ingestion) or is read from disk.
+    pub(crate) fn index_files_items(
         &self,
         db: &Database,
-        paths: &[PathBuf],
+        items: &[WorkItem],
         force: bool,
         dry_run: bool,
         on_progress: Option<Box<dyn Fn(f32, &str) + Send + Sync>>,
@@ -181,9 +208,10 @@ impl Indexer {
             Error(PathBuf, String),
         }
 
-        let collect_results: Vec<CollectResult> = paths
+        let collect_results: Vec<CollectResult> = items
             .par_iter()
-            .map(|path| {
+            .map(|item| {
+                let path = &item.path;
                 let norm = match normalise_path(path) {
                     Some(n) => n,
                     None => {
@@ -194,27 +222,39 @@ impl Indexer {
                     }
                 };
 
-                let file_size_bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
-                if file_size_bytes > max_file_size {
-                    return CollectResult::Error(
-                        path.clone(),
-                        format!(
-                            "file size {} bytes exceeds max_file_size limit {} bytes",
-                            file_size_bytes, max_file_size
-                        ),
-                    );
+                // File-size guard applies only to on-disk reads. In-memory content
+                // is capped by the caller (see Pro's ingestion cap), so skip the stat.
+                if item.content.is_none() {
+                    let file_size_bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+                    if file_size_bytes > max_file_size {
+                        return CollectResult::Error(
+                            path.clone(),
+                            format!(
+                                "file size {} bytes exceeds max_file_size limit {} bytes",
+                                file_size_bytes, max_file_size
+                            ),
+                        );
+                    }
                 }
 
-                // Single read — used for both hashing and chunking.
-                let content = match std::fs::read_to_string(path) {
-                    Ok(c) => c,
-                    Err(e) => return CollectResult::Error(path.clone(), e.to_string()),
+                // Supplied content ⇒ use as-is; else single disk read (hash + chunk from it).
+                let content = match &item.content {
+                    Some(c) => c.clone(),
+                    None => match std::fs::read_to_string(path) {
+                        Ok(c) => c,
+                        Err(e) => return CollectResult::Error(path.clone(), e.to_string()),
+                    },
                 };
 
-                // Hash from in-memory bytes: no second file read.
-                let mut hasher = Sha256::new();
-                hasher.update(content.as_bytes());
-                let hash = hex::encode(hasher.finalize());
+                // Supplied hash ⇒ use as-is; else hash the in-memory bytes.
+                let hash = match &item.hash {
+                    Some(h) => h.clone(),
+                    None => {
+                        let mut hasher = Sha256::new();
+                        hasher.update(content.as_bytes());
+                        hex::encode(hasher.finalize())
+                    }
+                };
 
                 let is_new = !existing.contains_key(&norm);
                 let needs_index =
@@ -225,7 +265,8 @@ impl Indexer {
                 }
 
                 let file_size = content.len() as i64;
-                let title = extract_title(&content);
+                // Supplied title wins; fall back to the first H1 (unchanged disk behavior).
+                let title = item.title.clone().or_else(|| extract_title(&content));
                 let chunks = if dry_run {
                     vec![]
                 } else {
@@ -379,9 +420,10 @@ impl Indexer {
         // Populate report from collected file data.
         for fd in &file_data {
             report.total_chunks += fd.chunks.len();
-            if let Ok(meta) = fd.path.metadata() {
-                report.total_bytes += meta.len();
-            }
+            // ponytail: file_size is content.len() (== on-disk size for text files),
+            // so this is equivalent to the old metadata() stat but also correct for
+            // in-memory items whose path has no file to stat.
+            report.total_bytes += fd.file_size as u64;
             if fd.is_new {
                 report.added.push(fd.path.clone());
             } else {
@@ -472,8 +514,9 @@ impl Indexer {
             }
         }
 
-        // 5. Delegate Phase A → B → C to index_files.
-        let mut report = self.index_files(db, &discovered, force, dry_run, on_progress)?;
+        // 5. Delegate Phase A → B → C to the item-based pipeline (on-disk items).
+        let items: Vec<WorkItem> = discovered.into_iter().map(WorkItem::from_path).collect();
+        let mut report = self.index_files_items(db, &items, force, dry_run, on_progress)?;
 
         // 6. Merge removals into the final report.
         report.removed = removal_report.removed;
@@ -1136,5 +1179,94 @@ mod tests {
         };
         assert_eq!(report.added.len() + report.modified.len() + report.removed.len(), 3);
         assert_eq!(report.unchanged.len(), 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // WorkItem in-memory content seam (hermetic, no embedding engine)
+    // -----------------------------------------------------------------------
+    //
+    // These use `new_dry_run` (no ONNX download) and prove the collection-phase
+    // behavior of supplied content/hash: routing under the original path, the
+    // skip-unchanged decision, and that the file-size guard is bypassed for
+    // in-memory items. The chunk-writing path needs a real embedding engine and
+    // is covered by the ONNX-gated end-to-end test in `tests/index_documents.rs`.
+
+    #[test]
+    fn index_files_items_uses_supplied_content_under_original_path() {
+        crate::db::register_vec_extension();
+        let db = Database::open_in_memory(64, "test-model").unwrap();
+        let indexer = Indexer::new_dry_run(450, 200, 10 * 1024 * 1024);
+
+        // Path does NOT exist on disk — a passing run proves the disk read was skipped.
+        let items = vec![WorkItem {
+            path: PathBuf::from("docs/manual.pdf"),
+            content: Some("# Manual\n\nInstall via the setup wizard.".to_string()),
+            hash: Some("hash-v1".to_string()),
+            title: Some("Manual".to_string()),
+        }];
+
+        let report = indexer
+            .index_files_items(&db, &items, false, true, None)
+            .unwrap();
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert_eq!(report.added, vec![PathBuf::from("docs/manual.pdf")]);
+    }
+
+    #[test]
+    fn index_files_items_skips_unchanged_supplied_hash() {
+        crate::db::register_vec_extension();
+        let db = Database::open_in_memory(64, "test-model").unwrap();
+        // Seed a row as if "a.pdf" was already indexed at hash "h1".
+        db.insert_document("a.pdf", "h1", None, 4).unwrap();
+
+        let indexer = Indexer::new_dry_run(450, 200, 10 * 1024 * 1024);
+        let item = |h: &str| WorkItem {
+            path: PathBuf::from("a.pdf"),
+            content: Some("# A\n\nbody".to_string()),
+            hash: Some(h.to_string()),
+            title: None,
+        };
+
+        // Same hash ⇒ unchanged (skipped).
+        let r_same = indexer
+            .index_files_items(&db, &[item("h1")], false, true, None)
+            .unwrap();
+        assert_eq!(r_same.unchanged, vec![PathBuf::from("a.pdf")]);
+        assert!(r_same.added.is_empty() && r_same.modified.is_empty());
+
+        // Different hash ⇒ modified (re-index).
+        let r_diff = indexer
+            .index_files_items(&db, &[item("h2")], false, true, None)
+            .unwrap();
+        assert_eq!(r_diff.modified, vec![PathBuf::from("a.pdf")]);
+    }
+
+    #[test]
+    fn index_files_items_bypasses_size_guard_for_in_memory() {
+        crate::db::register_vec_extension();
+        let db = Database::open_in_memory(64, "test-model").unwrap();
+        // max_file_size = 8 bytes; supplied content far exceeds it but must NOT be rejected
+        // (the caller applies its own cap for in-memory ingestion).
+        let indexer = Indexer::new_dry_run(450, 200, 8);
+        let big = "# Big\n\n".to_string() + &"x".repeat(1000);
+        let items = vec![WorkItem {
+            path: PathBuf::from("big.pdf"),
+            content: Some(big),
+            hash: Some("h".to_string()),
+            title: None,
+        }];
+        let report = indexer
+            .index_files_items(&db, &items, false, true, None)
+            .unwrap();
+        assert!(
+            report.errors.is_empty(),
+            "size guard wrongly rejected in-memory content: {:?}",
+            report.errors
+        );
+        assert_eq!(report.added, vec![PathBuf::from("big.pdf")]);
     }
 }

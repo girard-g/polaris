@@ -9,7 +9,7 @@ pub mod indexer;
 pub mod paths;
 pub mod search;
 
-pub use bank::{Bank, BankConfig, BankSet};
+pub use bank::{Bank, BankConfig, BankSet, InMemoryDoc};
 pub use config::{IndexOpts, PolarisConfig, SearchOpts};
 pub use db::{
     ChunkRecord, Database, DbStats, LogSource, SavingsAggregate, SavingsBySource,

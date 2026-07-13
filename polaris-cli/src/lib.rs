@@ -58,6 +58,44 @@ pub struct Cli {
     command: Command,
 }
 
+impl Cli {
+    /// The parsed subcommand. Lets other crates (the Pro binary) route on the
+    /// command without exposing the private field.
+    pub fn command(&self) -> &Command {
+        &self.command
+    }
+
+    /// Resolve the effective [`PolarisConfig`] from the base config file plus
+    /// CLI overrides (`--config`, `--db`, `--dim`, `--model`), applying the same
+    /// model/dim clamp and validation the dispatcher uses. Shared with the Pro
+    /// binary so `polaris index` selects the same database in both builds.
+    pub fn resolve_config(&self) -> Result<PolarisConfig> {
+        let mut cfg = PolarisConfig::load(self.config.as_deref())?;
+
+        let mut dbs = self.db.iter().cloned();
+        let primary_db = dbs.next();
+        let extra_dbs: Vec<PathBuf> = dbs.collect();
+        cfg.apply_overrides(primary_db, self.dim, self.model.clone());
+        if !extra_dbs.is_empty() {
+            cfg.extra_db_paths = extra_dbs;
+        }
+
+        // If --model was given without --dim and the current dim exceeds the
+        // model's native maximum, clamp to the native dim so the user doesn't
+        // have to always pair --model with --dim manually.
+        if self.model.is_some() && self.dim.is_none() {
+            if let Ok(native) = polaris_core::embedding::native_dim_for(&cfg.model_id) {
+                if cfg.embedding_dim > native {
+                    cfg.embedding_dim = native;
+                }
+            }
+        }
+
+        cfg.validate()?;
+        Ok(cfg)
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Index markdown files from a path
@@ -274,28 +312,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         };
     }
 
-    let mut cfg = PolarisConfig::load(cli.config.as_deref())?;
-
-    let mut dbs = cli.db.into_iter();
-    let primary_db = dbs.next();
-    let extra_dbs: Vec<PathBuf> = dbs.collect();
-    cfg.apply_overrides(primary_db, cli.dim, cli.model.clone());
-    if !extra_dbs.is_empty() {
-        cfg.extra_db_paths = extra_dbs;
-    }
-
-    // If --model was given without --dim and the current dim exceeds the model's
-    // native maximum, clamp to the native dim so the user doesn't have to
-    // always pair --model with --dim manually.
-    if cli.model.is_some() && cli.dim.is_none() {
-        if let Ok(native) = polaris_core::embedding::native_dim_for(&cfg.model_id) {
-            if cfg.embedding_dim > native {
-                cfg.embedding_dim = native;
-            }
-        }
-    }
-
-    cfg.validate()?;
+    let cfg = cli.resolve_config()?;
 
     db::register_vec_extension();
 

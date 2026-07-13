@@ -67,3 +67,39 @@ fn index_path_still_purges_truly_deleted_files() {
         "deleted file was not purged"
     );
 }
+
+#[test]
+fn index_path_keeps_rows_when_root_is_relative() {
+    // The CLI passes whatever path the user typed straight through (e.g.
+    // `polaris index .` or `polaris index docs`), with no canonicalization.
+    // Stored paths are exactly what `WalkDir::new(root)` produced, so for a
+    // relative `root` they are relative too. Naively re-joining `root` onto an
+    // already root-prefixed stored path (`root.join(db_path)`) double-prefixes
+    // it into a nonexistent path and would wrongly purge a live row. Create
+    // the tempdir *inside* the current cwd (instead of chdir'ing, which would
+    // race other tests running in parallel in this process) so a genuinely
+    // relative root can be constructed.
+    register_vec_extension();
+    let cwd = std::env::current_dir().unwrap();
+    let tmp = tempfile::tempdir_in(&cwd).unwrap();
+    let root_abs = tmp.path();
+    let root_rel = root_abs.strip_prefix(&cwd).unwrap();
+
+    let pdf_path = root_abs.join("manual.pdf");
+    fs::write(&pdf_path, b"%PDF-1.4 fake").unwrap();
+
+    let db = Database::open_in_memory(64, "test-model").unwrap();
+    let norm = normalise_path(&root_rel.join("manual.pdf")).unwrap();
+    db.insert_document(&norm, "deadbeefhash", None, 13).unwrap();
+
+    let indexer = Indexer::new_dry_run(450, 200, 10 * 1024 * 1024);
+    indexer
+        .index_path(&db, root_rel, true, false, false, None)
+        .unwrap();
+
+    let hashes = db.get_all_document_hashes().unwrap();
+    assert!(
+        hashes.iter().any(|(p, _)| p == &norm),
+        "manual.pdf row was purged under a relative root even though the file exists on disk"
+    );
+}

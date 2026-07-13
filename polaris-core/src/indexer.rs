@@ -445,13 +445,22 @@ impl Indexer {
         // A row is removed only when its source file no longer exists on disk —
         // NOT merely because this run's discovery (currently `.md`-only) didn't
         // find it. Otherwise a markdown-only run would erase rows indexed by
-        // other means (e.g. Pro's PDF/code indexing). `Path::join` replaces the
-        // base when the joined path is itself absolute, so this resolves
-        // correctly whether stored paths are root-relative or absolute.
+        // other means (e.g. Pro's PDF/code indexing).
+        //
+        // Stored paths are exactly what `WalkDir::new(root)` produced (see
+        // `discover_markdown_files`/`normalise_path` above): if `root` is
+        // absolute the stored path is absolute; if `root` is relative (e.g.
+        // the CLI's `polaris index .`) the stored path is relative to the
+        // *current process's cwd*, same as `root` itself. So the stored path
+        // must be statted directly, not re-joined onto `root` — joining a
+        // second copy of `root` onto an already root-prefixed relative path
+        // (e.g. `root.join("docs/notes.md")` when `root == "docs"`) produces
+        // a nonexistent `docs/docs/notes.md` and would wrongly purge a live
+        // row. `Path::new(db_path)` is correct for both conventions since it
+        // resolves relative to the same cwd this whole call already uses.
         let mut removal_report = IndexReport::default();
         for db_path in existing.keys() {
-            let on_disk = root.join(db_path);
-            if !on_disk.exists() {
+            if !Path::new(db_path).exists() {
                 if dry_run {
                     removal_report.removed.push(PathBuf::from(db_path));
                 } else {

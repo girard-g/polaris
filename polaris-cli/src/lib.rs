@@ -622,7 +622,7 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: Outpu
         return Ok(());
     }
 
-    print!("{}", format_results_terminal(&results, query));
+    print!("{}", format_results_terminal(&results, &[], 0, query));
     Ok(())
 }
 

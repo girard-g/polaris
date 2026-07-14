@@ -192,7 +192,9 @@ pub fn refresh_and_pending() -> Option<String> {
         return None;
     }
     let cache = read_cache();
-    if should_refresh(&cache, now_unix()) {
+    // Skip the refresh child when there's no cache dir to write to — otherwise a
+    // sandbox with no resolvable cache root re-spawns a doomed child every call.
+    if cache_path().is_some() && should_refresh(&cache, now_unix()) {
         spawn_refresh();
     }
     pending_from(crate::update::current_version(), &cache)

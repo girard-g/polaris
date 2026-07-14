@@ -63,7 +63,7 @@ impl PolarisServer {
         }
     }
 
-    /// One-time session banner prefix, `""` after the first emission.
+    /// One-time session banner suffix, `""` after the first emission.
     fn session_banner(&self) -> String {
         crate::update_check::banner_once(&self.update_note, &self.note_shown)
     }

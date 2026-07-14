@@ -159,4 +159,13 @@ mod tests {
         assert!(out.contains("matched chunk"));
         assert!(!out.contains("context")); // no header when no window
     }
+
+    #[test]
+    fn none_window_falls_back_to_snippet() {
+        let results = vec![result("matched chunk")];
+        let windows = vec![None];
+        let out = format_results_terminal(&results, &windows, 1, "q");
+        assert!(out.contains("matched chunk")); // snippet rendered
+        assert!(!out.contains("context")); // no header for a None slot
+    }
 }

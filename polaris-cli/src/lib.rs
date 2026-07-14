@@ -123,6 +123,12 @@ pub enum Command {
         /// Output format
         #[arg(long, value_enum, default_value = "plain")]
         output: OutputFormat,
+        /// Expand each result into its reading-order context window
+        #[arg(short = 'C', long)]
+        context: bool,
+        /// Context window radius (neighbor chunks per side); used only with --context
+        #[arg(short = 'r', long, default_value = "1")]
+        radius: usize,
     },
 
     /// Expand a chunk into its reading-order context window (debug retrieval)
@@ -320,7 +326,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Index { path, no_recursive, force, dry_run } => {
             cmd_index(cfg, &path, !no_recursive, force, dry_run).await
         }
-        Command::Search { query, top_k, output } => cmd_search(cfg, &query, top_k, output).await,
+        Command::Search { query, top_k, output, context: _, radius: _ } => {
+            cmd_search(cfg, &query, top_k, output).await
+        }
         Command::Window { chunk_id, radius, max_chars } => {
             cmd_window(cfg, chunk_id, radius, max_chars).await
         }
@@ -1119,4 +1127,37 @@ pub fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::{Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn context_flag_keeps_query_positional() {
+        let cli =
+            Cli::try_parse_from(["polaris", "search", "my multi word query", "--context"]).unwrap();
+        match cli.command {
+            Command::Search { query, context, radius, top_k, .. } => {
+                assert_eq!(query, "my multi word query");
+                assert!(context);
+                assert_eq!(radius, 1); // default
+                assert_eq!(top_k, 5); // default, unaffected
+            }
+            _ => panic!("expected Search"),
+        }
+    }
+
+    #[test]
+    fn radius_defaults_and_short_flag_parse() {
+        let cli = Cli::try_parse_from(["polaris", "search", "q", "-C", "-r", "3"]).unwrap();
+        match cli.command {
+            Command::Search { context, radius, .. } => {
+                assert!(context);
+                assert_eq!(radius, 3);
+            }
+            _ => panic!("expected Search"),
+        }
+    }
 }

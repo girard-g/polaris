@@ -326,8 +326,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Index { path, no_recursive, force, dry_run } => {
             cmd_index(cfg, &path, !no_recursive, force, dry_run).await
         }
-        Command::Search { query, top_k, output, context: _, radius: _ } => {
-            cmd_search(cfg, &query, top_k, output).await
+        Command::Search { query, top_k, output, context, radius } => {
+            cmd_search(cfg, &query, top_k, output, context, radius).await
         }
         Command::Window { chunk_id, radius, max_chars } => {
             cmd_window(cfg, chunk_id, radius, max_chars).await
@@ -523,7 +523,14 @@ async fn cmd_index(
     Ok(())
 }
 
-async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: OutputFormat) -> Result<()> {
+async fn cmd_search(
+    cfg: PolarisConfig,
+    query: &str,
+    top_k: usize,
+    output: OutputFormat,
+    context: bool,
+    radius: usize,
+) -> Result<()> {
     let is_multi_db = !cfg.extra_db_paths.is_empty();
 
     let all_db_paths: Vec<PathBuf> = std::iter::once(cfg.db_path.clone())
@@ -622,7 +629,28 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: Outpu
         return Ok(());
     }
 
-    print!("{}", format_results_terminal(&results, &[], 0, query));
+    // Expand each result's reading-order window when --context is set.
+    // chunk ids resolve against the primary DB only, so multi-DB warns + skips.
+    let windows: Vec<Option<String>> = if context {
+        if is_multi_db {
+            eprintln!(
+                "  {}  --context is single-DB only; showing snippets instead",
+                style("⚠").yellow(),
+            );
+            Vec::new()
+        } else {
+            // Cheap: opens the sqlite index only, no embedding model load.
+            let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+            results
+                .iter()
+                .map(|r| db.chunk_window(r.chunk_id, radius, 2000).ok())
+                .collect()
+        }
+    } else {
+        Vec::new()
+    };
+
+    print!("{}", format_results_terminal(&results, &windows, radius, query));
     Ok(())
 }
 

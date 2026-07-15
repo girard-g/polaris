@@ -123,6 +123,12 @@ pub enum Command {
         /// Output format
         #[arg(long, value_enum, default_value = "plain")]
         output: OutputFormat,
+        /// Expand each result into its reading-order context window
+        #[arg(short = 'C', long)]
+        context: bool,
+        /// Context window radius (neighbor chunks per side); used only with --context
+        #[arg(short = 'r', long, default_value = "1")]
+        radius: usize,
     },
 
     /// Expand a chunk into its reading-order context window (debug retrieval)
@@ -320,7 +326,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Index { path, no_recursive, force, dry_run } => {
             cmd_index(cfg, &path, !no_recursive, force, dry_run).await
         }
-        Command::Search { query, top_k, output } => cmd_search(cfg, &query, top_k, output).await,
+        Command::Search { query, top_k, output, context, radius } => {
+            cmd_search(cfg, &query, top_k, output, context, radius).await
+        }
         Command::Window { chunk_id, radius, max_chars } => {
             cmd_window(cfg, chunk_id, radius, max_chars).await
         }
@@ -515,7 +523,14 @@ async fn cmd_index(
     Ok(())
 }
 
-async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: OutputFormat) -> Result<()> {
+async fn cmd_search(
+    cfg: PolarisConfig,
+    query: &str,
+    top_k: usize,
+    output: OutputFormat,
+    context: bool,
+    radius: usize,
+) -> Result<()> {
     let is_multi_db = !cfg.extra_db_paths.is_empty();
 
     let all_db_paths: Vec<PathBuf> = std::iter::once(cfg.db_path.clone())
@@ -614,7 +629,28 @@ async fn cmd_search(cfg: PolarisConfig, query: &str, top_k: usize, output: Outpu
         return Ok(());
     }
 
-    print!("{}", format_results_terminal(&results, query));
+    // Expand each result's reading-order window when --context is set.
+    // chunk ids resolve against the primary DB only, so multi-DB warns + skips.
+    let windows: Vec<Option<String>> = if context {
+        if is_multi_db {
+            eprintln!(
+                "  {}  --context is single-DB only; showing snippets instead",
+                style("⚠").yellow(),
+            );
+            Vec::new()
+        } else {
+            // Cheap: opens the sqlite index only, no embedding model load.
+            let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+            results
+                .iter()
+                .map(|r| db.chunk_window(r.chunk_id, radius, 2000).ok())
+                .collect()
+        }
+    } else {
+        Vec::new()
+    };
+
+    print!("{}", format_results_terminal(&results, &windows, radius, query));
     Ok(())
 }
 
@@ -1119,4 +1155,37 @@ pub fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::{Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn context_flag_keeps_query_positional() {
+        let cli =
+            Cli::try_parse_from(["polaris", "search", "my multi word query", "--context"]).unwrap();
+        match cli.command {
+            Command::Search { query, context, radius, top_k, .. } => {
+                assert_eq!(query, "my multi word query");
+                assert!(context);
+                assert_eq!(radius, 1); // default
+                assert_eq!(top_k, 5); // default, unaffected
+            }
+            _ => panic!("expected Search"),
+        }
+    }
+
+    #[test]
+    fn radius_defaults_and_short_flag_parse() {
+        let cli = Cli::try_parse_from(["polaris", "search", "q", "-C", "-r", "3"]).unwrap();
+        match cli.command {
+            Command::Search { context, radius, .. } => {
+                assert!(context);
+                assert_eq!(radius, 3);
+            }
+            _ => panic!("expected Search"),
+        }
+    }
 }

@@ -441,8 +441,10 @@ pub fn perform_search(
         cfg.rrf_k,
     );
 
+    // `.1` is the result; `.0` is the cross-bank cosine, unused here — the
+    // threshold below is deliberately against the raw RRF score.
     let results = search.search_raw(prompt, 1)?;
-    let Some(top) = results.into_iter().next() else {
+    let Some((_, top)) = results.into_iter().next() else {
         return Ok(None);
     };
 

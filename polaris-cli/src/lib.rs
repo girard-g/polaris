@@ -375,6 +375,18 @@ async fn dispatch(cli: Cli) -> Result<()> {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// Root that stored relative document paths resolve against.
+///
+/// The process cwd, not the database file's parent: stored relative paths are
+/// cwd-relative by construction, which is the same assumption the indexer's
+/// removal detection already makes when it stats them directly. Using the DB
+/// file's directory made the savings baseline resolve to nonexistent paths
+/// whenever `--db` pointed outside the corpus, so `polaris savings` reported
+/// zero tokens saved.
+fn corpus_root() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
 /// Emit a warning when extra `--db` flags are supplied to a write-only command.
 ///
 /// `pub` so the `polaris-pro` binary can print the identical warning from its
@@ -564,7 +576,7 @@ async fn cmd_search(
     let mut primary_bank: Option<polaris_core::Bank> = None;
     for (i, db_path) in all_db_paths.iter().enumerate() {
         let bank_cfg = polaris_core::BankConfig {
-            repo_root: db_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf(),
+            repo_root: corpus_root(),
             index_path: db_path.clone(),
             embedding_dim: cfg.embedding_dim,
             model_id: cfg.model_id.clone(),
@@ -714,10 +726,7 @@ async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     let embed = polaris_core::SharedEmbedding::load(&cfg.model_id, cfg.embedding_dim)?;
 
     let bank_cfg = polaris_core::BankConfig {
-        repo_root: cfg.db_path
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf(),
+        repo_root: corpus_root(),
         index_path: cfg.db_path.clone(),
         embedding_dim: cfg.embedding_dim,
         model_id: cfg.model_id.clone(),

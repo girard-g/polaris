@@ -32,7 +32,7 @@ impl<'a> SearchEngine<'a> {
     /// Pipeline: vector KNN + BM25 → RRF fusion → heading boost → MMR rerank.
     /// Scores are normalized to [0, 1] within this result set (top result = 1.0).
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
-        let scored = self.search_scored(query, top_k)?;
+        let (scored, _) = self.search_scored(query, top_k)?;
         let max_score = scored.iter().map(|(s, _)| *s).fold(0.0_f32, f32::max);
         Ok(scored
             .into_iter()
@@ -43,27 +43,35 @@ impl<'a> SearchEngine<'a> {
             .collect())
     }
 
-    /// Like [`search`], but returns raw (unnormalized) RRF scores alongside results.
+    /// Like [`search`], but returns `(similarity, result)` pairs where `result`
+    /// keeps its raw (unnormalized) RRF score.
     ///
-    /// Used by [`crate::bank::BankSet`] to fuse results from multiple banks before
-    /// applying a single cross-bank normalization pass.
-    pub fn search_raw(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
-        let scored = self.search_scored(query, top_k)?;
+    /// `similarity` is the cosine of the query against the chunk embedding.
+    /// [`crate::bank::BankSet`] merges banks on it because RRF scores are
+    /// rank-derived — `1/(rrf_k + rank)` sums encode a chunk's position within
+    /// its own bank, never its relevance, so two banks' rank-1 hits score within
+    /// ~0.0003 of each other no matter what they contain. Cosine is the one
+    /// signal that means the same thing in every bank.
+    pub fn search_raw(&self, query: &str, top_k: usize) -> Result<Vec<(f32, SearchResult)>> {
+        let (scored, query_embedding) = self.search_scored(query, top_k)?;
         Ok(scored
             .into_iter()
             .map(|(s, mut c)| {
+                let similarity = cosine_similarity(&query_embedding, &c.embedding);
                 c.score = s;
-                c.into_search_result()
+                (similarity, c.into_search_result())
             })
             .collect())
     }
 
-    /// Core retrieval pipeline returning `(raw_score, result)` pairs without normalization.
+    /// Core retrieval pipeline returning `(raw_score, result)` pairs without
+    /// normalization, plus the query embedding so callers can score candidates
+    /// against it without paying for a second forward pass.
     fn search_scored(
         &self,
         query: &str,
         top_k: usize,
-    ) -> Result<Vec<(f32, SearchResultWithEmbedding)>> {
+    ) -> Result<(Vec<(f32, SearchResultWithEmbedding)>, Vec<f32>)> {
         let query_embedding = self.embedding_engine.embed_query(query)?;
         let candidate_count = top_k * self.candidate_multiplier;
 
@@ -76,7 +84,7 @@ impl<'a> SearchEngine<'a> {
         let bm25_results = self.db.search_bm25(&sanitized_query, candidate_count).unwrap_or_default();
 
         if vector_results.is_empty() && bm25_results.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], query_embedding));
         }
 
         // 3. RRF score fusion.
@@ -92,7 +100,7 @@ impl<'a> SearchEngine<'a> {
         }
 
         if all_results.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], query_embedding));
         }
 
         // 5. Apply heading boost on top of RRF scores.
@@ -113,7 +121,7 @@ impl<'a> SearchEngine<'a> {
             .collect();
 
         // 6. MMR reranking.
-        Ok(mmr_rerank(boosted, top_k, self.mmr_lambda))
+        Ok((mmr_rerank(boosted, top_k, self.mmr_lambda), query_embedding))
     }
 
     /// Format search results as a markdown string (for CLI / MCP output).
@@ -142,19 +150,24 @@ impl<'a> SearchEngine<'a> {
 
 /// Sanitize a user query for safe use as an FTS5 query string.
 ///
-/// Strips FTS5 operator characters and leading dashes to prevent syntax errors
-/// when the user's query contains punctuation or special operators.
+/// Every whitespace-separated token becomes a quoted FTS5 string literal, so no
+/// character can reach the FTS5 parser as an operator. This closes the whole
+/// class of syntax errors rather than enumerating offending characters — the
+/// previous blocklist missed `.`, `,` and `/` and stripped only *leading* `-`,
+/// so ordinary queries raised errors that `search_scored` swallowed into an
+/// empty BM25 result, silently degrading hybrid search to vector-only.
+///
+/// Quoting also beats stripping the offending characters: removing `-` would
+/// turn `multi-tenant` into the single term `multitenant`, which matches
+/// nothing, whereas quoting makes it the phrase `multi tenant`.
 pub fn sanitize_fts5_query(query: &str) -> String {
-    // Remove characters with special meaning in FTS5 query syntax.
-    const FTS5_SPECIAL: &[char] = &['"', '(', ')', '*', '+', '^', ':', '{', '}', '~'];
     query
         .split_whitespace()
-        .map(|token| {
-            let t: String = token.chars().filter(|c| !FTS5_SPECIAL.contains(c)).collect();
-            // Strip leading dashes (NOT operator in FTS5).
-            t.trim_start_matches('-').to_string()
-        })
-        .filter(|t| !t.is_empty())
+        // A token with no alphanumeric content tokenizes to nothing; an empty
+        // phrase is not a useful FTS5 term.
+        .filter(|t| t.chars().any(char::is_alphanumeric))
+        // Inside an FTS5 string literal, `"` is escaped by doubling it.
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -498,22 +511,54 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn sanitize_plain_query_unchanged() {
-        assert_eq!(sanitize_fts5_query("rust programming"), "rust programming");
+    fn sanitize_quotes_every_token() {
+        assert_eq!(
+            sanitize_fts5_query("rust programming"),
+            "\"rust\" \"programming\""
+        );
     }
 
     #[test]
-    fn sanitize_strips_fts5_operators() {
-        // Quotes, parens, wildcards, etc. are removed.
-        assert_eq!(sanitize_fts5_query("\"hello world\""), "hello world");
-        assert_eq!(sanitize_fts5_query("foo* AND bar"), "foo AND bar");
-        assert_eq!(sanitize_fts5_query("(one OR two)"), "one OR two");
+    fn sanitize_neutralises_fts5_operators() {
+        // Quoted, so the parser sees terms rather than operators.
+        assert_eq!(sanitize_fts5_query("foo* bar"), "\"foo*\" \"bar\"");
+        assert_eq!(sanitize_fts5_query("(one two)"), "\"(one\" \"two)\"");
     }
 
     #[test]
-    fn sanitize_strips_leading_dashes() {
-        assert_eq!(sanitize_fts5_query("-bad token"), "bad token");
-        assert_eq!(sanitize_fts5_query("---triple"), "triple");
+    fn sanitize_escapes_embedded_quotes() {
+        // Inside a string literal, `"` is escaped by doubling.
+        assert_eq!(sanitize_fts5_query("say\"hi"), "\"say\"\"hi\"");
+    }
+
+    #[test]
+    fn sanitize_keeps_dashes_inside_tokens() {
+        // Stripping `-` would yield `multitenant`, which matches nothing; the
+        // quoted form tokenizes to the phrase `multi tenant`.
+        assert_eq!(sanitize_fts5_query("-bad token"), "\"-bad\" \"token\"");
+        assert_eq!(sanitize_fts5_query("---triple"), "\"---triple\"");
+    }
+
+    /// The four punctuation cases that previously raised FTS5 syntax errors and
+    /// silently degraded hybrid search to vector-only.
+    #[test]
+    fn sanitize_punctuated_queries_are_quoted() {
+        assert_eq!(
+            sanitize_fts5_query("multi-tenant setup"),
+            "\"multi-tenant\" \"setup\""
+        );
+        assert_eq!(
+            sanitize_fts5_query("polaris.search tool"),
+            "\"polaris.search\" \"tool\""
+        );
+        assert_eq!(
+            sanitize_fts5_query("hello, world docs"),
+            "\"hello,\" \"world\" \"docs\""
+        );
+        assert_eq!(
+            sanitize_fts5_query("docs/cli reference"),
+            "\"docs/cli\" \"reference\""
+        );
     }
 
     #[test]
@@ -523,7 +568,8 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_all_special_chars_returns_empty() {
+    fn sanitize_drops_tokens_without_alphanumerics() {
         assert_eq!(sanitize_fts5_query("\"\"()"), "");
+        assert_eq!(sanitize_fts5_query("--- ok ***"), "\"ok\"");
     }
 }

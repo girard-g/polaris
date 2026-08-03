@@ -199,11 +199,17 @@ impl Bank {
         engine.search(query, opts.top_k)
     }
 
-    /// Like [`search`], but returns raw (unnormalized) RRF scores.
+    /// Like [`search`], but returns `(similarity, result)` pairs where `result`
+    /// keeps its raw (unnormalized) RRF score.
     ///
-    /// Used by [`BankSet`] to fuse results from multiple banks with a single
-    /// cross-bank normalization pass instead of per-bank normalization.
-    pub(crate) fn search_raw(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
+    /// Used by [`BankSet`], which merges banks on `similarity` — the cosine of
+    /// the query against the chunk — because RRF scores are only comparable
+    /// within a single bank. See [`crate::search::SearchEngine::search_raw`].
+    pub(crate) fn search_raw(
+        &self,
+        query: &str,
+        opts: SearchOpts,
+    ) -> Result<Vec<(f32, SearchResult)>> {
         let db = self.inner.db.lock().expect("bank db poisoned");
         let engine = self.engine(&db);
         engine.search_raw(query, opts.top_k)
@@ -430,33 +436,40 @@ impl BankSet {
     }
 
     /// Search across all mounted banks. Per-bank results are tagged with
-    /// `source_db = label`, fused by score, truncated to `top_k`, and renormalized.
+    /// `source_db = label`, merged by query-chunk cosine similarity, truncated
+    /// to `top_k`, and renormalized.
     pub fn search(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
-        let mut all_results: Vec<SearchResult> = Vec::new();
+        let mut scored: Vec<(f32, SearchResult)> = Vec::new();
 
         for (label, bank) in &self.banks {
-            // Use raw (unnormalized) scores so that cross-bank comparison is
-            // meaningful. Per-bank normalization would collapse every bank's top
-            // result to 1.0, making the merged sort arbitrary.
             let mut results = bank.search_raw(query, opts.clone())?;
-            for r in &mut results {
+            for (_, r) in &mut results {
                 r.source_db = Some(label.clone());
             }
-            all_results.extend(results);
+            scored.extend(results);
         }
 
-        // Sort by score descending, take top_k.
-        all_results.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+        // Merge on cosine similarity, not on the RRF score. RRF is rank-derived
+        // — `1/(rrf_k + rank)` summed over the two retrievers — so it says where
+        // a chunk placed inside its own bank and nothing about how it compares
+        // to another bank's chunks. Sorting the merged set by it interleaves the
+        // banks by rank, handing roughly half of `top_k` to whichever other bank
+        // happens to be mounted, however irrelevant. Cosine against the query is
+        // the one signal that means the same thing in every bank.
+        scored.sort_by(|(a, _), (b, _)| {
+            b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
         });
-        all_results.truncate(opts.top_k);
+        scored.truncate(opts.top_k);
 
-        // Renormalize so max score = 1.0 across the merged result set.
-        if let Some(max_score) = all_results.first().map(|r| r.score) {
-            if max_score > 0.0 {
-                for r in &mut all_results {
-                    r.score /= max_score;
-                }
+        let mut all_results: Vec<SearchResult> = scored.into_iter().map(|(_, r)| r).collect();
+
+        // Renormalize so max score = 1.0 across the merged result set. The max
+        // must be computed, not read off `first()`: the set is ordered by
+        // similarity now, so the leading entry need not carry the top RRF score.
+        let max_score = all_results.iter().map(|r| r.score).fold(0.0_f32, f32::max);
+        if max_score > 0.0 {
+            for r in &mut all_results {
+                r.score /= max_score;
             }
         }
 

@@ -578,7 +578,7 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
     let mcp_report = merge_mcp_json(existing_mcp.as_deref(), &binary_path)?;
     match (&mcp_report.new_content, &mcp_report.action) {
         (Some(content), McpAction::Created) => {
-            std::fs::write(&mcp_path, content)?;
+            write_atomic(&mcp_path, content)?;
             println!(
                 "  {}  Created .mcp.json (polaris → {})",
                 style("✓").green(),
@@ -586,7 +586,7 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
             );
         }
         (Some(content), McpAction::Updated) => {
-            std::fs::write(&mcp_path, content)?;
+            write_atomic(&mcp_path, content)?;
             println!(
                 "  {}  Updated .mcp.json (polaris → {})",
                 style("✓").green(),
@@ -607,7 +607,7 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
     let gi_report = ensure_gitignore_entries(existing_gitignore.as_deref());
     match gi_report.new_content {
         Some(ref content) if existing_gitignore.is_none() => {
-            std::fs::write(&gitignore_path, content)?;
+            write_atomic(&gitignore_path, content)?;
             println!(
                 "  {}  Created .gitignore ({} entries)",
                 style("✓").green(),
@@ -615,7 +615,7 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
             );
         }
         Some(ref content) => {
-            std::fs::write(&gitignore_path, content)?;
+            write_atomic(&gitignore_path, content)?;
             println!(
                 "  {}  Updated .gitignore (added {}, {} already present)",
                 style("✓").green(),
@@ -651,14 +651,14 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
             })?;
             match (&report.new_content, &report.action) {
                 (Some(content), AgentAction::Created) => {
-                    std::fs::write(&agent_path, content)?;
+                    write_atomic(&agent_path, content)?;
                     println!(
                         "  {}  Created {filename} (polaris block)",
                         style("✓").green(),
                     );
                 }
                 (Some(content), AgentAction::Updated) => {
-                    std::fs::write(&agent_path, content)?;
+                    write_atomic(&agent_path, content)?;
                     println!(
                         "  {}  Updated {filename} (polaris block refreshed)",
                         style("✓").green(),
@@ -688,14 +688,14 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
         let report = merge_claude_settings(existing_settings.as_deref(), &binary_path, search_hook)?;
         match (&report.new_content, &report.action) {
             (Some(content), ClaudeSettingsAction::Created) => {
-                std::fs::write(&settings_path, content)?;
+                write_atomic(&settings_path, content)?;
                 println!(
                     "  {}  Created .claude/settings.json (auto-index hook)",
                     style("✓").green(),
                 );
             }
             (Some(content), ClaudeSettingsAction::Updated) => {
-                std::fs::write(&settings_path, content)?;
+                write_atomic(&settings_path, content)?;
                 println!(
                     "  {}  Updated .claude/settings.json (auto-index hook)",
                     style("✓").green(),
@@ -733,7 +733,7 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
         if let Some(existing) = read_optional(&settings_path)? {
             match remove_polaris_hooks_from_settings(&existing)? {
                 Some(new_content) => {
-                    std::fs::write(&settings_path, new_content)?;
+                    write_atomic(&settings_path, &new_content)?;
                     println!(
                         "  {}  Removed polaris hook from .claude/settings.json",
                         style("✓").green(),
@@ -869,9 +869,40 @@ fn read_optional(path: &Path) -> Result<Option<String>> {
     }
 }
 
+/// Write `content` to `path` atomically: temp sibling, then rename.
+///
+/// `setup` rewrites files it does not own — the user's `.claude/settings.json`
+/// holds their hooks and permission allowlist, and nothing here takes a backup.
+/// A plain `fs::write` truncates in place, so a crash, Ctrl-C or ENOSPC between
+/// truncate and write leaves invalid JSON and silently loses that config. The
+/// temp file is a sibling so the rename stays on one filesystem, which is what
+/// makes it atomic.
+fn write_atomic(path: &Path, content: &str) -> Result<()> {
+    let tmp = path.with_extension("polaris-tmp");
+    std::fs::write(&tmp, content).map_err(PolarisError::Io)?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        PolarisError::Io(e)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_atomic_creates_and_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        write_atomic(&path, "{\"a\":1}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+
+        // Replaces rather than appends, and leaves no temp file behind.
+        write_atomic(&path, "{\"b\":2}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"b\":2}");
+        assert!(!path.with_extension("polaris-tmp").exists());
+    }
 
     #[test]
     fn gitignore_creates_when_absent() {

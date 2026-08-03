@@ -118,6 +118,37 @@ impl Default for PolarisConfig {
     }
 }
 
+/// Shared range checks for the tuning parameters, so every entry point that
+/// builds a config (`PolarisConfig` from the CLI, `BankConfig` from a library
+/// caller) enforces one rule rather than its own copy of the bounds.
+pub fn validate_params(
+    model_id: &str,
+    embedding_dim: usize,
+    max_chunk_tokens: usize,
+    chunk_overlap_chars: usize,
+) -> Result<()> {
+    let native_dim = crate::embedding::native_dim_for(model_id)?;
+
+    if embedding_dim < 64 || embedding_dim > native_dim {
+        return Err(PolarisError::Config(format!(
+            "embedding_dim must be in [64, {native_dim}] for model '{model_id}', got {embedding_dim}"
+        )));
+    }
+    if max_chunk_tokens == 0 {
+        return Err(PolarisError::Config(
+            "max_chunk_tokens must be greater than 0".to_string(),
+        ));
+    }
+    if chunk_overlap_chars >= max_chunk_tokens * 4 {
+        return Err(PolarisError::Config(format!(
+            "chunk_overlap_chars ({}) must be less than max_chunk_tokens * 4 ({})",
+            chunk_overlap_chars,
+            max_chunk_tokens * 4,
+        )));
+    }
+    Ok(())
+}
+
 impl PolarisConfig {
     /// Load config following the priority chain:
     /// explicit path > ./polaris.toml > ~/.config/polaris/polaris.toml > defaults
@@ -155,27 +186,12 @@ impl PolarisConfig {
 
     /// Validate config values, returning a descriptive error if any are out of range.
     pub fn validate(&self) -> Result<()> {
-        let native_dim = crate::embedding::native_dim_for(&self.model_id)?;
-
-        if self.embedding_dim < 64 || self.embedding_dim > native_dim {
-            return Err(PolarisError::Config(format!(
-                "embedding_dim must be in [64, {}] for model '{}', got {}",
-                native_dim, self.model_id, self.embedding_dim
-            )));
-        }
-        if self.max_chunk_tokens == 0 {
-            return Err(PolarisError::Config(
-                "max_chunk_tokens must be greater than 0".to_string(),
-            ));
-        }
-        if self.chunk_overlap_chars >= self.max_chunk_tokens * 4 {
-            return Err(PolarisError::Config(format!(
-                "chunk_overlap_chars ({}) must be less than max_chunk_tokens * 4 ({})",
-                self.chunk_overlap_chars,
-                self.max_chunk_tokens * 4,
-            )));
-        }
-        Ok(())
+        validate_params(
+            &self.model_id,
+            self.embedding_dim,
+            self.max_chunk_tokens,
+            self.chunk_overlap_chars,
+        )
     }
 
     /// Apply CLI overrides (None means "not specified", keep existing value).

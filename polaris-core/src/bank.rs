@@ -60,6 +60,22 @@ impl Default for BankConfig {
     }
 }
 
+impl BankConfig {
+    /// Validate the tuning parameters against the same rules the CLI applies.
+    ///
+    /// Called by [`Bank::open`], so a library caller building a `BankConfig`
+    /// directly gets the actionable config error rather than an opaque failure
+    /// deep in the insert path.
+    pub fn validate(&self) -> Result<()> {
+        crate::config::validate_params(
+            &self.model_id,
+            self.embedding_dim,
+            self.max_chunk_tokens,
+            self.chunk_overlap_chars,
+        )
+    }
+}
+
 /// One document whose Markdown is supplied in memory rather than read from disk.
 ///
 /// Fed to [`Bank::index_documents`] by an external ingestion crate (e.g. after
@@ -101,6 +117,11 @@ impl Bank {
     /// `embed` provides the shared embedding model. The model is not reloaded;
     /// cloning a [`SharedEmbedding`] is cheap (just an `Arc` clone).
     pub fn open(cfg: BankConfig, embed: SharedEmbedding) -> Result<Self> {
+        // Validate before creating anything: an out-of-range embedding_dim
+        // would otherwise create the vec0 table at that dimension and fail
+        // every later insert with an opaque sqlite vector-dimension error.
+        cfg.validate()?;
+
         crate::db::register_vec_extension();
 
         // Create parent directory for the index file if it does not exist.
@@ -444,6 +465,32 @@ impl BankSet {
         let _ = &self.embed;
 
         Ok(all_results)
+    }
+}
+
+#[cfg(test)]
+mod tests_config_validate {
+    use super::*;
+
+    #[test]
+    fn rejects_dim_above_model_native() {
+        // nomic-embed-text-v1.5 is 768-native; 1024 would create a vec0 table
+        // that every later insert fails against.
+        let cfg = BankConfig { embedding_dim: 1024, ..Default::default() };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("embedding_dim"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_zero_max_chunk_tokens() {
+        let cfg = BankConfig { max_chunk_tokens: 0, ..Default::default() };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("max_chunk_tokens"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn accepts_defaults() {
+        assert!(BankConfig::default().validate().is_ok());
     }
 }
 

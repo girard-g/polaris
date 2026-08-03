@@ -436,8 +436,11 @@ impl BankSet {
     }
 
     /// Search across all mounted banks. Per-bank results are tagged with
-    /// `source_db = label`, merged by query-chunk cosine similarity, truncated
-    /// to `top_k`, and renormalized.
+    /// `source_db = label`, ordered, truncated to `top_k`, and renormalized.
+    ///
+    /// With more than one bank the ordering key is the query-chunk cosine, the
+    /// only signal comparable across banks; with a single bank it stays the
+    /// within-bank RRF score.
     pub fn search(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
         let mut scored: Vec<(f32, SearchResult)> = Vec::new();
 
@@ -449,23 +452,39 @@ impl BankSet {
             scored.extend(results);
         }
 
-        // Merge on cosine similarity, not on the RRF score. RRF is rank-derived
-        // — `1/(rrf_k + rank)` summed over the two retrievers — so it says where
-        // a chunk placed inside its own bank and nothing about how it compares
-        // to another bank's chunks. Sorting the merged set by it interleaves the
-        // banks by rank, handing roughly half of `top_k` to whichever other bank
-        // happens to be mounted, however irrelevant. Cosine against the query is
-        // the one signal that means the same thing in every bank.
-        scored.sort_by(|(a, _), (b, _)| {
-            b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        scored.truncate(opts.top_k);
+        if self.banks.len() > 1 {
+            // Merge on cosine similarity, not on the RRF score. RRF is
+            // rank-derived — `1/(rrf_k + rank)` summed over the two retrievers —
+            // so it says where a chunk placed inside its own bank and nothing
+            // about how it compares to another bank's chunks. Sorting the merged
+            // set by it interleaves the banks by rank, handing roughly half of
+            // `top_k` to whichever other bank happens to be mounted, however
+            // irrelevant. Cosine against the query is the one signal that means
+            // the same thing in every bank.
+            scored.sort_by(|(a, _), (b, _)| {
+                b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            scored.truncate(opts.top_k);
+            // Report the value the merge actually ordered on, so the printed
+            // score column is monotonic with the printed order.
+            for (similarity, r) in &mut scored {
+                r.score = *similarity;
+            }
+        } else {
+            // One bank: there is nothing to merge, and RRF scores are perfectly
+            // comparable within a bank. Keep the existing ordering rather than
+            // reshuffling the dominant path.
+            scored.sort_by(|(_, a), (_, b)| {
+                b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            scored.truncate(opts.top_k);
+        }
 
         let mut all_results: Vec<SearchResult> = scored.into_iter().map(|(_, r)| r).collect();
 
-        // Renormalize so max score = 1.0 across the merged result set. The max
-        // must be computed, not read off `first()`: the set is ordered by
-        // similarity now, so the leading entry need not carry the top RRF score.
+        // Renormalize so max score = 1.0 across the merged result set. Computed
+        // rather than read off `first()`: cosine can be negative, so a set with
+        // no positive score must be left alone instead of divided by its head.
         let max_score = all_results.iter().map(|r| r.score).fold(0.0_f32, f32::max);
         if max_score > 0.0 {
             for r in &mut all_results {

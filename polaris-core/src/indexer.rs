@@ -942,6 +942,17 @@ fn make_spinner_or_hidden(msg: &str, silent: bool) -> ProgressBar {
 /// root `.` as `.`, so a naive `{root}/` prefix test never matches for
 /// `polaris index .` — the case this handles explicitly.
 fn path_under_root(stored: &str, root: &str) -> bool {
+    // `normalise_path` leaves a trailing slash in place, and shell completion
+    // hands us `docs/` far more often than `docs`. Without this the prefix
+    // becomes `docs//` and matches nothing — the same silent no-purge failure
+    // as the `.` case below. Trimming is skipped for the filesystem root so
+    // `/` keeps matching absolute rows rather than collapsing to the cwd case.
+    let trimmed = root.trim_end_matches('/');
+    if trimmed.is_empty() && !root.is_empty() {
+        // `root` was "/" (or "//"): every absolute row is under it.
+        return Path::new(stored).is_absolute();
+    }
+    let root = trimmed;
     if root == "." || root.is_empty() {
         // Root is the cwd: every relative row is under it. Absolute rows are
         // not — they belong to a different indexing convention, and purging
@@ -988,6 +999,21 @@ mod tests {
     #[test]
     fn path_under_root_dot_excludes_absolute_rows() {
         assert!(!path_under_root("/abs/docs/x.md", "."));
+    }
+
+    #[test]
+    fn path_under_root_tolerates_trailing_slash() {
+        // Shell completion produces `docs/`; without trimming the prefix
+        // becomes `docs//` and removal detection silently never fires.
+        assert!(path_under_root("docs/x.md", "docs/"));
+        assert!(path_under_root("docs", "docs/"));
+        assert!(!path_under_root("other/x.md", "docs/"));
+    }
+
+    #[test]
+    fn path_under_root_fs_root_matches_absolute() {
+        assert!(path_under_root("/abs/x.md", "/"));
+        assert!(!path_under_root("rel/x.md", "/"));
     }
 
     #[test]

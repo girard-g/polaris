@@ -308,10 +308,16 @@ async fn dispatch(cli: Cli) -> Result<()> {
     // a broken polaris.toml never surfaces a Claude Code warning banner.
     if let Command::Hook { subcommand } = &cli.command {
         db::register_vec_extension();
-        let cfg = PolarisConfig::load(cli.config.as_deref()).unwrap_or_else(|e| {
-            eprintln!("polaris hook: config load failed, using defaults: {e}");
-            PolarisConfig::default()
-        });
+        // Validate here too, not just in `resolve_config`: an unvalidated
+        // `max_chunk_tokens = 0` reaches the chunker and loops forever, and
+        // this is a blocking PostToolUse hook — it would hang the session on
+        // every markdown write. Defaults are valid, so falling back is safe.
+        let cfg = PolarisConfig::load(cli.config.as_deref())
+            .and_then(|c| c.validate().map(|()| c))
+            .unwrap_or_else(|e| {
+                eprintln!("polaris hook: config unusable, using defaults: {e}");
+                PolarisConfig::default()
+            });
         return match subcommand {
             HookCommand::Index => hook::run_index(&cfg),
             HookCommand::Search => hook::run_search(&cfg),
@@ -531,6 +537,12 @@ async fn cmd_search(
     context: bool,
     radius: usize,
 ) -> Result<()> {
+    // Clamp as the MCP tool does (mcp/server.rs) — docs/configuration.md
+    // documents max_top_k as the maximum accepted by search commands, and an
+    // unclamped -k blows past SQLITE_MAX_VARIABLE_NUMBER or triggers an O(n²)
+    // MMR rerank over the whole corpus.
+    let top_k = top_k.min(cfg.max_top_k);
+
     let is_multi_db = !cfg.extra_db_paths.is_empty();
 
     let all_db_paths: Vec<PathBuf> = std::iter::once(cfg.db_path.clone())

@@ -185,6 +185,21 @@ impl PolarisServer {
         let opts = polaris_core::IndexOpts { recursive, force, dry_run: false };
 
         let result = tokio::task::spawn_blocking(move || {
+            // Agents reach the MCP server without a shared cwd, so they
+            // naturally pass an absolute path — but `polaris setup` indexes
+            // relative ones, and document identity is the raw path string.
+            // Left alone, the two spellings produce disjoint `documents` rows
+            // and the older set becomes unreachable by removal detection.
+            // `under_indexed_root` already reconciles this on the hook path;
+            // reuse it, falling back to the raw path on a first-ever index.
+            let indexed: Vec<String> = bank
+                .document_hashes()
+                .map(|v| v.into_iter().map(|(p, _)| p).collect())
+                .unwrap_or_default();
+            let cwd = std::env::current_dir().ok();
+            let path = crate::hook::under_indexed_root(&path, cwd.as_deref(), &indexed)
+                .unwrap_or(path);
+
             let index_result = match on_progress {
                 Some(cb) => bank.index_path_with_progress(&path, opts, cb),
                 None => bank.index_path(&path, opts),

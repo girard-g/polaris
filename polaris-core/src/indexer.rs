@@ -475,11 +475,10 @@ impl Indexer {
 
         // 2. Load existing hashes from DB, filtered to documents under this root.
         let root_norm = normalise_path(root).unwrap_or_default();
-        let root_prefix = format!("{root_norm}/");
         let existing: HashMap<String, String> = db
             .get_all_document_hashes()?
             .into_iter()
-            .filter(|(path, _)| path == &root_norm || path.starts_with(&root_prefix))
+            .filter(|(path, _)| path_under_root(path, &root_norm))
             .collect();
 
         // 3. Handle removals (before delegating to index_files so the DB is clean).
@@ -937,6 +936,21 @@ fn make_spinner_or_hidden(msg: &str, silent: bool) -> ProgressBar {
     }
 }
 
+/// True when `stored` (a normalised DB path) lies under the normalised index root.
+///
+/// `normalise_path` strips a leading `./` from stored file paths but leaves the
+/// root `.` as `.`, so a naive `{root}/` prefix test never matches for
+/// `polaris index .` — the case this handles explicitly.
+fn path_under_root(stored: &str, root: &str) -> bool {
+    if root == "." || root.is_empty() {
+        // Root is the cwd: every relative row is under it. Absolute rows are
+        // not — they belong to a different indexing convention, and purging
+        // them from an unrelated directory's `polaris index .` would be wrong.
+        return !Path::new(stored).is_absolute();
+    }
+    stored == root || stored.starts_with(&format!("{root}/"))
+}
+
 /// Normalise to a forward-slash path string for stable DB storage.
 pub fn normalise_path(path: &Path) -> Option<String> {
     path.to_str().map(|s| {
@@ -958,6 +972,32 @@ fn extract_title(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // path_under_root
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn path_under_root_dot_matches_relative_rows() {
+        // The `polaris index .` case: stored keys have had their leading "./"
+        // stripped, so a `"./"` prefix test would never match.
+        assert!(path_under_root("docs/x.md", "."));
+        assert!(path_under_root("README.md", "."));
+    }
+
+    #[test]
+    fn path_under_root_dot_excludes_absolute_rows() {
+        assert!(!path_under_root("/abs/docs/x.md", "."));
+    }
+
+    #[test]
+    fn path_under_root_named_root_unchanged() {
+        assert!(path_under_root("docs/x.md", "docs"));
+        assert!(path_under_root("docs", "docs"));
+        assert!(!path_under_root("other/x.md", "docs"));
+        // A sibling sharing a name prefix must not match.
+        assert!(!path_under_root("docs2/x.md", "docs"));
+    }
 
     // -----------------------------------------------------------------------
     // extract_title

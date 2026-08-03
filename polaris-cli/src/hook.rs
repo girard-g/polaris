@@ -306,6 +306,23 @@ pub fn perform_index(
         return Ok(HookIndexReport { indexed_new_or_modified: 0 });
     }
 
+    // Switch to the payload's cwd BEFORE touching the DB: with the default
+    // relative `db_path` ("polaris.db"), opening first would resolve it against
+    // whatever directory the hook happened to fire from and — since
+    // `init_schema` creates a schema when none exists — silently materialise a
+    // stray empty DB there, after which every gate below reports "nothing to
+    // do" forever. `perform_search` already orders it this way.
+    let _cwd_guard = cwd.and_then(|c| {
+        let prev = std::env::current_dir().ok()?;
+        std::env::set_current_dir(c).ok()?;
+        Some(CwdGuard(prev))
+    });
+
+    // Don't create an empty DB if no index exists yet.
+    if !cfg.db_path.exists() {
+        return Ok(HookIndexReport { indexed_new_or_modified: 0 });
+    }
+
     // `register_vec_extension` is called by `main.rs::run` before dispatching,
     // so we don't re-register here.
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
@@ -317,19 +334,6 @@ pub fn perform_index(
     let indexed_paths: Vec<String> = indexed.into_iter().map(|(p, _)| p).collect();
     let Some(target_for_indexer) = under_indexed_root(file_path, cwd, &indexed_paths) else {
         return Ok(HookIndexReport { indexed_new_or_modified: 0 });
-    };
-
-    // If the matched form is relative, the indexer's WalkDir will resolve it
-    // against the process CWD. Set CWD to the payload's cwd so it points at
-    // the project root. The RAII guard restores the prior CWD on return.
-    let _cwd_guard = if !target_for_indexer.is_absolute() {
-        cwd.and_then(|c| {
-            let prev = std::env::current_dir().ok()?;
-            std::env::set_current_dir(c).ok()?;
-            Some(CwdGuard(prev))
-        })
-    } else {
-        None
     };
 
     // TODO(perf): EmbeddingEngine::new loads the ONNX model (~140 MB resident,

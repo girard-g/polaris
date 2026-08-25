@@ -123,13 +123,11 @@ pub fn merge_claude_settings(
 ) -> Result<ClaudeSettingsReport> {
     use serde_json::{json, Map, Value};
 
-    // POSIX shell quoting (single-quotes) so spaces in the path survive
-    // Claude Code's shell parsing on macOS/Linux. Windows behaviour is
-    // unverified — see docs/mcp-server.md "Known limitations".
-    // `is_polaris_owned` uses the matching `shell_words::split` to recover
-    // the original tokens.
+    // Platform-appropriate quoting so spaces in the path survive Claude Code's
+    // shell parsing. `is_polaris_owned` uses `shell_words::split` to recover
+    // the original tokens, and both forms round-trip through it.
     let bin_str = binary_path.to_string_lossy();
-    let polaris_command = format!("{} hook index", shell_words::quote(&bin_str));
+    let polaris_command = format!("{} hook index", quote_hook_arg(&bin_str));
     let canonical_block = json!({
         "matcher": POLARIS_POST_TOOL_USE_MATCHER,
         "hooks": [
@@ -204,7 +202,7 @@ pub fn merge_claude_settings(
     // entries from UserPromptSubmit, so omitting this block effectively removes
     // the search hook when the user re-runs setup without --search-hook.
     if search_hook {
-        let search_command = format!("{} hook search", shell_words::quote(&bin_str));
+        let search_command = format!("{} hook search", quote_hook_arg(&bin_str));
         let search_block = json!({
             "hooks": [
                 { "type": "command", "command": search_command }
@@ -304,6 +302,29 @@ pub fn remove_polaris_hooks_from_settings(existing: &str) -> Result<Option<Strin
     Ok(Some(new_content_str + "\n"))
 }
 
+/// Quote a hook command argument for the shell Claude Code dispatches hooks
+/// through: a POSIX shell on macOS/Linux, `cmd.exe` on Windows.
+///
+/// POSIX single-quoting is wrong on Windows twice over: `cmd.exe` does not
+/// strip single quotes, and leaving the path *unquoted* round-trips badly
+/// through `shell_words::split` (`C:\tools\...` collapses to `C:tools...`,
+/// backslash eaten as an escape). Double-quoting unconditionally fixes both.
+fn quote_hook_arg(path: &str) -> String {
+    if cfg!(windows) {
+        quote_windows(path)
+    } else {
+        shell_words::quote(path).into_owned()
+    }
+}
+
+/// `cmd.exe` quoting: wrap unconditionally in double quotes. Windows filenames
+/// cannot contain `"`, so there is nothing to escape. POSIX double-quote rules
+/// treat `\t`, `\P` etc. as literal, so `shell_words::split` recovers the path
+/// unchanged and `is_polaris_owned` keeps working on either platform.
+fn quote_windows(path: &str) -> String {
+    format!("\"{path}\"")
+}
+
 /// Returns true if the given hook entry's `command` is a polaris-owned
 /// `polaris hook ...` invocation. Two requirements:
 ///   1. The first shell-parsed token's basename is `polaris` or
@@ -315,8 +336,11 @@ pub fn remove_polaris_hooks_from_settings(existing: &str) -> Result<Option<Strin
 ///      are user-owned and stay untouched.
 ///
 /// Uses `shell_words::split` to honor the same quoting we apply in
-/// `merge_claude_settings`. A command string we can't shell-parse is treated
-/// as not-ours (conservative: leave the user's odd entry alone).
+/// `merge_claude_settings`. Both quoting styles `quote_hook_arg` can emit
+/// round-trip through it, including a double-quoted Windows path, so an entry
+/// written on one platform is still recognized on another. A command string we
+/// can't shell-parse is treated as not-ours (conservative: leave the user's odd
+/// entry alone).
 fn is_polaris_owned(entry: &serde_json::Value) -> bool {
     let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) else {
         return false;
@@ -328,12 +352,11 @@ fn is_polaris_owned(entry: &serde_json::Value) -> bool {
     let Some(first) = iter.next() else {
         return false;
     };
-    let basename_matches = std::path::Path::new(&first)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s == "polaris" || s == "polaris.exe")
-        .unwrap_or(false);
-    if !basename_matches {
+    // Split on both separators rather than `Path::file_name`: a settings file
+    // written by a Windows install carries backslash paths, which a Unix host
+    // treats as one unsegmented component.
+    let basename = first.rsplit(['/', '\\']).next().unwrap_or(first.as_str());
+    if basename != "polaris" && basename != "polaris.exe" {
         return false;
     }
     iter.next().as_deref() == Some("hook")
@@ -1799,4 +1822,52 @@ second
             docs,
         );
     }
+
+    #[test]
+    fn quote_windows_double_quotes_and_survives_shell_words_split() {
+        // The Windows hook command must satisfy two consumers at once:
+        // `cmd.exe`, which honors double quotes but not POSIX single quotes,
+        // and `is_polaris_owned`, which parses with `shell_words::split`.
+        // Host-gated `cfg!(windows)` means CI on Linux never runs the Windows
+        // branch of `quote_hook_arg`, so assert on the pure function.
+        for path in [
+            r"C:\Program Files\polaris\polaris.exe",
+            r"C:\Users\John Doe\AppData\Local\Programs\Polaris\polaris.exe",
+            r"C:\tools\polaris\polaris.exe",
+        ] {
+            let quoted = quote_windows(path);
+            assert_eq!(quoted, format!("\"{path}\""));
+            let cmd = format!("{quoted} hook index");
+            let tokens = shell_words::split(&cmd)
+                .unwrap_or_else(|e| panic!("shell_words could not parse {cmd}: {e}"));
+            assert_eq!(tokens, vec![path.to_string(), "hook".into(), "index".into()]);
+        }
+    }
+
+    #[test]
+    fn windows_quoted_hook_command_is_recognized_as_polaris_owned() {
+        // A `.claude/settings.json` written by a Windows install must be
+        // reconcilable from any host: re-running setup has to strip it rather
+        // than stack a second entry beside it.
+        let existing = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "\"C:\\Users\\John Doe\\AppData\\Local\\Programs\\Polaris\\polaris.exe\" hook index" }
+        ]
+      }
+    ]
+  }
+}"#;
+        let new_content = remove_polaris_hooks_from_settings(existing)
+            .unwrap()
+            .expect("Windows-quoted hook entry should be recognized and removed");
+        let parsed: serde_json::Value = serde_json::from_str(&new_content).unwrap();
+        let post = parsed["hooks"]["PostToolUse"].as_array().unwrap();
+        assert!(post.is_empty(), "matcher block should be pruned, got {post:?}");
+    }
+
+
 }

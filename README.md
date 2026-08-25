@@ -89,7 +89,17 @@ curl -fsSL https://raw.githubusercontent.com/girard-g/polaris/main/install.sh | 
 
 Downloads the latest release binary and installs it to `~/.local/bin` (or `/usr/local/bin` with `--system`). Run `polaris update` later to upgrade in place.
 
-Windows: build from source (see below).
+### Install (Windows)
+
+The `curl | bash` installer is POSIX-only — no WSL or Git Bash needed, use the native binary. In PowerShell:
+
+```powershell
+mkdir "$env:LOCALAPPDATA\Programs\Polaris" -Force
+irm https://github.com/girard-g/polaris/releases/latest/download/polaris-windows-x86_64.exe -OutFile "$env:LOCALAPPDATA\Programs\Polaris\polaris.exe"
+[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ";$env:LOCALAPPDATA\Programs\Polaris", 'User')
+```
+
+Open a new terminal (the current one holds a stale `PATH`) and check `polaris --version`. `polaris update` self-updates in place from there. Avoid `setx` for the `PATH` edit — it truncates at 1024 characters.
 
 ### Install from source
 
@@ -98,7 +108,7 @@ cargo build --release
 # binary at: ./target/release/polaris
 ```
 
-For Windows or any platform where the `curl | bash` install does not have a release asset, build from source.
+For any platform without a published release asset (Linux aarch64, macOS x86_64), build from source.
 
 ### First search
 
@@ -108,7 +118,7 @@ polaris index ./docs
 polaris search "your first query"
 ```
 
-The first search downloads the embedding model (~137 MB) to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux). See [Configuration → Model Caching](docs/configuration.md#model-caching) for the full resolution order and the `POLARIS_CACHE_DIR` override.
+The first search downloads the embedding model (~137 MB) to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux, `%LOCALAPPDATA%\polaris\models\` on Windows). See [Configuration → Model Caching](docs/configuration.md#model-caching) for the full resolution order and the `POLARIS_CACHE_DIR` override.
 
 ## Usage
 

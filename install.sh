@@ -57,8 +57,10 @@ detect_asset() {
 ASSET="$(detect_asset)" || {
     cat >&2 <<EOF
 error: unsupported platform: $(uname -s)-$(uname -m).
-Polaris release binaries are published for Linux x86_64 and macOS Apple Silicon.
-Build from source instead: https://github.com/${REPO}#install-from-source
+This script is POSIX-only; it publishes Linux x86_64 and macOS Apple Silicon.
+On Windows, install the native binary from PowerShell instead of a POSIX shell:
+  https://github.com/${REPO}#install-windows
+Otherwise build from source: https://github.com/${REPO}#install-from-source
 EOF
     exit 1
 }

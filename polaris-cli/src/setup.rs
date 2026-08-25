@@ -1088,6 +1088,17 @@ second
         PathBuf::from("/usr/local/bin/polaris")
     }
 
+    /// Shell-parse a written hook command back into its tokens.
+    ///
+    /// The command is quoted for the host's hook shell — `shell-words` on
+    /// macOS/Linux, double quotes on Windows — so asserting on the raw string
+    /// makes a test that only passes on the platform it was written for.
+    /// Assert on what the quoting is *for* instead: the tokens `is_polaris_owned`
+    /// recovers. That holds on either host.
+    fn hook_tokens(cmd: &str) -> Vec<String> {
+        shell_words::split(cmd).unwrap_or_else(|e| panic!("unparseable hook command {cmd}: {e}"))
+    }
+
     #[test]
     fn mcp_creates_when_absent() {
         let report = merge_mcp_json(None, &bin()).unwrap();
@@ -1294,8 +1305,7 @@ second
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["matcher"], "Write|Edit|MultiEdit");
         let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
-        assert!(cmd.starts_with("/usr/local/bin/polaris"));
-        assert!(cmd.ends_with("hook index"));
+        assert_eq!(hook_tokens(cmd), ["/usr/local/bin/polaris", "hook", "index"]);
     }
 
     #[test]
@@ -1375,7 +1385,7 @@ second
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["matcher"], "Write|Edit|MultiEdit");
         let cmd = blocks[0]["hooks"][0]["command"].as_str().unwrap();
-        assert!(cmd.starts_with("/usr/local/bin/polaris"));
+        assert_eq!(hook_tokens(cmd), ["/usr/local/bin/polaris", "hook", "index"]);
     }
 
     #[test]

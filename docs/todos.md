@@ -49,15 +49,25 @@ damage — removal is confined to directories the current walk actually entered
 
 - **Same-named sibling.** `polaris index docs` run where a *different* `docs/`
   exists still lines up with rows from the indexed one, and files absent here
-  are purged. Indexing by absolute path (`polaris index /proj/docs`) is exact
-  and immune.
-- **Deleted directory leaves stale rows.** Remove an indexed subtree outright
-  and a later `polaris index .` no longer purges its rows, since the walk
-  can't enter a directory that's gone. Re-running against that path directly
-  (`polaris index /proj/docs`) cleans them.
+  are purged.
+- **A deleted directory's rows are unreachable.** Remove an indexed subtree
+  outright and nothing purges its rows, because the walk can't enter a
+  directory that's gone. Nor is there a command that can: switching to an
+  absolute root doesn't help — rows stored relative never match an absolute
+  prefix, so that run can't see them at all and would write a duplicate,
+  absolute-spelled row set for the same files (the duplication
+  `under_indexed_root` exists to prevent). Rebuilding the index is the only
+  cleanup.
 
-The real fix is cwd-independent identity: store absolute paths, or record the
-indexing cwd alongside each row. Both are DB migrations, deferred.
+There is no rule that recovers directory-level removal here: from the wrong
+cwd, "`docs/` is missing" and "`docs/` was deleted" are the same observation,
+and every relaxation that readmits the second readmits the first — which is
+the wipe. So with relative storage, **file-level deletions inside a walked
+directory are the only removals detection can catch.**
+
+That makes cwd-independent identity a requirement rather than deferred polish:
+store absolute paths, or record the indexing cwd alongside each row. Both are
+DB migrations.
 
 ### An unreadable directory reads as empty
 

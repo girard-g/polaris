@@ -1171,6 +1171,19 @@ mod tests {
     }
 
     #[test]
+    fn purge_candidate_accepts_keys_from_a_real_walk() {
+        // The gate is only as good as the two normalisations agreeing: dir keys
+        // from `discover_markdown_files` and `parent_dir_key` of a stored row.
+        // The hand-built sets above can't catch a mismatch, and the tempdir walk
+        // below uses an absolute root, where `purge_candidate` returns early.
+        // Cargo runs tests with cwd = crate root, so walk `.` for real keys.
+        let d = discover_markdown_files(Path::new("."), true);
+        assert!(purge_candidate("src/indexer.rs", ".", &d.visited_dirs));
+        assert!(purge_candidate("Cargo.toml", ".", &d.visited_dirs));
+        assert!(!purge_candidate("no_such_dir/x.md", ".", &d.visited_dirs));
+    }
+
+    #[test]
     fn discover_records_only_directories_it_entered() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();

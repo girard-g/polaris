@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -462,7 +462,7 @@ impl Indexer {
 
         // 1. Discover .md files (with a spinner).
         let discover_spinner = make_spinner_or_hidden("Discovering markdown files…", on_progress.is_some());
-        let discovered = discover_markdown_files(root, recursive);
+        let Discovery { files: discovered, visited_dirs } = discover_markdown_files(root, recursive);
         discover_spinner.finish_and_clear();
         match &on_progress {
             None => eprintln!(
@@ -478,7 +478,7 @@ impl Indexer {
         let existing: HashMap<String, String> = db
             .get_all_document_hashes()?
             .into_iter()
-            .filter(|(path, _)| path_under_root(path, &root_norm))
+            .filter(|(path, _)| purge_candidate(path, &root_norm, &visited_dirs))
             .collect();
 
         // 3. Handle removals (before delegating to index_files so the DB is clean).
@@ -499,6 +499,9 @@ impl Indexer {
         // a nonexistent `docs/docs/notes.md` and would wrongly purge a live
         // row. `Path::new(db_path)` is correct for both conventions since it
         // resolves relative to the same cwd this whole call already uses.
+        //
+        // That statting is only sound for rows that belong to *this* cwd,
+        // which is what `purge_candidate` establishes before we get here.
         let mut removal_report = IndexReport::default();
         for db_path in existing.keys() {
             if !Path::new(db_path).exists() {
@@ -901,20 +904,43 @@ fn split_by_word(
 // File utilities
 // ---------------------------------------------------------------------------
 
-fn discover_markdown_files(root: &Path, recursive: bool) -> Vec<PathBuf> {
+/// What a single walk of the index root turned up: the markdown files to
+/// index, and the directories the walk actually *descended into*. The latter
+/// is what lets removal detection tell a stale row from a row that simply
+/// belongs to another working directory — see `purge_candidate`.
+struct Discovery {
+    files: Vec<PathBuf>,
+    visited_dirs: HashSet<String>,
+}
+
+fn discover_markdown_files(root: &Path, recursive: bool) -> Discovery {
     let walker = if recursive {
         WalkDir::new(root)
     } else {
         WalkDir::new(root).max_depth(1)
     };
 
-    walker
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.path().to_path_buf())
-        .filter(|p| p.extension().map(|ext| ext == "md").unwrap_or(false))
-        .collect()
+    let mut files = Vec::new();
+    let mut visited_dirs = HashSet::new();
+
+    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+        let ty = entry.file_type();
+        if ty.is_dir() {
+            // A non-recursive walk yields depth-1 directories but never enters
+            // them, so only the root counts as visited. Recording a directory
+            // we didn't read would claim knowledge we don't have and let its
+            // rows be purged.
+            if recursive || entry.depth() == 0 {
+                if let Some(norm) = normalise_path(entry.path()) {
+                    visited_dirs.insert(dir_key(&norm));
+                }
+            }
+        } else if ty.is_file() && entry.path().extension().map(|ext| ext == "md").unwrap_or(false) {
+            files.push(entry.path().to_path_buf());
+        }
+    }
+
+    Discovery { files, visited_dirs }
 }
 
 /// Returns a configured spinner, or a hidden no-op bar when `silent` is true.
@@ -960,6 +986,58 @@ fn path_under_root(stored: &str, root: &str) -> bool {
         return !Path::new(stored).is_absolute();
     }
     stored == root || stored.starts_with(&format!("{root}/"))
+}
+
+/// True when `stored` may be considered for removal by this indexing run.
+///
+/// `path_under_root` compares *strings*. For a relative root that proves
+/// nothing about which working directory the row was written from: a run of
+/// `polaris index docs` (or `polaris index .`) from an unrelated cwd matches
+/// rows belonging to a different tree entirely, and the removal loop then
+/// stats them against the wrong cwd and deletes every one that doesn't
+/// resolve. With `.` as the root that is the whole index.
+///
+/// So for a relative root, additionally require that the row's parent
+/// directory is one this walk actually descended into. A row from another cwd
+/// names a directory we never entered, and is left alone.
+///
+/// ponytail: this shrinks the damage rather than ending it — a same-named
+/// sibling (`/other/docs` while `/proj/docs` is what's indexed) still lines
+/// up. The real fix is cwd-independent identity: store absolute paths, or
+/// record the indexing cwd alongside each row. Until then, an absolute root
+/// (`polaris index /proj/docs`) is exact and always safe.
+fn purge_candidate(stored: &str, root: &str, visited_dirs: &HashSet<String>) -> bool {
+    if !path_under_root(stored, root) {
+        return false;
+    }
+    if Path::new(root).is_absolute() {
+        // Absolute roots and absolute rows are cwd-independent; the prefix
+        // match is proof of identity on its own.
+        return true;
+    }
+    visited_dirs.contains(&parent_dir_key(stored))
+}
+
+/// Canonical set key for a directory path already run through `normalise_path`:
+/// no trailing slash, and the cwd spelled `.` rather than the empty string.
+/// Both sides of the `visited_dirs` comparison must go through this.
+fn dir_key(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    if path.starts_with('/') { "/".to_string() } else { ".".to_string() }
+}
+
+/// `dir_key` of the parent of a stored document path. Stored paths always use
+/// forward slashes (`normalise_path`), so this splits on `/` rather than going
+/// through `Path`, whose parsing differs by platform.
+fn parent_dir_key(stored: &str) -> String {
+    match stored.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(i) => dir_key(&stored[..i]),
+        None => ".".to_string(),
+    }
 }
 
 /// Normalise to a forward-slash path string for stable DB storage.
@@ -1023,6 +1101,96 @@ mod tests {
         assert!(!path_under_root("other/x.md", "docs"));
         // A sibling sharing a name prefix must not match.
         assert!(!path_under_root("docs2/x.md", "docs"));
+    }
+
+    // -----------------------------------------------------------------------
+    // purge_candidate
+    // -----------------------------------------------------------------------
+
+    fn dirs(entries: &[&str]) -> HashSet<String> {
+        entries.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn purge_candidate_dot_root_spares_rows_from_another_cwd() {
+        // The wipe: rows written from /proj (`docs/a.md`) while `polaris index .`
+        // runs from /proj/docs. Every relative row is "under" `.`, and the
+        // removal loop stats them against the wrong cwd — so they must not be
+        // admitted in the first place. This walk never entered a `docs/`.
+        let visited = dirs(&["."]);
+        assert!(!purge_candidate("docs/a.md", ".", &visited));
+        assert!(!purge_candidate("docs/deep/b.md", ".", &visited));
+    }
+
+    #[test]
+    fn purge_candidate_dot_root_admits_rows_from_this_cwd() {
+        // Same cwd: a deleted `docs/a.md` still has to be purgeable, otherwise
+        // the fix trades a wipe for an index that never shrinks.
+        let visited = dirs(&[".", "docs"]);
+        assert!(purge_candidate("docs/a.md", ".", &visited));
+        assert!(purge_candidate("README.md", ".", &visited));
+    }
+
+    #[test]
+    fn purge_candidate_named_relative_root_spares_rows_from_another_cwd() {
+        // Same bug class without a `.` anywhere: `polaris index docs` from a cwd
+        // that has no `docs/` of its own.
+        let visited = dirs(&["."]);
+        assert!(!purge_candidate("docs/a.md", "docs", &visited));
+    }
+
+    #[test]
+    fn purge_candidate_absolute_root_needs_no_visit() {
+        // Absolute roots are cwd-independent, so the prefix match stands alone —
+        // including for a root directory that has been deleted outright, which
+        // yields no visited dirs at all.
+        let visited = dirs(&[]);
+        assert!(purge_candidate("/proj/docs/a.md", "/proj/docs", &visited));
+        assert!(!purge_candidate("/other/docs/a.md", "/proj/docs", &visited));
+    }
+
+    #[test]
+    fn purge_candidate_keeps_path_under_root_exclusions() {
+        let visited = dirs(&[".", "docs", "docs2"]);
+        assert!(!purge_candidate("docs2/a.md", "docs", &visited));
+        assert!(!purge_candidate("/abs/a.md", ".", &visited));
+    }
+
+    #[test]
+    fn dir_key_normalises_cwd_and_root_spellings() {
+        // Both sides of the visited-dirs comparison run through these; if they
+        // disagree on one spelling the gate silently stops purging anything.
+        assert_eq!(dir_key("docs/"), "docs");
+        assert_eq!(dir_key("."), ".");
+        assert_eq!(dir_key(""), ".");
+        assert_eq!(dir_key("/"), "/");
+        assert_eq!(parent_dir_key("README.md"), ".");
+        assert_eq!(parent_dir_key("docs/a.md"), "docs");
+        assert_eq!(parent_dir_key("/a.md"), "/");
+        assert_eq!(parent_dir_key("/proj/docs/a.md"), "/proj/docs");
+    }
+
+    #[test]
+    fn discover_records_only_directories_it_entered() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("top.md"), "# Top").unwrap();
+        std::fs::write(dir.path().join("sub/nested.md"), "# Nested").unwrap();
+
+        let root_key = dir_key(&normalise_path(dir.path()).unwrap());
+        let sub_key = dir_key(&normalise_path(&dir.path().join("sub")).unwrap());
+
+        let deep = discover_markdown_files(dir.path(), true);
+        assert_eq!(deep.files.len(), 2);
+        assert!(deep.visited_dirs.contains(&root_key));
+        assert!(deep.visited_dirs.contains(&sub_key));
+
+        // Non-recursive sees `sub/` but never reads it, so its rows stay
+        // off-limits to the purge.
+        let shallow = discover_markdown_files(dir.path(), false);
+        assert_eq!(shallow.files.len(), 1);
+        assert!(shallow.visited_dirs.contains(&root_key));
+        assert!(!shallow.visited_dirs.contains(&sub_key));
     }
 
     // -----------------------------------------------------------------------

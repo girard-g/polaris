@@ -1,5 +1,25 @@
 # TODOs & Roadmap
 
+## Open Bugs
+
+None known.
+
+### ~~🔴 CRITICAL — `polaris index .` can silently wipe the entire index~~ ✓ Fixed
+
+`path_under_root` admitted *every* relative row when the root normalised to
+`.`, and the removal loop then statted each one against the current process
+cwd — so rows indexed from a different cwd didn't resolve and were deleted,
+silently. `purge_candidate` (`polaris-core/src/indexer.rs`) now gates the
+candidate set: for a **relative** root a row is only eligible for removal if
+its parent directory is one this walk actually descended into. A row from
+another cwd names a directory we never entered, so it survives. Absolute
+roots are cwd-independent and keep the plain prefix match.
+
+The gate applies to all relative roots, not just `.` — the same wipe was
+reachable without a `.` anywhere (`polaris index docs` from a cwd whose own
+`docs/` holds different files). Introduced by `8761f98` + `eb3b436`, never
+reached `main`.
+
 ## Known Limitations (v1)
 
 These are accepted constraints for the initial release, documented for transparency.
@@ -19,6 +39,33 @@ The `Arc<Mutex<Database>>` design serializes all tool calls through a single mut
 ### No non-markdown formats
 
 Only `.md` files are indexed. Plain `.txt`, `.rst`, code files, and PDFs are ignored.
+
+### Document identity is cwd-dependent for relative roots
+
+A row indexed from a relative root stores a path relative to the *indexing*
+cwd, and nothing records which cwd that was. `purge_candidate` narrows the
+damage — removal is confined to directories the current walk actually entered
+— but two residuals remain:
+
+- **Same-named sibling.** `polaris index docs` run where a *different* `docs/`
+  exists still lines up with rows from the indexed one, and files absent here
+  are purged. Indexing by absolute path (`polaris index /proj/docs`) is exact
+  and immune.
+- **Deleted directory leaves stale rows.** Remove an indexed subtree outright
+  and a later `polaris index .` no longer purges its rows, since the walk
+  can't enter a directory that's gone. Re-running against that path directly
+  (`polaris index /proj/docs`) cleans them.
+
+The real fix is cwd-independent identity: store absolute paths, or record the
+indexing cwd alongside each row. Both are DB migrations, deferred.
+
+### An unreadable directory reads as empty
+
+`discover_markdown_files` drops `WalkDir` errors (`filter_map(|e| e.ok())`), so
+a directory that fails to open — permissions, a broken mount — is
+indistinguishable from one holding no markdown. Its rows are then statted,
+fail, and get purged. Pre-existing; the fix is to surface walk errors into
+`IndexReport::errors` and skip removal for any subtree that errored.
 
 ### Chunk byte offsets are approximate
 

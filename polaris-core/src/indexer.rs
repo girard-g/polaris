@@ -976,14 +976,14 @@ fn path_under_root(stored: &str, root: &str) -> bool {
     let trimmed = root.trim_end_matches('/');
     if trimmed.is_empty() && !root.is_empty() {
         // `root` was "/" (or "//"): every absolute row is under it.
-        return Path::new(stored).is_absolute();
+        return is_absolute_key(stored);
     }
     let root = trimmed;
     if root == "." || root.is_empty() {
         // Root is the cwd: every relative row is under it. Absolute rows are
         // not — they belong to a different indexing convention, and purging
         // them from an unrelated directory's `polaris index .` would be wrong.
-        return !Path::new(stored).is_absolute();
+        return !is_absolute_key(stored);
     }
     stored == root || stored.starts_with(&format!("{root}/"))
 }
@@ -1010,7 +1010,7 @@ fn purge_candidate(stored: &str, root: &str, visited_dirs: &HashSet<String>) -> 
     if !path_under_root(stored, root) {
         return false;
     }
-    if Path::new(root).is_absolute() {
+    if is_absolute_key(root) {
         // Absolute roots and absolute rows are cwd-independent; the prefix
         // match is proof of identity on its own.
         return true;
@@ -1027,6 +1027,24 @@ fn dir_key(path: &str) -> String {
         return trimmed.to_string();
     }
     if path.starts_with('/') { "/".to_string() } else { ".".to_string() }
+}
+
+/// True when a `normalise_path`-style key is absolute.
+///
+/// `Path::is_absolute` is platform-dependent — on Windows `/abs/x.md` has a
+/// root but no prefix, so it reports `false` and every absoluteness decision
+/// below flips. These keys are all forward-slash strings by construction, so
+/// decide it in that convention: a leading `/` (POSIX, and UNC once
+/// normalised) or a drive prefix like `C:/`.
+fn is_absolute_key(key: &str) -> bool {
+    if key.starts_with('/') {
+        return true;
+    }
+    let mut chars = key.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(c), Some(':'), Some('/')) if c.is_ascii_alphabetic()
+    )
 }
 
 /// `dir_key` of the parent of a stored document path. Stored paths always use
@@ -1077,6 +1095,9 @@ mod tests {
     #[test]
     fn path_under_root_dot_excludes_absolute_rows() {
         assert!(!path_under_root("/abs/docs/x.md", "."));
+        // Windows spelling: without the drive-letter case this reads as
+        // relative and the wipe this branch fixes comes straight back.
+        assert!(!path_under_root("C:/abs/docs/x.md", "."));
     }
 
     #[test]
@@ -1147,6 +1168,7 @@ mod tests {
         let visited = dirs(&[]);
         assert!(purge_candidate("/proj/docs/a.md", "/proj/docs", &visited));
         assert!(!purge_candidate("/other/docs/a.md", "/proj/docs", &visited));
+        assert!(purge_candidate("C:/proj/docs/a.md", "C:/proj/docs", &visited));
     }
 
     #[test]

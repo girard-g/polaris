@@ -251,6 +251,8 @@ mod tests {
         // `max_chunk_tokens * 4` used to overflow here: a debug-build panic
         // instead of a config error.
         assert!(validate_params("nomic-embed-text-v1.5", 512, usize::MAX, 200).is_ok());
+        // …and saturating must not quietly disable the bound it guards.
+        assert!(validate_params("nomic-embed-text-v1.5", 512, 10, 40).is_err());
     }
 
     #[test]

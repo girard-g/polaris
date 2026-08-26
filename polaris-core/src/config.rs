@@ -139,11 +139,12 @@ pub fn validate_params(
             "max_chunk_tokens must be greater than 0".to_string(),
         ));
     }
-    if chunk_overlap_chars >= max_chunk_tokens * 4 {
+    // Saturating: `max_chunk_tokens` is unbounded above, and a nonsense config
+    // value near `usize::MAX` would otherwise panic here in debug builds.
+    let max_overlap = max_chunk_tokens.saturating_mul(4);
+    if chunk_overlap_chars >= max_overlap {
         return Err(PolarisError::Config(format!(
-            "chunk_overlap_chars ({}) must be less than max_chunk_tokens * 4 ({})",
-            chunk_overlap_chars,
-            max_chunk_tokens * 4,
+            "chunk_overlap_chars ({chunk_overlap_chars}) must be less than max_chunk_tokens * 4 ({max_overlap})"
         )));
     }
     Ok(())
@@ -244,6 +245,13 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+
+    #[test]
+    fn validate_params_survives_absurd_chunk_size() {
+        // `max_chunk_tokens * 4` used to overflow here: a debug-build panic
+        // instead of a config error.
+        assert!(validate_params("nomic-embed-text-v1.5", 512, usize::MAX, 200).is_ok());
+    }
 
     #[test]
     fn default_values_correct() {

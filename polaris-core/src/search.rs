@@ -30,15 +30,22 @@ impl<'a> SearchEngine<'a> {
     /// Search for the `top_k` most relevant chunks for `query`.
     ///
     /// Pipeline: vector KNN + BM25 → RRF fusion → heading boost → MMR rerank.
-    /// Scores are normalized to [0, 1] within this result set (top result = 1.0).
+    /// Ordering comes from that pipeline; the reported `score` is the
+    /// query-chunk cosine, an absolute measure of how well the chunk matches.
+    ///
+    /// Results were previously normalised by the per-call maximum, which made
+    /// the top hit read 1.000 by construction — it said "best of this set",
+    /// never "good", so a query the corpus had nothing to say about still came
+    /// back looking certain. Callers that must decide whether to *use* a result
+    /// (the MCP tool, the auto-search hook) need a number that survives leaving
+    /// the result set, and cosine is the one the pipeline already computes.
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
-        let (scored, _) = self.search_scored(query, top_k)?;
-        let max_score = scored.iter().map(|(s, _)| *s).fold(0.0_f32, f32::max);
-        Ok(scored
+        Ok(self
+            .search_raw(query, top_k)?
             .into_iter()
-            .map(|(s, mut c)| {
-                c.score = if max_score > 0.0 { s / max_score } else { 0.0 };
-                c.into_search_result()
+            .map(|(similarity, mut r)| {
+                r.score = similarity;
+                r
             })
             .collect())
     }

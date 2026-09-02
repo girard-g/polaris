@@ -96,11 +96,11 @@ Internal `polaris hook <subcommand>` entry points invoked by Claude Code hooks. 
 ### `polaris-core/src/search.rs`
 - `SearchEngine<'a>` borrows both `EmbeddingEngine` and `Database` by reference
 - Hybrid pipeline: vector KNN + BM25 → RRF fusion → heading boost → MMR rerank → `Vec<SearchResult>`
-- `search()` normalises scores to `[0, 1]` per result set (top result = 1.0); `search_raw()` returns the raw RRF score for `BankSet` to fuse across multiple banks before its own normalisation pass
+- `search()` reports the query-chunk cosine as `score` (absolute, comparable across queries); `search_raw()` returns `(cosine, result)` pairs with the raw RRF total left on `result.score`, for `BankSet` to order across banks
 - `compute_rrf_scores()` — pure function, rank-based fusion (scale-invariant)
 - `compute_heading_boost()` — additive bonus for heading term matches
 - `mmr_rerank()` — greedy Maximal Marginal Relevance selection
-- `format_results()` — formats to markdown string; `score` field holds the final normalised [0,1] score
+- `format_results()` — formats to markdown string; `score` field holds the query-chunk cosine
 
 ### `polaris-cli/src/mcp/server.rs`
 - `PolarisState` holds `config: Arc<PolarisConfig>` and `bank: polaris_core::Bank`
@@ -161,7 +161,7 @@ Query string
   → fetch metadata + embeddings for BM25-only chunks
   → heading boost on RRF scores
   → MMR rerank (greedy, lambda from config)
-  → normalise scores to [0, 1] (top result = 1.0)
+  → report the query-chunk cosine as `score`
   → top_k Vec<SearchResult>
   → format_results() → markdown string
 ```

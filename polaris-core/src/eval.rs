@@ -628,15 +628,25 @@ mod tests {
     #[test]
     fn config_snapshot_records_retrieval_settings_only() {
         let cfg = crate::bank::BankConfig::default();
-        let json = config_snapshot(&cfg);
-        for key in [
-            "model_id", "embedding_dim", "max_chunk_tokens", "chunk_overlap_chars",
-            "mmr_lambda", "mmr_candidate_multiplier", "heading_boost", "rrf_k",
-        ] {
-            assert!(json.contains(key), "snapshot missing {key}: {json}");
-        }
+        let v: serde_json::Value = serde_json::from_str(&config_snapshot(&cfg)).unwrap();
+
+        // Assert the VALUES, not just that the key names appear. A snapshot with
+        // two same-typed settings transposed would still contain both keys, and
+        // would then name the wrong setting when explaining a regression.
+        assert_eq!(v["model_id"], serde_json::json!(cfg.model_id));
+        assert_eq!(v["embedding_dim"], serde_json::json!(cfg.embedding_dim));
+        assert_eq!(v["max_chunk_tokens"], serde_json::json!(cfg.max_chunk_tokens));
+        assert_eq!(v["chunk_overlap_chars"], serde_json::json!(cfg.chunk_overlap_chars));
+        assert_eq!(v["mmr_lambda"], serde_json::json!(cfg.mmr_lambda));
+        assert_eq!(
+            v["mmr_candidate_multiplier"],
+            serde_json::json!(cfg.mmr_candidate_multiplier)
+        );
+        assert_eq!(v["heading_boost"], serde_json::json!(cfg.heading_boost));
+        assert_eq!(v["rrf_k"], serde_json::json!(cfg.rrf_k));
+
         // Where the database lives is not a retrieval event.
-        assert!(!json.contains("index_path"), "snapshot leaked index_path: {json}");
-        assert!(!json.contains("repo_root"), "snapshot leaked repo_root: {json}");
+        assert!(v.get("index_path").is_none(), "snapshot leaked index_path");
+        assert!(v.get("repo_root").is_none(), "snapshot leaked repo_root");
     }
 }

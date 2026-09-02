@@ -1,3 +1,4 @@
+pub mod eval;
 pub mod hook;
 pub mod mcp;
 pub mod setup;
@@ -196,6 +197,16 @@ pub enum Command {
         output: OutputFormat,
     },
 
+    /// Measure retrieval quality against ground truth derived from the corpus
+    Eval {
+        /// Sentences to sample (overrides `[eval] sample_size`)
+        #[arg(long)]
+        sample: Option<usize>,
+        /// Output format
+        #[arg(long, value_enum, default_value = "plain")]
+        output: OutputFormat,
+    },
+
     /// Self-update the polaris binary from the latest GitHub release
     Update {
         /// Check for an update without installing
@@ -266,6 +277,7 @@ pub async fn run() -> std::process::ExitCode {
         Command::Search { output: OutputFormat::Json, .. }
             | Command::Status { output: OutputFormat::Json, .. }
             | Command::Savings { output: OutputFormat::Json, .. }
+            | Command::Eval { output: OutputFormat::Json, .. }
             | Command::Update { .. } // update already reports versions
     );
     let notice_suppressed = update_check::suppressed(
@@ -358,6 +370,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 output == OutputFormat::Json,
             )
         }
+        Command::Eval { sample, output } => {
+            eval::run(&cfg, sample, output == OutputFormat::Json)
+        }
         Command::Update { check, yes, version, force } => {
             let opts = update::UpdateOpts { check, yes, version, force };
             tokio::task::spawn_blocking(move || update::run(opts))
@@ -383,7 +398,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
 /// file's directory made the savings baseline resolve to nonexistent paths
 /// whenever `--db` pointed outside the corpus, so `polaris savings` reported
 /// zero tokens saved.
-fn corpus_root() -> PathBuf {
+pub(crate) fn corpus_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 

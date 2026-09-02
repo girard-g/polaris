@@ -349,7 +349,7 @@ polaris eval --output json
 4. When the probe scores and the weakest correct-answer scores are cleanly separated, suggests `search_min_similarity` as their midpoint. No suggestion is printed when they overlap, or when no probe set applies — see **No threshold suggested** below.
 5. Compares against the previous run stored in `polaris.db`, when one exists for the same corpus fingerprint, printing a `since last run` delta line.
 
-**What the numbers are not.** Ground-truth sentences come from the corpus, so they share its vocabulary and framing — they are easier than real user questions. `recall@3 = 0.94` is *not* a claim that Polaris answers 94% of real queries correctly; the numbers are for comparing runs of the same corpus over time (e.g. "did raising `max_chunk_tokens` help or hurt retrieval?") and for locating a similarity threshold, not for measuring answer quality. See "Non-goals" in `docs/superpowers/specs/2026-09-02-polaris-eval-design.md`.
+**What the numbers are not.** Ground-truth sentences come from the corpus, so they share its vocabulary and framing — they are easier than real user questions. `recall@3 = 0.94` is *not* a claim that Polaris answers 94% of real queries correctly; the numbers are for comparing runs of the same corpus over time (e.g. "did raising `max_chunk_tokens` help or hurt retrieval?") and for locating a similarity threshold, not for measuring answer quality.
 
 **Small samples are noisy.** Below `MIN_RELIABLE_SAMPLE` (30) usable sentences, the run still completes but the plain-text output prints a warning — the percentiles behind the threshold recommendation are not reliable at that size.
 

@@ -284,6 +284,11 @@ impl PolarisServer {
         let probes = config.eval.probes.clone();
 
         let outcome = tokio::task::spawn_blocking(move || {
+            if bank.stats()?.doc_count == 0 {
+                return Err(PolarisError::Indexing(
+                    "index is empty  —  run `polaris index <path>` to add documents".to_string(),
+                ));
+            }
             polaris_core::eval::run(&bank, polaris_core::eval::EvalOpts { sample_size: sample, probes })
         }).await;
 
@@ -327,7 +332,8 @@ impl ServerHandler for PolarisServer {
                  10-40× cheaper in tokens than grepping the docs and reading \
                  files. Query with specific domain terms; start with top_k=2 \
                  and raise only if recall is poor. Use `index` to add files, \
-                 `status` to check index health."
+                 `status` to check index health, and `eval` to check \
+                 retrieval quality if results look consistently poor."
                     .to_string(),
             ),
             ..Default::default()

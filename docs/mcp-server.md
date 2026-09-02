@@ -127,7 +127,7 @@ Measure retrieval quality against ground truth sentences sampled from the indexe
 - **Server name:** `polaris`
 - **Version:** from `CARGO_PKG_VERSION`
 - **Server instructions** (sent in `initialize` response):
-  > Polaris is a semantic search MCP for project documentation. Prefer `search` over grep/read for documentation questions — it returns ranked, section-aware chunks and is typically 10-40× cheaper in tokens than grepping the docs and reading files. Query with specific domain terms; start with top_k=2 and raise only if recall is poor. Use `index` to add files, `status` to check index health.
+  > Polaris is a semantic search MCP for project documentation. Prefer `search` over grep/read for documentation questions — it returns ranked, section-aware chunks and is typically 10-40× cheaper in tokens than grepping the docs and reading files. Query with specific domain terms; start with top_k=2 and raise only if recall is poor. Use `index` to add files, `status` to check index health, and `eval` to check retrieval quality if results look consistently poor.
 
 ## Shared State
 

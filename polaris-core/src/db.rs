@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{PolarisError, Result};
 
-const SCHEMA_VERSION: &str = "3";
+const SCHEMA_VERSION: &str = "4";
 
 pub struct Database {
     conn: Connection,
@@ -117,6 +117,26 @@ pub struct SearchLogRow {
     pub top_k: usize,
     pub result_bytes: usize,
     pub baseline_bytes: usize,
+}
+
+/// One persisted `polaris eval` run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EvalRunRow {
+    pub id: i64,
+    pub ts: i64,
+    pub sample_size: i64,
+    pub recall_1: f32,
+    pub recall_3: f32,
+    pub recall_3_file: f32,
+    pub mrr: f32,
+    pub positive_p10: f32,
+    pub positive_median: f32,
+    /// `None` when no probe set applied (unknown corpus language, no override).
+    pub probe_p95: Option<f32>,
+    /// `None` when the distributions overlap or no probes ran.
+    pub suggested_threshold: Option<f32>,
+    pub corpus_fingerprint: String,
+    pub config_json: String,
 }
 
 /// Per-source counters in a `SavingsAggregate`.
@@ -307,6 +327,19 @@ impl Database {
         if version.as_deref() == Some("2") {
             self.migrate_v2_to_v3()?;
         }
+
+        let version: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if version.as_deref() == Some("3") {
+            self.migrate_v3_to_v4()?;
+        }
         Ok(())
     }
 
@@ -346,6 +379,32 @@ impl Database {
         )?;
         self.conn.execute(
             "UPDATE metadata SET value='3' WHERE key='schema_version'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn migrate_v3_to_v4(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS eval_run (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                   INTEGER NOT NULL,
+                sample_size          INTEGER NOT NULL,
+                recall_1             REAL    NOT NULL,
+                recall_3             REAL    NOT NULL,
+                recall_3_file        REAL    NOT NULL,
+                mrr                  REAL    NOT NULL,
+                positive_p10         REAL    NOT NULL,
+                positive_median      REAL    NOT NULL,
+                probe_p95            REAL,
+                suggested_threshold  REAL,
+                corpus_fingerprint   TEXT    NOT NULL,
+                config_json          TEXT    NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_eval_run_ts ON eval_run(ts);",
+        )?;
+        self.conn.execute(
+            "UPDATE metadata SET value='4' WHERE key='schema_version'",
             [],
         )?;
         Ok(())
@@ -393,6 +452,24 @@ impl Database {
             );
 
             CREATE INDEX idx_search_log_ts ON search_log(ts);
+
+            CREATE TABLE eval_run (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                   INTEGER NOT NULL,
+                sample_size          INTEGER NOT NULL,
+                recall_1             REAL    NOT NULL,
+                recall_3             REAL    NOT NULL,
+                recall_3_file        REAL    NOT NULL,
+                mrr                  REAL    NOT NULL,
+                positive_p10         REAL    NOT NULL,
+                positive_median      REAL    NOT NULL,
+                probe_p95            REAL,
+                suggested_threshold  REAL,
+                corpus_fingerprint   TEXT    NOT NULL,
+                config_json          TEXT    NOT NULL
+            );
+
+            CREATE INDEX idx_eval_run_ts ON eval_run(ts);
         ")?;
 
         // The vec0 table dimension is baked in, so we create it dynamically.
@@ -897,6 +974,66 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// Append one row to `eval_run`. `row.id` is ignored; SQLite assigns it.
+    pub fn insert_eval_run(&self, row: &EvalRunRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO eval_run (
+                ts, sample_size, recall_1, recall_3, recall_3_file, mrr,
+                positive_p10, positive_median, probe_p95, suggested_threshold,
+                corpus_fingerprint, config_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                row.ts,
+                row.sample_size,
+                row.recall_1,
+                row.recall_3,
+                row.recall_3_file,
+                row.mrr,
+                row.positive_p10,
+                row.positive_median,
+                row.probe_p95,
+                row.suggested_threshold,
+                row.corpus_fingerprint,
+                row.config_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The most recent `eval_run` row, or `None` when no run has been recorded.
+    pub fn last_eval_run(&self) -> Result<Option<EvalRunRow>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, ts, sample_size, recall_1, recall_3, recall_3_file, mrr,
+                        positive_p10, positive_median, probe_p95, suggested_threshold,
+                        corpus_fingerprint, config_json
+                 FROM eval_run
+                 ORDER BY ts DESC, id DESC
+                 LIMIT 1",
+                [],
+                |r| {
+                    Ok(EvalRunRow {
+                        id: r.get(0)?,
+                        ts: r.get(1)?,
+                        sample_size: r.get(2)?,
+                        recall_1: r.get(3)?,
+                        recall_3: r.get(4)?,
+                        recall_3_file: r.get(5)?,
+                        mrr: r.get(6)?,
+                        positive_p10: r.get(7)?,
+                        positive_median: r.get(8)?,
+                        probe_p95: r.get(9)?,
+                        suggested_threshold: r.get(10)?,
+                        corpus_fingerprint: r.get(11)?,
+                        config_json: r.get(12)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
     }
 
     /// Return the most recent `limit` rows from `search_log`, newest first.
@@ -1685,11 +1822,13 @@ mod tests {
         ).unwrap();
         assert_eq!(count, 0);
 
-        // schema_version metadata should now be '3'.
+        // schema_version metadata should now be at the current version: migrations
+        // cascade (v2->v3->v4) in one open() call, so a v2 fixture lands on '4',
+        // not '3', now that the v3->v4 step exists.
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key='schema_version'", [], |r| r.get(0),
         ).unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     // -----------------------------------------------------------------------
@@ -1867,5 +2006,138 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].query, "third");
         assert_eq!(rows[1].query, "second");
+    }
+
+    // -----------------------------------------------------------------------
+    // eval_run
+    // -----------------------------------------------------------------------
+
+    fn sample_eval_row() -> EvalRunRow {
+        EvalRunRow {
+            id: 0,
+            ts: 1_770_000_000,
+            sample_size: 200,
+            recall_1: 0.71,
+            recall_3: 0.89,
+            recall_3_file: 0.94,
+            mrr: 0.79,
+            positive_p10: 0.71,
+            positive_median: 0.78,
+            probe_p95: Some(0.55),
+            suggested_threshold: Some(0.63),
+            corpus_fingerprint: "abc123".to_string(),
+            config_json: r#"{"model_id":"nomic-embed-text-v1.5"}"#.to_string(),
+        }
+    }
+
+    #[test]
+    fn eval_run_roundtrips() {
+        let db = setup();
+        assert!(db.last_eval_run().unwrap().is_none());
+
+        db.insert_eval_run(&sample_eval_row()).unwrap();
+        let got = db.last_eval_run().unwrap().expect("row");
+        assert_eq!(got.sample_size, 200);
+        assert_eq!(got.corpus_fingerprint, "abc123");
+        assert_eq!(got.probe_p95, Some(0.55));
+    }
+
+    #[test]
+    fn last_eval_run_returns_newest() {
+        let db = setup();
+        let mut older = sample_eval_row();
+        older.ts = 1_000;
+        older.recall_1 = 0.10;
+        db.insert_eval_run(&older).unwrap();
+
+        let mut newer = sample_eval_row();
+        newer.ts = 2_000;
+        newer.recall_1 = 0.90;
+        db.insert_eval_run(&newer).unwrap();
+
+        assert_eq!(db.last_eval_run().unwrap().unwrap().recall_1, 0.90);
+    }
+
+    #[test]
+    fn eval_run_nullable_columns_roundtrip_as_none() {
+        let db = setup();
+        let mut row = sample_eval_row();
+        row.probe_p95 = None;
+        row.suggested_threshold = None;
+        db.insert_eval_run(&row).unwrap();
+
+        let got = db.last_eval_run().unwrap().unwrap();
+        assert!(got.probe_p95.is_none());
+        assert!(got.suggested_threshold.is_none());
+    }
+
+    #[test]
+    fn migrates_v3_to_v4_by_adding_eval_run() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v3_to_v4.db");
+
+        // Build a v3 database: full v2 schema plus search_log, no eval_run table.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            conn.execute_batch("
+                CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    content_hash TEXT NOT NULL,
+                    title TEXT,
+                    indexed_at TEXT NOT NULL,
+                    file_size INTEGER NOT NULL
+                );
+                CREATE TABLE chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    content TEXT NOT NULL,
+                    heading_context TEXT NOT NULL DEFAULT '',
+                    start_byte INTEGER NOT NULL,
+                    end_byte INTEGER NOT NULL,
+                    chunk_index INTEGER NOT NULL
+                );
+                CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                    content, heading_context,
+                    content='chunks', content_rowid='id'
+                );
+                CREATE TABLE search_log (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts              INTEGER NOT NULL,
+                    source          TEXT    NOT NULL,
+                    query           TEXT    NOT NULL,
+                    top_k           INTEGER NOT NULL,
+                    result_bytes    INTEGER NOT NULL,
+                    baseline_bytes  INTEGER NOT NULL
+                );
+                CREATE INDEX idx_search_log_ts ON search_log(ts);
+            ").unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE vec_chunks USING vec0(
+                    chunk_id INTEGER PRIMARY KEY,
+                    embedding float[4] distance_metric=cosine
+                );"
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES
+                    ('schema_version', '3'),
+                    ('embedding_dim',  '4'),
+                    ('model_id',       'test')",
+                [],
+            ).unwrap();
+        }
+
+        // Opening applies the migration.
+        let db = Database::open(&db_path, 4, "test").unwrap();
+
+        let version: String = db.conn
+            .query_row("SELECT value FROM metadata WHERE key='schema_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, "4");
+        db.insert_eval_run(&sample_eval_row()).unwrap();
+        assert!(db.last_eval_run().unwrap().is_some());
     }
 }

@@ -13,7 +13,7 @@ let db = Database::open(&config)?;
 
 `register_vec_extension()` calls `sqlite3_auto_extension` via the rusqlite FFI.
 
-## Schema (v3)
+## Schema (v4)
 
 ### `metadata`
 
@@ -28,7 +28,7 @@ CREATE TABLE metadata (
 
 | Key | Example Value | Notes |
 |-----|---------------|-------|
-| `schema_version` | `"3"` | Incremented on schema migrations |
+| `schema_version` | `"4"` | Incremented on schema migrations |
 | `embedding_dim` | `"512"` | Validated against config on open — mismatch is a hard error |
 | `model_id` | `"nomic-embed-text-v1.5"` | Validated against config on open — mismatch is a hard error |
 
@@ -107,6 +107,32 @@ CREATE TABLE search_log (
 CREATE INDEX idx_search_log_ts ON search_log(ts);
 ```
 
+### `eval_run`
+
+Append-only history of `polaris eval` runs, one row per evaluation.
+
+```sql
+CREATE TABLE eval_run (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                   INTEGER NOT NULL,       -- Unix seconds
+    sample_size          INTEGER NOT NULL,
+    recall_1             REAL    NOT NULL,
+    recall_3             REAL    NOT NULL,
+    recall_3_file        REAL    NOT NULL,
+    mrr                  REAL    NOT NULL,
+    positive_p10         REAL    NOT NULL,
+    positive_median      REAL    NOT NULL,
+    probe_p95            REAL,                   -- nullable, see below
+    suggested_threshold  REAL,                   -- nullable, see below
+    corpus_fingerprint   TEXT    NOT NULL,
+    config_json          TEXT    NOT NULL
+);
+
+CREATE INDEX idx_eval_run_ts ON eval_run(ts);
+```
+
+`probe_p95` and `suggested_threshold` are nullable because they depend on a negative-probe set that isn't always available: `probe_p95` is `NULL` when the corpus language is unknown or no probe override applies, and `suggested_threshold` is `NULL` when the positive/negative score distributions overlap (no clean separating threshold) or no probes ran at all. Only `Database::insert_eval_run` and `Database::last_eval_run` are exposed for this table.
+
 ## Schema Migrations
 
 `Database::open()` checks `schema_version` on existing databases and applies migrations automatically.
@@ -141,6 +167,30 @@ CREATE TABLE IF NOT EXISTS search_log (
 );
 CREATE INDEX IF NOT EXISTS idx_search_log_ts ON search_log(ts);
 UPDATE metadata SET value='3' WHERE key='schema_version';
+```
+
+### v3 → v4
+
+Creates the `eval_run` table and its timestamp index. No data backfill; safe to apply to any v3 database.
+
+```sql
+CREATE TABLE IF NOT EXISTS eval_run (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                   INTEGER NOT NULL,
+    sample_size          INTEGER NOT NULL,
+    recall_1             REAL    NOT NULL,
+    recall_3             REAL    NOT NULL,
+    recall_3_file        REAL    NOT NULL,
+    mrr                  REAL    NOT NULL,
+    positive_p10         REAL    NOT NULL,
+    positive_median      REAL    NOT NULL,
+    probe_p95            REAL,
+    suggested_threshold  REAL,
+    corpus_fingerprint   TEXT    NOT NULL,
+    config_json          TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_run_ts ON eval_run(ts);
+UPDATE metadata SET value='4' WHERE key='schema_version';
 ```
 
 ## KNN Search Query

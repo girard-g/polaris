@@ -7,5 +7,11 @@ polaris.db-wal
 docs/superpowers/
 CLAUDE.md
 
+# generated per-machine by `polaris setup`
+.claude/settings.json
+.claude/skills/
+AGENTS.md
+GEMINI.md
+
 # polaris
 polaris.db

@@ -139,7 +139,7 @@ To configure authentication, set the `AUTH_TOKEN` environment variable...
 ...
 ```
 
-Score is the final hybrid-search score (RRF + heading boost, after MMR rerank) normalised to `[0, 1]` per result set, so the top result is `1.000` and others are fractions of it. See [Search → Score interpretation](search.md).
+Score is the query-chunk cosine similarity — absolute, so it is comparable across queries rather than relative to the result set. Ordering still comes from the hybrid pipeline (RRF + heading boost, after MMR rerank). With the default model, on-topic queries land around 0.73-0.85 and off-topic ones around 0.52-0.57; the CLI shows results regardless, unlike the MCP tool and the auto-search hook, which withhold below `search_min_similarity`. See [Search → Confidence](search.md#confidence).
 
 **Error cases (stderr, exit 1):**
 

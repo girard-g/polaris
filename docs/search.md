@@ -19,7 +19,7 @@ Query string
   → fetch metadata + embeddings for BM25-only results
   → heading boost: additive bonus for heading term matches
   → MMR rerank: greedy diversity selection
-  → normalise scores to [0, 1] (top result = 1.0)
+  → report the query-chunk cosine as `score` (absolute, not set-relative)
   → top_k results
   → format_results() → Markdown string
 ```
@@ -37,7 +37,9 @@ pub struct SearchResult {
 }
 ```
 
-`SearchEngine::search` divides every result's raw score by the maximum score in the result set so the top hit is always `1.000`. Use `SearchEngine::search_raw` (called by `BankSet`) to get the unnormalised RRF + heading-boost scores when results must be fused across multiple banks before a single cross-bank normalisation pass.
+RRF decides the **ordering**; the reported `score` is the **query-chunk cosine**. The two are deliberately different: RRF is rank fusion, so a top hit sums to ~0.033 whether or not it answers the query, and it means nothing outside its own result set. Cosine is absolute, which is what lets a caller decide whether a result is worth using at all — see [Confidence](#confidence).
+
+Use `SearchEngine::search_raw` to get both: `(cosine, result)` pairs where `result.score` is still the raw RRF total. `BankSet` uses it to order across banks.
 
 ## Scoring
 
@@ -52,7 +54,7 @@ score(d) = 1 / (k + rank_vector(d))  +  1 / (k + rank_bm25(d))
 - `k = 60` by default (`rrf_k` in config)
 - If a chunk only appears in one list, it gets one term only
 - Higher score = better match
-- The raw RRF range is roughly `0.01–0.09`, but `SearchEngine::search` normalises by the per-call maximum, so the displayed `score` is in `[0, 1]` with `1.000` at the top
+- The raw RRF range is roughly `0.01–0.09`, and it is never displayed — it ranks, it does not score. The `score` a caller sees is the cosine.
 
 ### Heading Boost
 
@@ -119,10 +121,10 @@ impl<'a> SearchEngine<'a> {
 
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>>;
 
-    /// Like `search`, but returns raw (unnormalised) RRF + heading-boost
-    /// scores. Used by `BankSet` to fuse results from multiple banks before
-    /// applying a single cross-bank normalisation pass.
-    pub fn search_raw(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>>;
+    /// Like `search`, but returns `(cosine, result)` pairs where `result.score`
+    /// is the raw RRF + heading-boost total. Used by `BankSet` to order results
+    /// across banks, where RRF is not comparable.
+    pub fn search_raw(&self, query: &str, top_k: usize) -> Result<Vec<(f32, SearchResult)>>;
 
     pub fn format_results(results: &[SearchResult]) -> String;
 }
@@ -151,3 +153,37 @@ On a typical laptop:
 - Total round-trip: under 100 ms for warm searches
 
 The model is loaded once at startup and kept in memory for the lifetime of the process.
+
+## Confidence
+
+`score` is the cosine of the query against the chunk embedding, so it means the
+same thing across queries, across result sets, and across banks. Scores were
+once normalised by the per-call maximum, which pinned the top hit at `1.000` no
+matter what — a query the corpus had nothing to say about still came back
+looking certain.
+
+Measured on this repo's own index with the default `nomic-embed-text-v1.5`:
+
+| | top-1 cosine |
+|---|---|
+| on-topic queries | 0.73 – 0.85 |
+| off-topic queries | 0.52 – 0.57 |
+
+The floor is well above zero because the model prefixes queries with
+`search_query: `, which gives any two texts a shared baseline. That floor moves
+with the model — `all-minilm-l6-v2` uses no prefix and sits far lower — so
+`search_min_similarity` (default `0.65`) is config, not a constant, and needs
+retuning if you change `model_id`.
+
+Two callers act on it:
+
+- **`polaris.search` (MCP)** returns `No reliable context found` instead of
+  results when the best match falls below the threshold. An agent cannot tell a
+  weak match from a strong one once the text is in its context, and acting on
+  the wrong doc costs more than the search saved.
+- **The auto-search hook** (`polaris hook search`) stays silent below it, so an
+  unrelated prompt does not get documentation stapled to it.
+
+`polaris search` on the CLI always shows results with their real scores. Seeing
+the near-misses is the point when you are diagnosing retrieval or retuning the
+threshold.

@@ -125,8 +125,26 @@ impl PolarisServer {
             Err(e) => return format!("Error: task failed: {e}{banner}"),
         };
 
-        let formatted = SearchEngine::format_results(&results);
+        // Best match across the set, not `results[0]`: MMR reorders for
+        // diversity, so the head is not necessarily the closest chunk.
+        let best = results.iter().map(|r| r.score).fold(f32::MIN, f32::max);
+        let confident = !results.is_empty() && best >= config.search_min_similarity;
 
+        let formatted = if confident {
+            SearchEngine::format_results(&results)
+        } else {
+            // Say nothing rather than hand back the corpus's nearest miss: an
+            // agent cannot tell a weak match from a strong one once the text is
+            // in its context, and acting on the wrong doc costs more than the
+            // search saved.
+            format!(
+                "No reliable context found (best match {best:.2}, threshold {:.2}). The indexed docs likely do not cover this query — answer from your own knowledge or read the source directly.",
+                config.search_min_similarity
+            )
+        };
+
+        // Log either way — a query that matched nothing is the signal that the
+        // docs have a gap, which is worth more than the rows we do return.
         let _handle = crate::savings::spawn_search_log(
             bank,
             repo_root,

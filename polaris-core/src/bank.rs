@@ -192,7 +192,8 @@ impl Bank {
 
     /// Search this bank.
     ///
-    /// Scores are normalized to [0, 1] within this result set (top result = 1.0).
+    /// The reported score is the query-chunk cosine — absolute, comparable
+    /// across queries. See [`crate::search::SearchEngine::search`].
     pub fn search(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
         let db = self.inner.db.lock().expect("bank db poisoned");
         let engine = self.engine(&db);
@@ -436,7 +437,7 @@ impl BankSet {
     }
 
     /// Search across all mounted banks. Per-bank results are tagged with
-    /// `source_db = label`, ordered, truncated to `top_k`, and renormalized.
+    /// `source_db = label`, ordered, and truncated to `top_k`.
     ///
     /// With more than one bank the ordering key is the query-chunk cosine, the
     /// only signal comparable across banks; with a single bank it stays the
@@ -465,11 +466,6 @@ impl BankSet {
                 b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
             });
             scored.truncate(opts.top_k);
-            // Report the value the merge actually ordered on, so the printed
-            // score column is monotonic with the printed order.
-            for (similarity, r) in &mut scored {
-                r.score = *similarity;
-            }
         } else {
             // One bank: there is nothing to merge, and RRF scores are perfectly
             // comparable within a bank. Keep the existing ordering rather than
@@ -480,17 +476,17 @@ impl BankSet {
             scored.truncate(opts.top_k);
         }
 
-        let mut all_results: Vec<SearchResult> = scored.into_iter().map(|(_, r)| r).collect();
-
-        // Renormalize so max score = 1.0 across the merged result set. Computed
-        // rather than read off `first()`: cosine can be negative, so a set with
-        // no positive score must be left alone instead of divided by its head.
-        let max_score = all_results.iter().map(|r| r.score).fold(0.0_f32, f32::max);
-        if max_score > 0.0 {
-            for r in &mut all_results {
-                r.score /= max_score;
-            }
-        }
+        // Report the cosine in both branches: it is what the multi-bank merge
+        // ordered on, and the only score that still means something once it
+        // leaves this result set. The former renormalisation to max = 1.0 is
+        // gone — see [`crate::search::SearchEngine::search`].
+        let all_results: Vec<SearchResult> = scored
+            .into_iter()
+            .map(|(similarity, mut r)| {
+                r.score = similarity;
+                r
+            })
+            .collect();
 
         // Avoid `embed` field warning; the SharedEmbedding is held so the
         // model stays loaded for as long as the set exists.

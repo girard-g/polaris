@@ -7,6 +7,9 @@
 use sha2::{Digest, Sha256};
 
 use crate::bank::BankConfig;
+use crate::bank::Bank;
+use crate::db::EvalRunRow;
+use crate::error::Result;
 
 /// One corpus sentence selected as an eval query, with the chunk it came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -343,6 +346,165 @@ pub(crate) fn config_snapshot(cfg: &BankConfig) -> String {
         "rrf_k": cfg.rrf_k,
     })
     .to_string()
+}
+
+/// How deep each eval query retrieves. Ranks beyond this count as a miss, so it
+/// bounds MRR's denominator as well as recall's window.
+const EVAL_TOP_K: usize = 10;
+
+/// Below this many usable sentences the percentiles are noise. The run still
+/// completes; the caller is told.
+pub const MIN_RELIABLE_SAMPLE: usize = 30;
+
+pub struct EvalOpts {
+    pub sample_size: usize,
+    /// Empty means "use the built-in set for the detected language".
+    pub probes: Vec<String>,
+}
+
+pub struct EvalReport {
+    pub metrics: Metrics,
+    /// Sentences actually evaluated.
+    pub sample_size: usize,
+    /// Sampled sentences whose source chunk could not be resolved.
+    pub skipped: usize,
+    pub positive_p10: f32,
+    pub positive_median: f32,
+    pub probe_p95: Option<f32>,
+    pub suggested_threshold: Option<f32>,
+    pub language: Language,
+    pub corpus_fingerprint: String,
+    pub config_json: String,
+    /// The previous run, when one exists.
+    pub previous: Option<EvalRunRow>,
+    /// True when the previous run measured a different corpus, which makes the
+    /// deltas meaningless and suppresses them.
+    pub corpus_changed: bool,
+}
+
+/// Evaluate retrieval against ground truth derived from the corpus.
+pub fn run(bank: &Bank, opts: EvalOpts) -> Result<EvalReport> {
+    let docs = bank.with_db(|db| db.get_all_document_hashes())?;
+    let corpus_fingerprint = corpus_fingerprint(&docs);
+    let config_json = config_snapshot(bank.config());
+
+    // Gather every candidate sentence with the chunk it came from.
+    let mut candidates = Vec::new();
+    let mut corpus_text = String::new();
+    for (path, _) in &docs {
+        let chunks = bank.with_db(|db| db.get_chunks_for_document(path))?;
+        for chunk in chunks {
+            if corpus_text.len() < 20_000 {
+                corpus_text.push_str(&chunk.content);
+                corpus_text.push('\n');
+            }
+            for text in split_sentences(&chunk.content) {
+                candidates.push(SampledSentence {
+                    chunk_id: chunk.id,
+                    file_path: path.clone(),
+                    text,
+                });
+            }
+        }
+    }
+
+    let sample = select_sample(candidates, opts.sample_size);
+
+    // Replay each sentence through the production pipeline. `bank.search`
+    // applies the configured heading boost, MMR and RRF — do NOT construct a
+    // SearchEngine with heading_boost = 0.0 here. Eval measures the pipeline
+    // the user actually runs; a body sentence trips the boost only when its
+    // terms appear in its own heading, which is what a real question does too,
+    // and disabling it would blind eval to a `heading_boost` regression.
+    let mut outcomes = Vec::with_capacity(sample.len());
+    let mut skipped = 0usize;
+    for s in &sample {
+        let results = bank.search(&s.text, crate::SearchOpts { top_k: EVAL_TOP_K })?;
+        let chunk_rank = results.iter().position(|r| r.chunk_id == s.chunk_id).map(|i| i + 1);
+        let file_rank = results.iter().position(|r| r.file_path == s.file_path).map(|i| i + 1);
+        if chunk_rank.is_none() && file_rank.is_none() && results.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let score = chunk_rank.map(|r| results[r - 1].score);
+        outcomes.push(Outcome { chunk_rank, file_rank, score });
+    }
+
+    // Probes: explicit list wins, otherwise the built-in set for the language.
+    let language = if opts.probes.is_empty() {
+        detect_language(&corpus_text)
+    } else {
+        Language::Unknown
+    };
+    let probe_queries: Vec<String> = if !opts.probes.is_empty() {
+        opts.probes.clone()
+    } else {
+        builtin_probes(language)
+            .map(|p| p.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default()
+    };
+
+    let mut probe_scores = Vec::with_capacity(probe_queries.len());
+    for q in &probe_queries {
+        let results = bank.search(q, crate::SearchOpts { top_k: 1 })?;
+        if let Some(top) = results.first() {
+            probe_scores.push(top.score);
+        }
+    }
+
+    let mut positives: Vec<f32> = outcomes.iter().filter_map(|o| o.score).collect();
+    let positive_p10 = percentile(&mut positives, 0.10);
+    let positive_median = percentile(&mut positives, 0.50);
+    let probe_p95 = if probe_scores.is_empty() {
+        None
+    } else {
+        Some(percentile(&mut probe_scores, 0.95))
+    };
+    let suggested_threshold = suggest_threshold(&mut positives, &mut probe_scores);
+
+    let m = metrics(&outcomes);
+
+    // Read the previous run before writing this one.
+    let previous = bank.with_db(|db| db.last_eval_run())?;
+    let corpus_changed = previous
+        .as_ref()
+        .map(|p| p.corpus_fingerprint != corpus_fingerprint)
+        .unwrap_or(false);
+
+    let row = EvalRunRow {
+        id: 0,
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        sample_size: outcomes.len() as i64,
+        recall_1: m.recall_1,
+        recall_3: m.recall_3,
+        recall_3_file: m.recall_3_file,
+        mrr: m.mrr,
+        positive_p10,
+        positive_median,
+        probe_p95,
+        suggested_threshold,
+        corpus_fingerprint: corpus_fingerprint.clone(),
+        config_json: config_json.clone(),
+    };
+    bank.with_db(|db| db.insert_eval_run(&row))?;
+
+    Ok(EvalReport {
+        metrics: m,
+        sample_size: outcomes.len(),
+        skipped,
+        positive_p10,
+        positive_median,
+        probe_p95,
+        suggested_threshold,
+        language,
+        corpus_fingerprint,
+        config_json,
+        previous,
+        corpus_changed,
+    })
 }
 
 #[cfg(test)]

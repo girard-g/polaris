@@ -266,6 +266,23 @@ impl Bank {
         db.get_stats(&self.inner.config.index_path)
     }
 
+    /// The configuration this bank was opened with.
+    pub fn config(&self) -> &BankConfig {
+        &self.inner.config
+    }
+
+    /// Run a closure against the locked database.
+    ///
+    /// `eval` needs several reads plus a write in one place; handing it the
+    /// guard beats delegating a method per query.
+    pub(crate) fn with_db<T>(
+        &self,
+        f: impl FnOnce(&Database) -> Result<T>,
+    ) -> Result<T> {
+        let db = self.inner.db.lock().expect("bank db poisoned");
+        f(&db)
+    }
+
     /// Return chunks for a given indexed file path (debug helper).
     ///
     /// `rel_path` should be a path that was used during indexing (relative or

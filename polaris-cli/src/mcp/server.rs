@@ -17,7 +17,7 @@ use polaris_core::config::PolarisConfig;
 use polaris_core::error::PolarisError;
 use polaris_core::search::SearchEngine;
 
-use super::types::{IndexParams, SearchParams, StatusParams};
+use super::types::{EvalParams, IndexParams, SearchParams, StatusParams};
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -263,6 +263,40 @@ impl PolarisServer {
         }).await;
 
         format!("{}{banner}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
+    }
+
+    /// Measure retrieval quality against ground truth derived from the indexed corpus.
+    #[tool(
+        name = "eval",
+        description = "Measure retrieval quality against ground truth derived \
+                       from the indexed corpus itself, and report whether \
+                       search_min_similarity is well calibrated for it. \
+                       Queries are drawn from the corpus, so scores are \
+                       optimistic — this calibrates the threshold, it is not \
+                       an accuracy measure. Takes several seconds; call it \
+                       when diagnosing poor results, not per query."
+    )]
+    async fn eval(&self, Parameters(params): Parameters<EvalParams>) -> String {
+        let banner = self.session_banner();
+        let config = Arc::clone(&self.state.config);
+        let bank = self.state.bank.clone();
+        let sample = params.sample.map(|s| s as usize).unwrap_or(config.eval.sample_size);
+        let probes = config.eval.probes.clone();
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            polaris_core::eval::run(&bank, polaris_core::eval::EvalOpts { sample_size: sample, probes })
+        }).await;
+
+        let report = match outcome {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return format!("Error: {e}{banner}"),
+            Err(e) => return format!("Error: task failed: {e}{banner}"),
+        };
+
+        format!(
+            "{}{banner}",
+            crate::eval::format_report(&report, config.search_min_similarity)
+        )
     }
 }
 

@@ -1,6 +1,6 @@
 # MCP Server
 
-Polaris exposes three tools over the MCP protocol. It communicates via stdio (JSON-RPC 2.0), making it compatible with Claude Code and any other MCP-capable client.
+Polaris exposes four tools over the MCP protocol. It communicates via stdio (JSON-RPC 2.0), making it compatible with Claude Code and any other MCP-capable client.
 
 ## Starting the Server
 
@@ -102,6 +102,24 @@ Last indexed: 2025-02-26T14:23:45Z
 
 The `index` tool also emits progress notifications when the caller passes a `progressToken` in the request `_meta` field.
 
+---
+
+### `eval`
+
+Measure retrieval quality against ground truth sentences sampled from the indexed corpus itself, and report whether `search_min_similarity` is well calibrated for it. The sampled queries are lifted from the corpus, so they are easier than real questions — treat the numbers as a calibration signal, not an accuracy claim.
+
+**Parameters:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `sample` | integer | no | `eval.sample_size` from config (200) | Number of corpus sentences to sample as queries |
+
+**Returns:** Plain text report (recall/MRR, positive and probe score distributions, a suggested `search_min_similarity`).
+
+**Cost:** Several seconds — one embedding forward pass plus a hybrid search per sampled sentence. It is not meant to be called per query; call it when diagnosing poor results, not as part of routine search. Each run also persists a row (used to show deltas against the previous run on the same corpus).
+
+---
+
 ## Protocol Details
 
 - **Transport:** stdio (JSON-RPC over stdin/stdout)
@@ -113,7 +131,7 @@ The `index` tool also emits progress notifications when the caller passes a `pro
 
 ## Shared State
 
-All three tools share a single `PolarisState`:
+All four tools share a single `PolarisState`:
 
 ```rust
 PolarisState {

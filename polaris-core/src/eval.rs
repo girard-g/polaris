@@ -231,6 +231,83 @@ pub(crate) fn builtin_probes(lang: Language) -> Option<&'static [&'static str]> 
     }
 }
 
+/// What one sampled sentence produced. Ranks are 1-based; `None` means the
+/// target never appeared in the retrieved window.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    pub chunk_rank: Option<usize>,
+    pub file_rank: Option<usize>,
+    /// Score of the source chunk when it was retrieved. Feeds the positive
+    /// distribution, so a miss contributes nothing rather than a zero.
+    pub score: Option<f32>,
+}
+
+/// Retrieval quality over a sample.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct Metrics {
+    pub recall_1: f32,
+    pub recall_3: f32,
+    pub recall_3_file: f32,
+    pub mrr: f32,
+}
+
+pub(crate) fn metrics(outcomes: &[Outcome]) -> Metrics {
+    if outcomes.is_empty() {
+        return Metrics { recall_1: 0.0, recall_3: 0.0, recall_3_file: 0.0, mrr: 0.0 };
+    }
+    let n = outcomes.len() as f32;
+    let within = |r: Option<usize>, k: usize| -> bool { matches!(r, Some(v) if v <= k) };
+
+    let recall_1 = outcomes.iter().filter(|o| within(o.chunk_rank, 1)).count() as f32 / n;
+    let recall_3 = outcomes.iter().filter(|o| within(o.chunk_rank, 3)).count() as f32 / n;
+    let recall_3_file = outcomes.iter().filter(|o| within(o.file_rank, 3)).count() as f32 / n;
+    let mrr = outcomes
+        .iter()
+        .map(|o| o.chunk_rank.map_or(0.0, |r| 1.0 / r as f32))
+        .sum::<f32>()
+        / n;
+
+    Metrics { recall_1, recall_3, recall_3_file, mrr }
+}
+
+/// Nearest-rank percentile. Sorts in place; `p` is in `[0.0, 1.0]`.
+/// Returns 0.0 for an empty input rather than panicking.
+pub(crate) fn percentile(values: &mut Vec<f32>, p: f64) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = values.len();
+    // Nearest rank: the smallest value at or above the p-th position.
+    let idx = ((p * n as f64).ceil() as usize).saturating_sub(1).min(n - 1);
+    values[idx]
+}
+
+/// Recommend `search_min_similarity` as the midpoint between the strongest
+/// false confidence and the weakest correct answer.
+///
+/// `p10` of positives rather than the median: the threshold must clear the weak
+/// end of the correct answers, because rejecting those is the failure that makes
+/// Polaris look broken rather than mistuned.
+///
+/// `None` when no probes ran, or when the distributions overlap — an overlap is
+/// a real finding about the corpus (commonly an English-dominant model on a
+/// non-English corpus) and reporting a number would paper over it.
+pub(crate) fn suggest_threshold(
+    positives: &mut Vec<f32>,
+    probes: &mut Vec<f32>,
+) -> Option<f32> {
+    if probes.is_empty() || positives.is_empty() {
+        return None;
+    }
+    let floor = percentile(probes, 0.95);
+    let weakest_positive = percentile(positives, 0.10);
+    if floor >= weakest_positive {
+        return None;
+    }
+    Some((floor + weakest_positive) / 2.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +491,79 @@ mod tests {
             detect_language("the and of to is in for with that le la les de des"),
             Language::Unknown
         );
+    }
+
+    fn outcome(chunk_rank: Option<usize>, file_rank: Option<usize>) -> Outcome {
+        Outcome { chunk_rank, file_rank, score: chunk_rank.map(|_| 0.8) }
+    }
+
+    #[test]
+    fn metrics_on_perfect_results() {
+        let m = metrics(&[outcome(Some(1), Some(1)), outcome(Some(1), Some(1))]);
+        assert_eq!(m.recall_1, 1.0);
+        assert_eq!(m.recall_3, 1.0);
+        assert_eq!(m.mrr, 1.0);
+    }
+
+    #[test]
+    fn metrics_on_total_miss() {
+        let m = metrics(&[outcome(None, None), outcome(None, None)]);
+        assert_eq!(m.recall_1, 0.0);
+        assert_eq!(m.recall_3, 0.0);
+        assert_eq!(m.mrr, 0.0);
+    }
+
+    #[test]
+    fn recall_3_counts_ranks_two_and_three_but_recall_1_does_not() {
+        let m = metrics(&[outcome(Some(3), Some(1)), outcome(Some(1), Some(1))]);
+        assert_eq!(m.recall_1, 0.5);
+        assert_eq!(m.recall_3, 1.0);
+        // MRR = (1/3 + 1/1) / 2
+        assert!((m.mrr - 0.666_666_7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn file_recall_can_exceed_chunk_recall() {
+        // Right document, wrong section: the chunking signal.
+        let m = metrics(&[outcome(None, Some(1)), outcome(None, Some(2))]);
+        assert_eq!(m.recall_3, 0.0);
+        assert_eq!(m.recall_3_file, 1.0);
+    }
+
+    #[test]
+    fn metrics_on_empty_input_are_zero_not_nan() {
+        let m = metrics(&[]);
+        assert_eq!(m.recall_1, 0.0);
+        assert_eq!(m.mrr, 0.0);
+    }
+
+    #[test]
+    fn percentile_picks_expected_values() {
+        let mut v = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        assert!((percentile(&mut v, 0.5) - 0.5).abs() < 1e-6);
+        assert!((percentile(&mut v, 0.0) - 0.1).abs() < 1e-6);
+        assert!((percentile(&mut v, 1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn threshold_sits_between_separated_distributions() {
+        let mut positives = vec![0.70, 0.75, 0.78, 0.80, 0.85];
+        let mut probes = vec![0.50, 0.52, 0.54, 0.55, 0.56];
+        let t = suggest_threshold(&mut positives, &mut probes).expect("separated");
+        assert!(t > 0.56 && t < 0.70, "threshold {t} not between the distributions");
+    }
+
+    #[test]
+    fn threshold_is_none_when_distributions_overlap() {
+        let mut positives = vec![0.50, 0.55, 0.60];
+        let mut probes = vec![0.58, 0.62, 0.70];
+        assert!(suggest_threshold(&mut positives, &mut probes).is_none());
+    }
+
+    #[test]
+    fn threshold_is_none_without_probes() {
+        let mut positives = vec![0.70, 0.80];
+        let mut probes: Vec<f32> = vec![];
+        assert!(suggest_threshold(&mut positives, &mut probes).is_none());
     }
 }

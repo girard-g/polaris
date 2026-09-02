@@ -389,4 +389,30 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn margin_decides_when_both_languages_are_present() {
+        // Marker counts are hand-built so each case lands on a specific side of
+        // MARKER_MARGIN. EN_MARKERS and FR_MARKERS share no word, so each token
+        // counts for exactly one language.
+
+        // en = 6, fr = 6. A tie can never clear a 2x margin, so a corpus that
+        // looks equally like both must not be claimed as either.
+        assert_eq!(
+            detect_language("the and of to is in le la les de des et"),
+            Language::Unknown
+        );
+
+        // en = 10, fr = 5. The margin is met exactly, so English is claimed.
+        assert_eq!(
+            detect_language("the and of to is in for with that are le la les de des"),
+            Language::English
+        );
+
+        // en = 9, fr = 5. One marker short of the margin: not claimed.
+        assert_eq!(
+            detect_language("the and of to is in for with that le la les de des"),
+            Language::Unknown
+        );
+    }
 }

@@ -70,7 +70,11 @@ fn second_run_sees_the_first_and_reports_same_corpus() {
     let prev = second.previous.expect("second run must see the first");
     assert_eq!(prev.corpus_fingerprint, first.corpus_fingerprint);
     assert!(!second.corpus_changed);
-    // Deterministic sampling: identical corpus, identical numbers.
+    // Search determinism: identical corpus and config, identical numbers.
+    // (Sampling determinism is pinned by the unit tests in eval.rs —
+    // sample_is_deterministic and sample_survives_rechunking — not here: this
+    // fixture has fewer candidate sentences than sample_size, so truncate is a
+    // no-op.)
     assert_eq!(second.metrics.recall_1, first.metrics.recall_1);
 }
 

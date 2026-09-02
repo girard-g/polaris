@@ -366,12 +366,18 @@ pub struct EvalReport {
     pub metrics: Metrics,
     /// Sentences actually evaluated.
     pub sample_size: usize,
-    /// Sampled sentences whose source chunk could not be resolved.
+    /// Sampled sentences whose search returned no results at all. A sentence
+    /// whose source chunk simply ranked outside the window is NOT skipped — it
+    /// is a miss, and counts against recall and MRR.
     pub skipped: usize,
     pub positive_p10: f32,
     pub positive_median: f32,
     pub probe_p95: Option<f32>,
     pub suggested_threshold: Option<f32>,
+    /// Detected corpus language, or `Unknown` when detection did not run —
+    /// which includes the case where the caller supplied explicit probes.
+    /// This reports detection, NOT probe availability: `probe_p95.is_some()`
+    /// is the signal for whether probes actually ran.
     pub language: Language,
     pub corpus_fingerprint: String,
     pub config_json: String,
@@ -384,9 +390,16 @@ pub struct EvalReport {
 
 /// Evaluate retrieval against ground truth derived from the corpus.
 pub fn run(bank: &Bank, opts: EvalOpts) -> Result<EvalReport> {
-    let docs = bank.with_db(|db| db.get_all_document_hashes())?;
+    let mut docs = bank.with_db(|db| db.get_all_document_hashes())?;
     let corpus_fingerprint = corpus_fingerprint(&docs);
     let config_json = config_snapshot(bank.config());
+
+    // Sort before sampling: the row order from get_all_document_hashes is
+    // unspecified, and corpus_text feeds detect_language -> probe set ->
+    // suggested_threshold. Two runs over an identical corpus must not be able
+    // to recommend different thresholds. corpus_fingerprint sorts for the same
+    // reason.
+    docs.sort();
 
     // Gather every candidate sentence with the chunk it came from.
     let mut candidates = Vec::new();

@@ -1209,6 +1209,17 @@ second
         assert!(matches!(result, Err(PolarisError::Setup(_))));
     }
 
+    /// `setup::run` indexes through a `Database`, which needs the sqlite-vec
+    /// extension registered. Production registers it at the CLI entry point
+    /// (`lib.rs`); under `cargo test` there is no such entry point, so any test
+    /// that reaches the indexer must register itself. Registration is
+    /// process-global, so tests that skipped this passed only when another test
+    /// happened to run first — alone they died on "no such module: vec0" and
+    /// asserted against an empty index.
+    fn register_vec_for_test() {
+        polaris_core::db::register_vec_extension();
+    }
+
     #[test]
     fn run_errors_when_path_is_file() {
         let dir = TempDir::new().unwrap();
@@ -1704,6 +1715,8 @@ second
         use polaris_core::config::PolarisConfig;
         use polaris_core::db::Database;
 
+        register_vec_for_test();
+
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("docs")).unwrap();
         std::fs::write(
@@ -1802,6 +1815,8 @@ second
         // parallel with other CWD-mutating tests.
         use polaris_core::config::PolarisConfig;
         use polaris_core::db::Database;
+
+        register_vec_for_test();
 
         let parent = TempDir::new().unwrap();
         let proj_name = "myproj";

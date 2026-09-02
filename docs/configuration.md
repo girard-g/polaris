@@ -53,6 +53,13 @@ max_file_size = 10485760  # 10 MiB
 # Additional read-only database paths for multi-DB search (BankSet)
 # extra_db_paths = ["/path/to/other/polaris.db", "../shared/docs.db"]
 extra_db_paths = []
+
+# polaris eval settings
+[eval]
+# Corpus sentences sampled as queries per run
+sample_size = 200
+# Off-topic probes; empty uses the built-in set for the detected language
+probes = []
 ```
 
 ## Load Priority
@@ -81,6 +88,8 @@ Config is resolved in this order (first match wins):
 | `search_min_similarity` | `0.65` | `[0.0, 1.0]` | Auto-search hook confidence gate; retune per `model_id` |
 | `max_file_size` | `10485760` | `> 0` | 10 MiB; larger files are skipped during indexing |
 | `extra_db_paths` | `[]` | — | Additional read-only DBs fused into search (multi-DB) |
+| `eval.sample_size` | `200` | `> 0` | Sentences sampled per `polaris eval` run |
+| `eval.probes` | `[]` | — | Overrides built-in probes; empty means auto by language |
 
 ## Config Validation
 

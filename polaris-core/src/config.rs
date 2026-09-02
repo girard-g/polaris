@@ -59,6 +59,10 @@ pub struct PolarisConfig {
     /// Additional database paths for multi-DB search (read-only)
     #[serde(default)]
     pub extra_db_paths: Vec<PathBuf>,
+
+    /// `polaris eval` settings
+    #[serde(default)]
+    pub eval: EvalConfig,
 }
 
 fn default_db_path() -> PathBuf {
@@ -112,6 +116,32 @@ fn default_max_file_size() -> u64 {
     10 * 1024 * 1024 // 10 MB
 }
 
+/// Settings for `polaris eval`. Its own table because these are the only
+/// knobs a user tunes per-run rather than per-query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalConfig {
+    /// Number of corpus sentences sampled as queries.
+    #[serde(default = "default_eval_sample_size")]
+    pub sample_size: usize,
+
+    /// Off-topic probe queries used to measure what this corpus scores when it
+    /// has no answer. Empty means "use the built-in set for the detected
+    /// corpus language"; a non-empty list replaces the built-in set and skips
+    /// detection, because writing in a language states it.
+    #[serde(default)]
+    pub probes: Vec<String>,
+}
+
+fn default_eval_sample_size() -> usize {
+    200
+}
+
+impl Default for EvalConfig {
+    fn default() -> Self {
+        Self { sample_size: default_eval_sample_size(), probes: Vec::new() }
+    }
+}
+
 impl Default for PolarisConfig {
     fn default() -> Self {
         Self {
@@ -128,6 +158,7 @@ impl Default for PolarisConfig {
             search_min_similarity: default_search_min_similarity(),
             max_file_size: default_max_file_size(),
             extra_db_paths: Vec::new(),
+            eval: EvalConfig::default(),
         }
     }
 }
@@ -212,6 +243,11 @@ impl PolarisConfig {
                 "search_min_similarity must be in [0.0, 1.0], got {}",
                 self.search_min_similarity
             )));
+        }
+        if self.eval.sample_size == 0 {
+            return Err(PolarisError::Config(
+                "eval.sample_size must be greater than 0".to_string(),
+            ));
         }
         Ok(())
     }
@@ -455,5 +491,39 @@ mod opts_tests {
     #[test]
     fn search_opts_defaults_to_top_5() {
         assert_eq!(SearchOpts::default().top_k, 5);
+    }
+
+    #[test]
+    fn eval_config_defaults() {
+        let cfg = PolarisConfig::default();
+        assert_eq!(cfg.eval.sample_size, 200);
+        assert!(cfg.eval.probes.is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_zero_eval_sample_size() {
+        let mut cfg = PolarisConfig::default();
+        cfg.eval.sample_size = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn eval_section_parses_from_toml() {
+        let toml = r#"
+db_path = "polaris.db"
+
+[eval]
+sample_size = 50
+probes = ["comment cuire un oeuf"]
+"#;
+        let cfg: PolarisConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.eval.sample_size, 50);
+        assert_eq!(cfg.eval.probes.len(), 1);
+    }
+
+    #[test]
+    fn eval_section_absent_uses_defaults() {
+        let cfg: PolarisConfig = toml::from_str("db_path = \"polaris.db\"").unwrap();
+        assert_eq!(cfg.eval.sample_size, 200);
     }
 }

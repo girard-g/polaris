@@ -399,16 +399,10 @@ pub fn run_index_for_payload(payload: &str, cfg: &PolarisConfig) -> Result<()> {
 // Search hook (`polaris hook search`)
 // ---------------------------------------------------------------------------
 
-/// Minimum raw RRF score for the search result to be injected. Raw RRF
-/// scores are small (roughly 1/(rrf_k+rank) per source); with the default
-/// rrf_k=60, a top-1 hit in both KNN and BM25 scores ~0.033. This threshold
-/// filters out results that matched in only one source at a poor rank.
-const RAW_SCORE_THRESHOLD: f32 = 0.02;
-
 /// Run a single-result search against the Polaris index.
 ///
 /// Returns `Ok(Some(formatted_output))` when a result passes both the
-/// length gate and score threshold, `Ok(None)` for a silent no-op,
+/// length gate and the similarity threshold, `Ok(None)` for a silent no-op,
 /// and `Err` for infrastructure failures (DB open, embedding load).
 pub fn perform_search(
     prompt: &str,
@@ -441,17 +435,22 @@ pub fn perform_search(
         cfg.rrf_k,
     );
 
-    // `.1` is the result; `.0` is the cross-bank cosine, unused here — the
-    // threshold below is deliberately against the raw RRF score.
+    // `.0` is the query-to-chunk cosine, `.1` the result carrying the raw RRF
+    // total. Gate on the cosine: RRF is *rank* fusion, so the top hit scores
+    // ~0.033 whether or not it has anything to do with the prompt — an
+    // off-topic prompt still clears any RRF threshold low enough to be useful.
     let results = search.search_raw(prompt, 1)?;
-    let Some((_, top)) = results.into_iter().next() else {
+    let Some((similarity, mut top)) = results.into_iter().next() else {
         return Ok(None);
     };
 
-    if top.score < RAW_SCORE_THRESHOLD {
+    if similarity < cfg.search_min_similarity {
         return Ok(None);
     }
 
+    // Report the number the gate actually used; the RRF total means nothing
+    // to the agent reading this line.
+    top.score = similarity;
     Ok(Some(format_search_hook_output(&top)))
 }
 
@@ -1198,11 +1197,26 @@ mod tests {
         indexer.index_path(&db, &docs, true, false, false, None).unwrap();
         drop(db);
 
+        let cfg = cfg_with_db(db_path);
+
+        // No lexical overlap: BM25 misses entirely.
         let result = perform_search(
             "quantum mechanics wave function collapse explanation please",
             Some(dir.path()),
-            &cfg_with_db(db_path),
+            &cfg,
         ).unwrap();
-        assert!(result.is_none(), "irrelevant query should be below score threshold");
+        assert!(result.is_none(), "irrelevant query should be below the similarity threshold");
+
+        // Shares "install" with the doc *and* its heading, so BM25 fires and the
+        // heading boost applies — this query cleared the old raw-RRF gate.
+        let result = perform_search(
+            "how do I install a new kitchen sink faucet in my house",
+            Some(dir.path()),
+            &cfg,
+        ).unwrap();
+        assert!(
+            result.is_none(),
+            "off-topic query must not pass on lexical overlap alone, got: {result:?}"
+        );
     }
 }

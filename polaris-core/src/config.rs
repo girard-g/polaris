@@ -46,6 +46,12 @@ pub struct PolarisConfig {
     #[serde(default = "default_max_top_k")]
     pub max_top_k: usize,
 
+    /// Minimum query-to-chunk cosine similarity for the auto-search hook to
+    /// inject a result. Model-dependent: the default suits the default
+    /// `model_id`, and a different embedding model needs it re-tuned.
+    #[serde(default = "default_search_min_similarity")]
+    pub search_min_similarity: f32,
+
     /// Maximum file size in bytes that the indexer will process (larger files are skipped)
     #[serde(default = "default_max_file_size")]
     pub max_file_size: u64,
@@ -87,6 +93,13 @@ fn default_heading_boost() -> f32 {
     0.05
 }
 
+/// Measured against this repo's own index with the default
+/// `nomic-embed-text-v1.5`: on-topic prompts land at 0.73-0.85, off-topic ones
+/// at 0.52-0.57 (the prefixed-query floor). 0.65 sits in that gap.
+fn default_search_min_similarity() -> f32 {
+    0.65
+}
+
 fn default_rrf_k() -> usize {
     60
 }
@@ -112,6 +125,7 @@ impl Default for PolarisConfig {
             heading_boost: default_heading_boost(),
             rrf_k: default_rrf_k(),
             max_top_k: default_max_top_k(),
+            search_min_similarity: default_search_min_similarity(),
             max_file_size: default_max_file_size(),
             extra_db_paths: Vec::new(),
         }
@@ -192,7 +206,14 @@ impl PolarisConfig {
             self.embedding_dim,
             self.max_chunk_tokens,
             self.chunk_overlap_chars,
-        )
+        )?;
+        if !(0.0..=1.0).contains(&self.search_min_similarity) {
+            return Err(PolarisError::Config(format!(
+                "search_min_similarity must be in [0.0, 1.0], got {}",
+                self.search_min_similarity
+            )));
+        }
+        Ok(())
     }
 
     /// Apply CLI overrides (None means "not specified", keep existing value).
@@ -420,6 +441,15 @@ mod opts_tests {
         assert!(opts.recursive);
         assert!(!opts.force);
         assert!(!opts.dry_run);
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_min_similarity() {
+        let mut cfg = PolarisConfig::default();
+        cfg.search_min_similarity = 1.5;
+        assert!(cfg.validate().is_err());
+        cfg.search_min_similarity = 0.65;
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

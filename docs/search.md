@@ -184,6 +184,13 @@ Two callers act on it:
 - **The auto-search hook** (`polaris hook search`) stays silent below it, so an
   unrelated prompt does not get documentation stapled to it.
 
+The MCP tool gates on the best score in the set, not the first result — MMR
+reorders for diversity, so the head is not necessarily the closest chunk. One
+consequence: because MMR also trades relevance for diversity, the same query can
+clear the gate at one `top_k` and not another. More candidates means more
+chances one of them is genuinely close, which is the behaviour you want, but it
+does mean the gate is not a pure function of the query.
+
 `polaris search` on the CLI always shows results with their real scores. Seeing
 the near-misses is the point when you are diagnosing retrieval or retuning the
 threshold.

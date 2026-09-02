@@ -110,8 +110,15 @@ without it, brings it to the team, team needs pro features.
 ### Coverage gaps
 
 Track queries over time. Surface patterns like: "agents searched for
-'deployment' 12 times this week but the top result scored below 0.3 every time."
-Actionable signal that the docs need a deployment section.
+'deployment' 12 times this week but the top result never cleared
+`search_min_similarity`." Actionable signal that the docs need a deployment
+section.
+
+The threshold is the one the MCP tool already refuses on, so a coverage gap is
+simply a query that got `No reliable context found` more than once — see
+[Search → Confidence](search.md#confidence). Absolute cosine is what makes this
+countable at all: the old per-set normalisation put the top result at 1.000
+whatever it contained, so "scored low" was not a thing a row could record.
 
 Implementation: extend `search_log` with score tracking, add a periodic
 analysis pass or CLI command (`polaris insights`).

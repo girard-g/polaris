@@ -324,6 +324,50 @@ polaris savings --output json
 
 ---
 
+### `polaris eval`
+
+Measure retrieval quality against ground truth derived from the corpus itself, and recommend a value for `search_min_similarity` — the threshold the auto-search hook uses to decide whether a result is confident enough to inject.
+
+```bash
+polaris eval                  # sample size from [eval] sample_size (default 200)
+polaris eval --sample 40      # override the sample size for this run
+polaris eval --output json
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--sample <N>` | `[eval] sample_size` (200) | Sentences to sample; overrides the config value for this run only |
+| `--output <FORMAT>` | plain | Output format: `plain` or `json` |
+
+**Behaviour:**
+
+1. Samples `sample_size` sentences deterministically (by content hash) from the indexed corpus. Each sampled sentence's source chunk is its ground-truth answer.
+2. Replays every sampled sentence through the production search pipeline (heading boost, MMR, RRF included) and computes `recall@1`, `recall@3`, `recall@3` at file granularity, and MRR.
+3. Runs a set of off-topic probe queries (built-in per detected corpus language, or the `eval.probes` override in `polaris.toml`) to measure the score ceiling of queries that have no correct answer.
+4. When the probe scores and the weakest correct-answer scores are cleanly separated, suggests `search_min_similarity` as their midpoint. No suggestion is printed when they overlap, or when no probe set applies — see **No threshold suggested** below.
+5. Compares against the previous run stored in `polaris.db`, when one exists for the same corpus fingerprint, printing a `since last run` delta line.
+
+**What the numbers are not.** Ground-truth sentences come from the corpus, so they share its vocabulary and framing — they are easier than real user questions. `recall@3 = 0.94` is *not* a claim that Polaris answers 94% of real queries correctly; the numbers are for comparing runs of the same corpus over time (e.g. "did raising `max_chunk_tokens` help or hurt retrieval?") and for locating a similarity threshold, not for measuring answer quality. See "Non-goals" in `docs/superpowers/specs/2026-09-02-polaris-eval-design.md`.
+
+**Small samples are noisy.** Below `MIN_RELIABLE_SAMPLE` (30) usable sentences, the run still completes but the plain-text output prints a warning — the percentiles behind the threshold recommendation are not reliable at that size.
+
+**No threshold suggested.** This happens in two situations, and the output explains which:
+- The corpus's detected language (or an explicit `eval.probes` override) has no probe set, or none ran — set `eval.probes` in `polaris.toml` to a list of off-topic queries for your corpus's language to calibrate manually.
+- The probe scores and correct-answer scores overlap on this corpus/model pair — often an English-tuned embedding model measured against a non-English corpus. No single threshold is safe to pick automatically in that case.
+
+See `docs/configuration.md` under "Defaults Reference" for the `eval.sample_size` and `eval.probes` config fields.
+
+**Error cases (stderr, exit 1):**
+
+| Situation | Message |
+|-----------|---------|
+| `polaris.db` doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| Index has no documents | `index is empty  —  run \`polaris index <path>\` to add documents` |
+
+---
+
 ### `polaris chunks <path>`
 
 Show how a file was chunked — heading contexts, byte offsets, and content previews.

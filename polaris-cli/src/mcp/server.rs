@@ -130,7 +130,9 @@ impl PolarisServer {
         let best = results.iter().map(|r| r.score).fold(f32::MIN, f32::max);
         let confident = !results.is_empty() && best >= config.search_min_similarity;
 
-        let formatted = if confident {
+        let formatted = if results.is_empty() {
+            "No results found.".to_string()
+        } else if confident {
             SearchEngine::format_results(&results)
         } else {
             // Say nothing rather than hand back the corpus's nearest miss: an
@@ -144,14 +146,18 @@ impl PolarisServer {
         };
 
         // Log either way — a query that matched nothing is the signal that the
-        // docs have a gap, which is worth more than the rows we do return.
+        // docs have a gap, which is worth more than the rows we do return. Pass
+        // an empty slice unless we're returning the real results: the refusal
+        // and empty-index paths never hand the agent any bytes, so the log
+        // must not credit a saving that didn't happen.
+        let logged_results: &[polaris_core::SearchResult] = if confident { &results } else { &[] };
         let _handle = crate::savings::spawn_search_log(
             bank,
             repo_root,
             polaris_core::db::LogSource::Mcp,
             query,
             top_k,
-            &results,
+            logged_results,
         );
 
         format!("{formatted}{banner}")
@@ -338,5 +344,51 @@ impl ServerHandler for PolarisServer {
             ),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression pin for the empty-index rendering bug: `results` empty must
+    /// short-circuit to "No results found." rather than falling into the
+    /// refusal branch, which folds `f32::MIN` over nothing and prints it.
+    #[tokio::test]
+    #[ignore = "Bank::open requires SharedEmbedding which downloads a ~137 MB ONNX model"]
+    async fn search_on_empty_index_reports_no_results_not_f32_min() {
+        // Update-check does a detached network spawn from `PolarisServer::new`
+        // unless disabled; keep this test hermetic.
+        // SAFETY: single-threaded test process, set before any other thread
+        // reads the env var.
+        unsafe { std::env::set_var("POLARIS_NO_UPDATE_CHECK", "1") };
+
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = dir.path().join("polaris.db");
+        let embed = polaris_core::SharedEmbedding::load("nomic-embed-text-v1.5", 64).unwrap();
+        let bank = polaris_core::Bank::open(
+            polaris_core::BankConfig {
+                repo_root: dir.path().to_path_buf(),
+                index_path,
+                embedding_dim: 64,
+                model_id: "nomic-embed-text-v1.5".into(),
+                ..Default::default()
+            },
+            embed,
+        )
+        .unwrap();
+
+        let server = PolarisServer::new(PolarisState {
+            config: Arc::new(PolarisConfig::default()),
+            bank,
+        });
+
+        let response = server
+            .search(Parameters(SearchParams { query: "anything".into(), top_k: Some(3) }))
+            .await;
+
+        assert_eq!(response, "No results found.");
+        assert!(!response.contains("340282"), "response leaked f32::MIN: {response}");
     }
 }

@@ -755,6 +755,11 @@ mod tests {
         assert!((percentile(&mut v, 0.5) - 0.5).abs() < 1e-6);
         assert!((percentile(&mut v, 0.0) - 0.1).abs() < 1e-6);
         assert!((percentile(&mut v, 1.0) - 1.0).abs() < 1e-6);
+        // idx = ceil(p * n) - 1, clamped to [0, n-1], n = 10:
+        // p=0.10 -> ceil(1.0) - 1 = 0  -> v[0] = 0.1
+        // p=0.95 -> ceil(9.5) - 1 = 9  -> v[9] = 1.0
+        assert!((percentile(&mut v, 0.10) - 0.1).abs() < 1e-6);
+        assert!((percentile(&mut v, 0.95) - 1.0).abs() < 1e-6);
     }
 
     #[test]

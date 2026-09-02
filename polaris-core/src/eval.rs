@@ -113,6 +113,124 @@ fn sentence_key(text: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Corpus language, only as finely as the built-in probe sets require.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    English,
+    French,
+    Unknown,
+}
+
+impl Language {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Language::English => "english",
+            Language::French => "french",
+            Language::Unknown => "unknown",
+        }
+    }
+}
+
+const EN_MARKERS: &[&str] =
+    &["the", "and", "of", "to", "is", "in", "for", "with", "that", "are"];
+const FR_MARKERS: &[&str] =
+    &["le", "la", "les", "de", "des", "et", "une", "dans", "pour", "est"];
+
+/// Minimum marker hits, and the margin the winner must hold over the runner-up,
+/// before a language is claimed. Below either, the answer is `Unknown` — which
+/// costs a threshold recommendation but never produces a wrong one.
+const MIN_MARKER_HITS: usize = 5;
+const MARKER_MARGIN: usize = 2;
+
+/// Identify the corpus language by counting language-marker stopwords.
+///
+/// This only has to separate the probe sets that ship, so a word-frequency
+/// count is enough and avoids a dependency.
+pub(crate) fn detect_language(sample_text: &str) -> Language {
+    let words: Vec<String> = sample_text
+        .split(|c: char| !c.is_alphabetic() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+
+    let count = |markers: &[&str]| -> usize {
+        words.iter().filter(|w| markers.contains(&w.as_str())).count()
+    };
+
+    let en = count(EN_MARKERS);
+    let fr = count(FR_MARKERS);
+
+    let (winner, best, runner_up) = if en >= fr {
+        (Language::English, en, fr)
+    } else {
+        (Language::French, fr, en)
+    };
+
+    if best >= MIN_MARKER_HITS && best >= runner_up.saturating_mul(MARKER_MARGIN) {
+        winner
+    } else {
+        Language::Unknown
+    }
+}
+
+/// Off-topic probes. Their top-1 scores are what this corpus and model return
+/// when no answer exists, which is the quantity the threshold gates on. Subjects
+/// are chosen to share no vocabulary with software documentation.
+const PROBES_EN: &[&str] = &[
+    "how long should sourdough dough rise before baking",
+    "what is the capital city of Mongolia",
+    "the offside rule in football explained simply",
+    "best hiking trails in the Alps for a weekend",
+    "how to prune a tomato plant in summer",
+    "why does my cat refuse to eat her dinner",
+    "which countries border the Black Sea",
+    "how to remove a red wine stain from a carpet",
+    "the difference between a violin and a viola",
+    "when do migratory swallows return to northern Europe",
+    "how many players are on a rugby union team",
+    "what makes the northern lights appear green",
+    "how to fold a fitted bedsheet neatly",
+    "the tallest mountain in South America",
+    "how long can a tortoise live in captivity",
+    "what to feed a puppy in its first month",
+    "how deep is the Mariana Trench",
+    "the rules for scoring in ten pin bowling",
+    "how to tell whether an avocado is ripe",
+    "which planet has the most moons",
+];
+
+const PROBES_FR: &[&str] = &[
+    "combien de temps faut-il laisser lever la pâte à pain",
+    "quelle est la capitale de la Mongolie",
+    "la règle du hors-jeu au football expliquée simplement",
+    "les plus beaux sentiers de randonnée des Alpes",
+    "comment tailler un pied de tomate en été",
+    "pourquoi mon chat refuse-t-il de manger ses croquettes",
+    "quels pays bordent la mer Noire",
+    "comment enlever une tache de vin rouge sur un tapis",
+    "la différence entre un violon et un alto",
+    "quand les hirondelles reviennent-elles en Europe du Nord",
+    "combien de joueurs compte une équipe de rugby",
+    "pourquoi les aurores boréales sont-elles vertes",
+    "comment plier un drap housse correctement",
+    "quelle est la plus haute montagne d'Amérique du Sud",
+    "combien de temps vit une tortue en captivité",
+    "que donner à manger à un chiot le premier mois",
+    "quelle est la profondeur de la fosse des Mariannes",
+    "comment compter les points au bowling",
+    "comment savoir si un avocat est mûr",
+    "quelle planète possède le plus de lunes",
+];
+
+/// The built-in probe set for a language, or `None` when none ships for it.
+pub(crate) fn builtin_probes(lang: Language) -> Option<&'static [&'static str]> {
+    match lang {
+        Language::English => Some(PROBES_EN),
+        Language::French => Some(PROBES_FR),
+        Language::Unknown => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +333,60 @@ mod tests {
         let pool: Vec<SampledSentence> =
             (0..3).map(|i| sent(i, &format!("sentence number {i} of the corpus body"))).collect();
         assert_eq!(select_sample(pool, 10).len(), 3);
+    }
+
+    #[test]
+    fn detects_english() {
+        let text = "The index stores the chunks and the headings for each of the files \
+                    that are found in the directory, and the search returns them.";
+        assert_eq!(detect_language(text), Language::English);
+    }
+
+    #[test]
+    fn detects_french() {
+        let text = "Le moteur enregistre les fragments et les titres de chacun des \
+                    fichiers que l'on trouve dans le dossier, et la recherche les renvoie.";
+        assert_eq!(detect_language(text), Language::French);
+    }
+
+    #[test]
+    fn unknown_when_no_marker_wins_clearly() {
+        assert_eq!(detect_language("cargo build release binary target"), Language::Unknown);
+    }
+
+    #[test]
+    fn unknown_when_text_is_empty() {
+        assert_eq!(detect_language(""), Language::Unknown);
+    }
+
+    #[test]
+    fn builtin_probes_exist_for_known_languages() {
+        assert!(builtin_probes(Language::English).unwrap().len() >= 20);
+        assert!(builtin_probes(Language::French).unwrap().len() >= 20);
+        assert!(builtin_probes(Language::Unknown).is_none());
+    }
+
+    #[test]
+    fn probes_avoid_software_vocabulary() {
+        // A probe that brushes against software wording stops being off-topic and
+        // silently raises the measured floor.
+        let banned = [
+            "index", "search", "query", "chunk", "server", "config", "database",
+            "file", "token", "cache", "build", "deploy", "api", "code",
+        ];
+        // Whole-word comparison, not substring: "capital" / "capitale" both
+        // contain "api", and those are legitimate probes.
+        for lang in [Language::English, Language::French] {
+            for probe in builtin_probes(lang).unwrap() {
+                let lower = probe.to_lowercase();
+                let tokens: Vec<&str> = lower
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                for word in banned {
+                    assert!(!tokens.contains(&word), "probe {probe:?} contains {word:?}");
+                }
+            }
+        }
     }
 }

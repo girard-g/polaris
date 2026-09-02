@@ -33,3 +33,9 @@ pub struct IndexParams {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct StatusParams {}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct EvalParams {
+    /// Number of corpus sentences to sample as queries (default: config's eval.sample_size).
+    pub sample: Option<u32>,
+}

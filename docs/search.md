@@ -194,3 +194,7 @@ does mean the gate is not a pure function of the query.
 `polaris search` on the CLI always shows results with their real scores. Seeing
 the near-misses is the point when you are diagnosing retrieval or retuning the
 threshold.
+
+`polaris eval` measures the positive and probe distributions on the local
+corpus and suggests a `search_min_similarity` for it, replacing the default
+measured on this repo.

@@ -14,10 +14,10 @@ pub struct SampledSentence {
     pub text: String,
 }
 
-/// Shortest and longest sentence worth using as a query. Under four words
+/// Shortest and longest sentence worth using as a query. Under six words
 /// carries too little signal; over forty is a paragraph that never resembles
 /// a question.
-const MIN_SENTENCE_WORDS: usize = 4;
+const MIN_SENTENCE_WORDS: usize = 6;
 const MAX_SENTENCE_WORDS: usize = 40;
 
 /// Split chunk body text into candidate query sentences.
@@ -96,8 +96,10 @@ mod tests {
     #[test]
     fn drops_too_short_and_too_long() {
         let long = format!("{} end.", "word ".repeat(60));
-        let got = split_sentences(&format!("Yes. Only four words here. {long}"));
-        assert_eq!(got, vec!["Only four words here".to_string()]);
+        let got = split_sentences(&format!(
+            "Five words are not enough. Exactly six words are kept here. {long}"
+        ));
+        assert_eq!(got, vec!["Exactly six words are kept here".to_string()]);
     }
 
     #[test]

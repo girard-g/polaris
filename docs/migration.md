@@ -156,3 +156,5 @@ The `polaris-mgmt.db` and namespace DBs created by multi-tenant mode can be left
 ## Namespace DB Schema Note
 
 Namespace DBs in multi-tenant mode share the same schema as the single-tenant `polaris.db` of the same Polaris release — whatever `SCHEMA_VERSION` the build ships with. There are no multi-tenant-specific columns or tables in the namespace DBs themselves; multi-tenancy is implemented at the file/process layer, not in the schema. Schema migrations are applied identically across all namespace DBs by `Database::open()`. See [database.md](database.md) for the full schema reference.
+
+Latest schema bump: **v3 → v4** creates the `eval_run` table plus its `ts` index (no data backfill). It is safe to apply to any v3 database — including namespace DBs migrated from an older single-tenant source — and requires no `polaris migrate` involvement, since it runs automatically the next time `Database::open()` touches that file.

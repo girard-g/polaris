@@ -6,6 +6,8 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::bank::BankConfig;
+
 /// One corpus sentence selected as an eval query, with the chunk it came from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SampledSentence {
@@ -308,6 +310,41 @@ pub(crate) fn suggest_threshold(
     Some((floor + weakest_positive) / 2.0)
 }
 
+/// Hash over the corpus contents, used to decide whether two runs are
+/// comparable. Sorted first so enumeration order cannot change the result.
+pub(crate) fn corpus_fingerprint(docs: &[(String, String)]) -> String {
+    let mut sorted: Vec<&(String, String)> = docs.iter().collect();
+    sorted.sort();
+
+    let mut hasher = Sha256::new();
+    for (path, hash) in sorted {
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Snapshot the settings that affect retrieval, stored with the run.
+///
+/// `polaris.toml` only ever describes the config *now*, so it cannot explain
+/// why a run three weeks ago scored differently. Where the database lives is
+/// not a retrieval event and is deliberately absent.
+pub(crate) fn config_snapshot(cfg: &BankConfig) -> String {
+    serde_json::json!({
+        "model_id": cfg.model_id,
+        "embedding_dim": cfg.embedding_dim,
+        "max_chunk_tokens": cfg.max_chunk_tokens,
+        "chunk_overlap_chars": cfg.chunk_overlap_chars,
+        "mmr_lambda": cfg.mmr_lambda,
+        "mmr_candidate_multiplier": cfg.mmr_candidate_multiplier,
+        "heading_boost": cfg.heading_boost,
+        "rrf_k": cfg.rrf_k,
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +602,41 @@ mod tests {
         let mut positives = vec![0.70, 0.80];
         let mut probes: Vec<f32> = vec![];
         assert!(suggest_threshold(&mut positives, &mut probes).is_none());
+    }
+
+    #[test]
+    fn fingerprint_ignores_input_order() {
+        let a = vec![("a.md".to_string(), "h1".to_string()), ("b.md".to_string(), "h2".to_string())];
+        let b = vec![("b.md".to_string(), "h2".to_string()), ("a.md".to_string(), "h1".to_string())];
+        assert_eq!(corpus_fingerprint(&a), corpus_fingerprint(&b));
+    }
+
+    #[test]
+    fn fingerprint_changes_when_a_document_changes() {
+        let a = vec![("a.md".to_string(), "h1".to_string())];
+        let b = vec![("a.md".to_string(), "h2".to_string())];
+        assert_ne!(corpus_fingerprint(&a), corpus_fingerprint(&b));
+    }
+
+    #[test]
+    fn fingerprint_changes_when_a_document_is_added() {
+        let a = vec![("a.md".to_string(), "h1".to_string())];
+        let b = vec![("a.md".to_string(), "h1".to_string()), ("b.md".to_string(), "h2".to_string())];
+        assert_ne!(corpus_fingerprint(&a), corpus_fingerprint(&b));
+    }
+
+    #[test]
+    fn config_snapshot_records_retrieval_settings_only() {
+        let cfg = crate::bank::BankConfig::default();
+        let json = config_snapshot(&cfg);
+        for key in [
+            "model_id", "embedding_dim", "max_chunk_tokens", "chunk_overlap_chars",
+            "mmr_lambda", "mmr_candidate_multiplier", "heading_boost", "rrf_k",
+        ] {
+            assert!(json.contains(key), "snapshot missing {key}: {json}");
+        }
+        // Where the database lives is not a retrieval event.
+        assert!(!json.contains("index_path"), "snapshot leaked index_path: {json}");
+        assert!(!json.contains("repo_root"), "snapshot leaked repo_root: {json}");
     }
 }

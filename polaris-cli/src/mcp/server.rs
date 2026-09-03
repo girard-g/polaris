@@ -116,18 +116,25 @@ impl PolarisServer {
         let bank_for_search = bank.clone();
         let query_for_search = query.clone();
         let search_outcome = tokio::task::spawn_blocking(move || {
-            bank_for_search.search(&query_for_search, polaris_core::SearchOpts { top_k })
+            bank_for_search
+                .search_with_confidence(&query_for_search, polaris_core::SearchOpts { top_k })
         }).await;
 
-        let results = match search_outcome {
-            Ok(Ok(results)) => results,
+        let (results, best) = match search_outcome {
+            Ok(Ok(pair)) => pair,
             Ok(Err(e)) => return format!("Error: {e}{banner}"),
             Err(e) => return format!("Error: task failed: {e}{banner}"),
         };
 
-        // Best match across the set, not `results[0]`: MMR reorders for
-        // diversity, so the head is not necessarily the closest chunk.
-        let best = results.iter().map(|r| r.score).fold(f32::MIN, f32::max);
+        // `best` is the corpus's nearest chunk, taken from the KNN pool before
+        // MMR reordered and truncated. Taking `max` over `results` instead made
+        // the verdict depend on the caller's `top_k`: `candidate_count` is
+        // `top_k * mmr_candidate_multiplier`, so a different `top_k` gives a
+        // different candidate pool, different RRF ranks and a different MMR
+        // selection. Measured on this repo's docs, "configure OAuth SSO for the
+        // web dashboard" scored 0.674 at top_k=2 and 0.646 at top_k=5 — admitted
+        // and refused by the same 0.65 gate on an identical index. KNN is nested,
+        // so its maximum is a property of the query and the corpus alone.
         let confident = !results.is_empty() && best >= config.search_min_similarity;
 
         let formatted = if results.is_empty() {

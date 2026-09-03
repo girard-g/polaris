@@ -195,9 +195,21 @@ impl Bank {
     /// The reported score is the query-chunk cosine — absolute, comparable
     /// across queries. See [`crate::search::SearchEngine::search`].
     pub fn search(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
+        Ok(self.search_with_confidence(query, opts)?.0)
+    }
+
+    /// [`search`] plus the corpus's best query-to-chunk cosine. Callers that
+    /// decide whether to *use* the results gate on that number rather than on
+    /// `max` over the returned set, which moves with `top_k`. See
+    /// [`crate::search::SearchEngine::search_with_confidence`].
+    pub fn search_with_confidence(
+        &self,
+        query: &str,
+        opts: SearchOpts,
+    ) -> Result<(Vec<SearchResult>, f32)> {
         let db = self.inner.db.lock().expect("bank db poisoned");
         let engine = self.engine(&db);
-        engine.search(query, opts.top_k)
+        engine.search_with_confidence(query, opts.top_k)
     }
 
     /// Like [`search`], but returns `(similarity, result)` pairs where `result`

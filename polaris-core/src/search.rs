@@ -40,14 +40,37 @@ impl<'a> SearchEngine<'a> {
     /// (the MCP tool, the auto-search hook) need a number that survives leaving
     /// the result set, and cosine is the one the pipeline already computes.
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
-        Ok(self
-            .search_raw(query, top_k)?
-            .into_iter()
-            .map(|(similarity, mut r)| {
-                r.score = similarity;
-                r
-            })
-            .collect())
+        Ok(self.search_with_confidence(query, top_k)?.0)
+    }
+
+    /// Like [`search`], plus the corpus's best query-to-chunk cosine.
+    ///
+    /// That second value is what a caller deciding whether to *use* the results
+    /// should gate on — never `max` over the returned set. MMR trades relevance
+    /// for diversity, and its selection is not nested in `top_k`, so the
+    /// set-maximum moves with how many results the caller happened to ask for:
+    /// measured on this repo's own docs, "configure OAuth SSO for the web
+    /// dashboard" reported 0.673 at `top_k=5` and 0.622 at `top_k=10`, flipping
+    /// a 0.65 gate from admit to reject on an identical query and index. The
+    /// KNN pool's nearest neighbour is the same chunk whatever `top_k` asks
+    /// for, so the confidence it yields is a property of the query and the
+    /// corpus alone.
+    pub fn search_with_confidence(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<(Vec<SearchResult>, f32)> {
+        let (results, confidence) = self.search_raw_with_confidence(query, top_k)?;
+        Ok((
+            results
+                .into_iter()
+                .map(|(similarity, mut r)| {
+                    r.score = similarity;
+                    r
+                })
+                .collect(),
+            confidence,
+        ))
     }
 
     /// Like [`search`], but returns `(similarity, result)` pairs where `result`
@@ -60,15 +83,28 @@ impl<'a> SearchEngine<'a> {
     /// ~0.0003 of each other no matter what they contain. Cosine is the one
     /// signal that means the same thing in every bank.
     pub fn search_raw(&self, query: &str, top_k: usize) -> Result<Vec<(f32, SearchResult)>> {
-        let (scored, query_embedding) = self.search_scored(query, top_k)?;
-        Ok(scored
-            .into_iter()
-            .map(|(s, mut c)| {
-                let similarity = cosine_similarity(&query_embedding, &c.embedding);
-                c.score = s;
-                (similarity, c.into_search_result())
-            })
-            .collect())
+        Ok(self.search_raw_with_confidence(query, top_k)?.0)
+    }
+
+    /// [`search_raw`] plus the `top_k`-independent confidence described on
+    /// [`search_with_confidence`].
+    pub fn search_raw_with_confidence(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<(Vec<(f32, SearchResult)>, f32)> {
+        let (scored, query_embedding, confidence) = self.search_scored(query, top_k)?;
+        Ok((
+            scored
+                .into_iter()
+                .map(|(s, mut c)| {
+                    let similarity = cosine_similarity(&query_embedding, &c.embedding);
+                    c.score = s;
+                    (similarity, c.into_search_result())
+                })
+                .collect(),
+            confidence,
+        ))
     }
 
     /// Core retrieval pipeline returning `(raw_score, result)` pairs without
@@ -78,7 +114,7 @@ impl<'a> SearchEngine<'a> {
         &self,
         query: &str,
         top_k: usize,
-    ) -> Result<(Vec<(f32, SearchResultWithEmbedding)>, Vec<f32>)> {
+    ) -> Result<(Vec<(f32, SearchResultWithEmbedding)>, Vec<f32>, f32)> {
         let query_embedding = self.embedding_engine.embed_query(query)?;
         let candidate_count = top_k * self.candidate_multiplier;
 
@@ -86,12 +122,23 @@ impl<'a> SearchEngine<'a> {
         let vector_results =
             self.db.search_knn_with_embeddings(&query_embedding, candidate_count)?;
 
+        // Confidence, fixed here and never recomputed downstream. KNN returns
+        // the *nearest* chunks, so widening the pool only appends worse ones —
+        // this maximum is the corpus's single best match for the query and does
+        // not move with `top_k`, unlike anything measured after MMR has
+        // reordered and truncated. Falls back to 0.0 on a BM25-only match,
+        // which is the honest answer: no chunk was close in embedding space.
+        let confidence = vector_results
+            .iter()
+            .map(|c| cosine_similarity(&query_embedding, &c.embedding))
+            .fold(0.0f32, f32::max);
+
         // 2. BM25 retrieval (graceful degradation on syntax error or empty FTS table).
         let sanitized_query = sanitize_fts5_query(query);
         let bm25_results = self.db.search_bm25(&sanitized_query, candidate_count).unwrap_or_default();
 
         if vector_results.is_empty() && bm25_results.is_empty() {
-            return Ok((vec![], query_embedding));
+            return Ok((vec![], query_embedding, confidence));
         }
 
         // 3. RRF score fusion.
@@ -107,7 +154,7 @@ impl<'a> SearchEngine<'a> {
         }
 
         if all_results.is_empty() {
-            return Ok((vec![], query_embedding));
+            return Ok((vec![], query_embedding, confidence));
         }
 
         // 5. Apply heading boost on top of RRF scores.
@@ -128,7 +175,7 @@ impl<'a> SearchEngine<'a> {
             .collect();
 
         // 6. MMR reranking.
-        Ok((mmr_rerank(boosted, top_k, self.mmr_lambda), query_embedding))
+        Ok((mmr_rerank(boosted, top_k, self.mmr_lambda), query_embedding, confidence))
     }
 
     /// Format search results as a markdown string (for CLI / MCP output).

@@ -439,12 +439,18 @@ pub fn perform_search(
     // total. Gate on the cosine: RRF is *rank* fusion, so the top hit scores
     // ~0.033 whether or not it has anything to do with the prompt — an
     // off-topic prompt still clears any RRF threshold low enough to be useful.
-    let results = search.search_raw(prompt, 1)?;
+    //
+    // `confidence` is the corpus's nearest chunk, measured before MMR picked
+    // which single chunk to return. At `top_k = 1` MMR selects on boosted RRF,
+    // so `similarity` below is the cosine of whichever chunk *ranked* first,
+    // not of the best match — gating on it made the verdict depend on the
+    // pipeline's ordering rather than on whether the docs cover the prompt.
+    let (results, confidence) = search.search_raw_with_confidence(prompt, 1)?;
     let Some((similarity, mut top)) = results.into_iter().next() else {
         return Ok(None);
     };
 
-    if similarity < cfg.search_min_similarity {
+    if confidence < cfg.search_min_similarity {
         return Ok(None);
     }
 

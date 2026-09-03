@@ -365,15 +365,20 @@ pub(crate) fn config_snapshot(cfg: &BankConfig) -> String {
 /// bounds MRR's denominator as well as recall's window.
 const EVAL_TOP_K: usize = 10;
 
-/// Depth at which probe scores are measured.
+/// Depth used for probe searches.
 ///
-/// The two threshold consumers aggregate differently: the auto-search hook gates
-/// on the single top-1 cosine, while the MCP tool takes the max across `top_k`
-/// (default 5). Max-over-5 is never below max-over-1, so measuring probes at 1
-/// understated the ceiling the MCP gate actually faces and biased the suggested
-/// threshold low — re-admitting the off-topic injection the gate exists to stop.
-/// Measuring at the MCP default yields a floor valid for both consumers.
-const PROBE_TOP_K: usize = 5;
+/// Probes record the `search_with_confidence` confidence, which comes from the
+/// KNN pool before MMR reorders or truncates and is therefore the same number at
+/// any depth — so this is set to 1 purely to do the least work.
+///
+/// An earlier version measured the max across the returned results and raised
+/// this to 5 to match the MCP tool, reasoning that max-over-5 could not be below
+/// max-over-1. That was wrong: `candidate_count` is `top_k *
+/// mmr_candidate_multiplier`, so a larger `top_k` yields a different candidate
+/// pool, different RRF ranks and a different MMR selection. The set maximum is
+/// neither monotonic nor nested in `top_k` — which is exactly why the gates
+/// stopped using it.
+const PROBE_TOP_K: usize = 1;
 
 /// Below this many usable sentences the percentiles are noise. The run still
 /// completes; the caller is told.
@@ -482,22 +487,23 @@ pub fn run(bank: &Bank, opts: EvalOpts) -> Result<EvalReport> {
 
     let mut probe_scores = Vec::with_capacity(probe_queries.len());
     for q in &probe_queries {
-        let results = bank.search(q, crate::SearchOpts { top_k: PROBE_TOP_K })?;
-        // Max across the set, not `first()` — MMR reranks for diversity, so the
-        // head is not the highest-scoring result. This mirrors the MCP gate
-        // exactly (`fold(f32::MIN, f32::max)` over its own top_k); measuring the
-        // head instead would understate the ceiling the gate computes, which is
-        // the whole point of measuring probes at PROBE_TOP_K in the first place.
-        // An empty result set contributes nothing rather than a zero.
-        if let Some(best) = results
-            .iter()
-            .map(|r| r.score)
-            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        {
-            probe_scores.push(best);
+        // Record the confidence, which is precisely what both threshold
+        // consumers gate on. Measuring anything else here would calibrate the
+        // threshold against a quantity no consumer computes.
+        let (results, confidence) =
+            bank.search_with_confidence(q, crate::SearchOpts { top_k: PROBE_TOP_K })?;
+        if !results.is_empty() {
+            probe_scores.push(confidence);
         }
     }
 
+    // Positives stay the SOURCE chunk's own cosine, while probes record the
+    // corpus-best confidence. The asymmetry is deliberate and errs safe: for an
+    // answerable query the confidence is by definition at least the source
+    // chunk's cosine, so a threshold placed below p10 of the positives is also
+    // below the confidence those queries present to the gate, and cannot reject
+    // them. Recording the corpus best here instead would credit a chunk that is
+    // not the known-correct answer.
     let mut positives: Vec<f32> = outcomes.iter().filter_map(|o| o.score).collect();
     let positive_p10 = percentile(&mut positives, 0.10);
     let positive_median = percentile(&mut positives, 0.50);

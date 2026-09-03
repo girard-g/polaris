@@ -94,3 +94,70 @@ fn search_score_is_absolute_not_normalised() {
         "scores must separate on relevance: on={on_topic:.3} off={off_topic:.3}"
     );
 }
+
+/// The gate's confidence must be a property of the query and the corpus, not of
+/// how many results the caller asked for. It was not: the MCP tool took `max`
+/// over the MMR-reranked, truncated output, and MMR's selection is not nested in
+/// `top_k`, so on this repo's own docs "configure OAuth SSO for the web
+/// dashboard" reported 0.673 at `top_k=5` and 0.622 at `top_k=10` — admitted by
+/// a 0.65 gate at one `k`, rejected at another, same query, same index.
+///
+/// Ceiling: this fixture is small enough that MMR may not reshuffle across `k`,
+/// so a regression is caught by the equality invariant rather than by
+/// reproducing the original divergence.
+#[test]
+#[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
+fn confidence_is_independent_of_top_k() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join("docs")).unwrap();
+    for (name, body) in [
+        ("retrieval", "Hybrid retrieval fuses vector KNN and BM25 with reciprocal rank fusion."),
+        ("ranking", "Ranking applies a heading boost before maximal marginal relevance reranking."),
+        ("chunking", "Chunking splits markdown at section headings and keeps heading context."),
+        ("storage", "Storage uses SQLite with sqlite-vec for vectors and FTS5 for keyword search."),
+        ("embedding", "Embedding runs a local ONNX model and truncates vectors matryoshka style."),
+        ("config", "Configuration lives in polaris.toml and validates dimensions on open."),
+    ] {
+        fs::write(
+            tmp.path().join(format!("docs/{name}.md")),
+            format!("# {name}\n\n{body}\n\n## Detail\n\n{body} {body}\n"),
+        )
+        .unwrap();
+    }
+
+    let embed = SharedEmbedding::load("nomic-embed-text-v1.5", 64).expect("load model");
+    let cfg = BankConfig {
+        repo_root: tmp.path().to_path_buf(),
+        index_path: tmp.path().join(".polaris/index.db"),
+        embedding_dim: 64,
+        model_id: "nomic-embed-text-v1.5".to_string(),
+        ..Default::default()
+    };
+    let bank = Bank::open(cfg, embed).expect("open bank");
+    bank.index_path(&tmp.path().join("docs"), IndexOpts::default()).expect("index");
+
+    for query in ["how does ranking work", "how do I bake sourdough bread"] {
+        let mut seen: Option<f32> = None;
+        for top_k in [1usize, 2, 3, 5, 10] {
+            let (results, confidence) = bank
+                .search_with_confidence(query, SearchOpts { top_k })
+                .expect("search");
+
+            let set_max = results.iter().map(|r| r.score).fold(0.0f32, f32::max);
+            assert!(
+                confidence >= set_max - 1e-6,
+                "{query:?} at top_k={top_k}: confidence {confidence} is below the set max \
+                 {set_max}, so it is not the corpus's best match"
+            );
+
+            match seen {
+                None => seen = Some(confidence),
+                Some(first) => assert!(
+                    (confidence - first).abs() < 1e-6,
+                    "{query:?}: confidence moved with top_k ({first} -> {confidence} at \
+                     top_k={top_k}); the gate's verdict must not depend on the caller"
+                ),
+            }
+        }
+    }
+}

@@ -30,6 +30,14 @@ pub fn format_report(r: &EvalReport, current_threshold: f32) -> String {
     if let Some(prev) = &r.previous {
         if r.corpus_changed {
             out.push_str("  corpus changed since the last run — deltas omitted\n\n");
+        } else if prev.sample_size != r.sample_size as i64 {
+            // Different sample sizes measure different question sets, so the
+            // difference is sampling noise. eval_run stores sample_size, but
+            // config_json does not, so the config-change guard cannot catch it.
+            out.push_str(&format!(
+                "  last run sampled {} sentences, this one {} — deltas omitted\n\n",
+                prev.sample_size, r.sample_size
+            ));
         } else {
             out.push_str(&format!(
                 "  since last run: recall@3 {:+.2}   MRR {:+.2}\n",
@@ -41,6 +49,20 @@ pub fn format_report(r: &EvalReport, current_threshold: f32) -> String {
             }
             out.push('\n');
         }
+    }
+
+    // Nothing was measured, so every number below would be an artefact. Say that
+    // instead of routing zeros through the threshold arms, where positives p10 of
+    // 0.00 previously rendered as an English-dominant-model diagnosis.
+    if r.sample_size == 0 {
+        out.push_str(
+            "  ! no sentences could be sampled from this corpus, so nothing was
+                 measured. Prose under headings is what eval samples — a corpus of
+                 only headings, tables and code blocks yields none. This run was
+                 not recorded.
+",
+        );
+        return out;
     }
 
     match (r.suggested_threshold, r.probe_p95) {
@@ -113,6 +135,16 @@ pub fn run(cfg: &PolarisConfig, sample: Option<usize>, json: bool) -> Result<()>
         )));
     }
 
+    // The CLI override bypassed PolarisConfig::validate, which rejects
+    // eval.sample_size == 0 — so `--sample 0` reached the engine, produced
+    // all-zero metrics, and had them rendered as a corpus diagnosis.
+    let effective_sample = sample.unwrap_or(cfg.eval.sample_size);
+    if effective_sample == 0 {
+        return Err(PolarisError::Config(
+            "--sample must be greater than 0".to_string(),
+        ));
+    }
+
     let bank = open_primary_bank(cfg)?;
 
     // An empty index yields no sentences, which would otherwise surface as a
@@ -126,7 +158,7 @@ pub fn run(cfg: &PolarisConfig, sample: Option<usize>, json: bool) -> Result<()>
     let report = polaris_core::eval::run(
         &bank,
         polaris_core::eval::EvalOpts {
-            sample_size: sample.unwrap_or(cfg.eval.sample_size),
+            sample_size: effective_sample,
             probes: cfg.eval.probes.clone(),
         },
     )?;
@@ -199,6 +231,49 @@ mod tests {
         r.language = Language::Unknown;
         let out = format_report(&r, 0.65);
         assert!(out.contains("eval.probes"), "must point at the escape hatch: {out}");
+    }
+
+    #[test]
+    fn zero_sample_reports_that_nothing_was_measured() {
+        // Regression: an empty sample used to route positives p10 = 0.00 through
+        // the overlap arm and print an English-dominant-model diagnosis.
+        let mut r = report();
+        r.sample_size = 0;
+        r.suggested_threshold = None;
+        let out = format_report(&r, 0.65);
+        assert!(out.contains("no sentences could be sampled"), "got: {out}");
+        assert!(
+            !out.contains("another language"),
+            "must not diagnose a language mismatch it never observed: {out}"
+        );
+    }
+
+    #[test]
+    fn deltas_are_omitted_across_different_sample_sizes() {
+        use polaris_core::db::EvalRunRow;
+        let mut r = report();
+        r.sample_size = 200;
+        r.previous = Some(EvalRunRow {
+            id: 1,
+            ts: 1_000,
+            sample_size: 10,
+            recall_1: 0.10,
+            recall_3: 0.10,
+            recall_3_file: 0.10,
+            mrr: 0.10,
+            positive_p10: 0.5,
+            positive_median: 0.6,
+            probe_p95: Some(0.5),
+            suggested_threshold: Some(0.55),
+            corpus_fingerprint: "abc".to_string(),
+            config_json: "{}".to_string(),
+        });
+        let out = format_report(&r, 0.65);
+        assert!(out.contains("deltas omitted"), "got: {out}");
+        assert!(
+            !out.contains("since last run"),
+            "a 10-vs-200 sample delta is sampling noise, not a signal: {out}"
+        );
     }
 
     #[test]

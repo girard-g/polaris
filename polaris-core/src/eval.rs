@@ -34,6 +34,19 @@ const MAX_SENTENCE_WORDS: usize = 40;
 /// lines of one paragraph. Lines are buffered and flushed into a single paragraph
 /// text before splitting on sentence terminators.
 pub(crate) fn split_sentences(body: &str) -> Vec<String> {
+    // A chunk carries no record of whether it began inside a code fence, and the
+    // chunker splits on a character budget with no fence awareness — so a code
+    // block longer than one chunk routinely starts a chunk mid-fence. Assuming
+    // `in_fence = false` there inverts the state: the *closing* fence opens one,
+    // real prose after it is discarded, and the code before it is emitted as
+    // queries. An odd fence count is exactly the ambiguous case, and nothing in
+    // the chunk can resolve it, so drop the chunk rather than guess.
+    // ponytail: fail closed on ambiguity; the fix is fence-aware chunking, which
+    // belongs in indexer.rs, not here.
+    if body.matches("```").count() % 2 != 0 {
+        return Vec::new();
+    }
+
     let mut out = Vec::new();
     let mut in_fence = false;
     let mut buffer = String::new();
@@ -352,6 +365,16 @@ pub(crate) fn config_snapshot(cfg: &BankConfig) -> String {
 /// bounds MRR's denominator as well as recall's window.
 const EVAL_TOP_K: usize = 10;
 
+/// Depth at which probe scores are measured.
+///
+/// The two threshold consumers aggregate differently: the auto-search hook gates
+/// on the single top-1 cosine, while the MCP tool takes the max across `top_k`
+/// (default 5). Max-over-5 is never below max-over-1, so measuring probes at 1
+/// understated the ceiling the MCP gate actually faces and biased the suggested
+/// threshold low — re-admitting the off-topic injection the gate exists to stop.
+/// Measuring at the MCP default yields a floor valid for both consumers.
+const PROBE_TOP_K: usize = 5;
+
 /// Below this many usable sentences the percentiles are noise. The run still
 /// completes; the caller is told.
 pub const MIN_RELIABLE_SAMPLE: usize = 30;
@@ -459,9 +482,19 @@ pub fn run(bank: &Bank, opts: EvalOpts) -> Result<EvalReport> {
 
     let mut probe_scores = Vec::with_capacity(probe_queries.len());
     for q in &probe_queries {
-        let results = bank.search(q, crate::SearchOpts { top_k: 1 })?;
-        if let Some(top) = results.first() {
-            probe_scores.push(top.score);
+        let results = bank.search(q, crate::SearchOpts { top_k: PROBE_TOP_K })?;
+        // Max across the set, not `first()` — MMR reranks for diversity, so the
+        // head is not the highest-scoring result. This mirrors the MCP gate
+        // exactly (`fold(f32::MIN, f32::max)` over its own top_k); measuring the
+        // head instead would understate the ceiling the gate computes, which is
+        // the whole point of measuring probes at PROBE_TOP_K in the first place.
+        // An empty result set contributes nothing rather than a zero.
+        if let Some(best) = results
+            .iter()
+            .map(|r| r.score)
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            probe_scores.push(best);
         }
     }
 
@@ -502,7 +535,11 @@ pub fn run(bank: &Bank, opts: EvalOpts) -> Result<EvalReport> {
         corpus_fingerprint: corpus_fingerprint.clone(),
         config_json: config_json.clone(),
     };
-    bank.with_db(|db| db.insert_eval_run(&row))?;
+    // A run that sampled nothing measured nothing. Persisting it would hand the
+    // next run a baseline of zeros and manufacture a regression out of it.
+    if !outcomes.is_empty() {
+        bank.with_db(|db| db.insert_eval_run(&row))?;
+    }
 
     Ok(EvalReport {
         metrics: m,
@@ -546,6 +583,37 @@ mod tests {
             "Five words are not enough. Exactly six words are kept here. {long}"
         ));
         assert_eq!(got, vec!["Exactly six words are kept here".to_string()]);
+    }
+
+    #[test]
+    fn drops_a_chunk_that_starts_inside_a_code_fence() {
+        // The chunker splits on a character budget with no fence awareness, so a
+        // long code block gives the next chunk a body that opens with the block's
+        // remainder and then closes it. Treating that closing fence as an opening
+        // one inverts the state: prose after it is dropped and the code before it
+        // is emitted as queries.
+        let got = split_sentences(
+            "let total = compute_everything(alpha, beta, gamma);\n\
+             ```\n\
+             This ordinary prose sentence follows the code block.",
+        );
+        assert!(
+            got.is_empty(),
+            "an odd fence count is ambiguous and must be dropped, got: {got:?}"
+        );
+    }
+
+    #[test]
+    fn balanced_fences_still_yield_surrounding_prose() {
+        // The fail-closed rule must not swallow the ordinary balanced case.
+        let got = split_sentences(
+            "This ordinary prose sentence precedes the code block.\n\
+             ```\n\
+             let total = compute_everything(alpha, beta, gamma);\n\
+             ```\n\
+             And this ordinary prose sentence follows the code block.",
+        );
+        assert_eq!(got.len(), 2, "expected both prose sentences, got: {got:?}");
     }
 
     #[test]

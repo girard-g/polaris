@@ -287,6 +287,9 @@ impl PolarisServer {
         let config = Arc::clone(&self.state.config);
         let bank = self.state.bank.clone();
         let sample = params.sample.map(|s| s as usize).unwrap_or(config.eval.sample_size);
+        if sample == 0 {
+            return format!("Error: sample must be greater than 0{banner}");
+        }
         let probes = config.eval.probes.clone();
 
         let outcome = tokio::task::spawn_blocking(move || {

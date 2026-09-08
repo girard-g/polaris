@@ -440,17 +440,28 @@ pub fn perform_search(
     // ~0.033 whether or not it has anything to do with the prompt — an
     // off-topic prompt still clears any RRF threshold low enough to be useful.
     //
-    // `confidence` is the corpus's nearest chunk, measured before MMR picked
-    // which single chunk to return. At `top_k = 1` MMR selects on boosted RRF,
-    // so `similarity` below is the cosine of whichever chunk *ranked* first,
-    // not of the best match — gating on it made the verdict depend on the
-    // pipeline's ordering rather than on whether the docs cover the prompt.
-    let (results, confidence) = search.search_raw_with_confidence(prompt, 1)?;
+    // Gate on the delivered chunk's own cosine, NOT on the corpus-best
+    // `confidence` the MCP tool uses. The two consumers differ in kind: the MCP
+    // tool returns a set with visible scores and an agent can weigh them, so
+    // asking "does the corpus cover this at all" is the right question — and it
+    // must be top_k-independent because the caller chooses top_k. This hook
+    // instead staples one chunk into a prompt, invisibly, with no opportunity to
+    // judge it, so the only safe question is whether *that chunk* is relevant.
+    //
+    // Gating on `confidence` here would let a high-scoring chunk elsewhere in
+    // the corpus open the gate for a lexical BM25-only match that RRF and the
+    // heading boost happened to rank first: 0.80 clears the threshold, 0.45 gets
+    // injected. `confidence` is always >= `similarity` (KNN holds the nearest
+    // chunks, so anything outside the pool scores lower), which is exactly why
+    // requiring both is the same test as requiring this one. The hook's `top_k`
+    // is fixed at 1, so it never had the caller-varying-top_k problem that made
+    // the MCP tool switch to `confidence`.
+    let results = search.search_raw(prompt, 1)?;
     let Some((similarity, mut top)) = results.into_iter().next() else {
         return Ok(None);
     };
 
-    if confidence < cfg.search_min_similarity {
+    if similarity < cfg.search_min_similarity {
         return Ok(None);
     }
 

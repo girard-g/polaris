@@ -45,7 +45,7 @@ max_top_k = 50
 
 # Minimum query-to-chunk cosine similarity for the auto-search hook to inject
 # a result. Model-dependent: retune it if you change `model_id`.
-search_min_similarity = 0.65
+search_min_similarity = 0.63
 
 # Maximum file size (in bytes) the indexer will process; larger files are skipped
 max_file_size = 10485760  # 10 MiB
@@ -85,7 +85,7 @@ Config is resolved in this order (first match wins):
 | `heading_boost` | `0.05` | — | Additive; 0.0 disables it |
 | `rrf_k` | `60` | — | RRF rank fusion constant |
 | `max_top_k` | `50` | — | Maximum `top_k` accepted by search commands |
-| `search_min_similarity` | `0.65` | `[0.0, 1.0]` | Auto-search hook confidence gate; retune per `model_id` |
+| `search_min_similarity` | `0.63` | `[0.0, 1.0]` | Auto-search hook confidence gate; retune per `model_id` |
 | `max_file_size` | `10485760` | `> 0` | 10 MiB; larger files are skipped during indexing |
 | `extra_db_paths` | `[]` | — | Additional read-only DBs fused into search (multi-DB) |
 | `eval.sample_size` | `200` | `> 0` | Sentences sampled per `polaris eval` run |

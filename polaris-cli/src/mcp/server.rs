@@ -133,8 +133,8 @@ impl PolarisServer {
         // different candidate pool, different RRF ranks and a different MMR
         // selection. Measured on this repo's docs, "configure OAuth SSO for the
         // web dashboard" scored 0.674 at top_k=2 and 0.646 at top_k=5 — admitted
-        // and refused by the same 0.65 gate on an identical index. KNN is nested,
-        // so its maximum is a property of the query and the corpus alone.
+        // and refused by the then-shipped 0.65 gate on an identical index. KNN is
+        // nested, so its maximum is a property of the query and the corpus alone.
         let confident = !results.is_empty() && best >= config.search_min_similarity;
 
         let formatted = if results.is_empty() {

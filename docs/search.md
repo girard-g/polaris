@@ -162,17 +162,30 @@ once normalised by the per-call maximum, which pinned the top hit at `1.000` no
 matter what — a query the corpus had nothing to say about still came back
 looking certain.
 
-Measured on this repo's own index with the default `nomic-embed-text-v1.5`:
+Measured on this repo's own index with the default `nomic-embed-text-v1.5`,
+by `polaris eval` over 200 corpus sentences plus a hand-built set of off-topic
+queries:
 
-| | top-1 cosine |
-|---|---|
-| on-topic queries | 0.73 – 0.85 |
-| off-topic queries | 0.52 – 0.57 |
+| | p10 | median | p95 |
+|---|---|---|---|
+| on-topic queries | 0.632 | 0.746 | — |
+| off-topic queries | — | 0.623 | 0.628 |
+
+The two classes overlap: on-topic queries have been seen as low as 0.607 and
+off-topic ones as high as 0.682, so **no threshold separates them cleanly**. The
+gate trades false negatives against false positives, and the default sits at the
+midpoint `polaris eval` recommends. Off-topic queries that merely *sound*
+adjacent to the corpus — deployment, config, auth — are what clears it; plainly
+unrelated ones sit at 0.54 and are refused.
+
+Narrowing the index widens the gap: the same measurement over documentation
+alone, with design specs excluded, moves on-topic p10 to 0.646 and off-topic p95
+to 0.604. Index scope moves the gate, not just the threshold.
 
 The floor is well above zero because the model prefixes queries with
 `search_query: `, which gives any two texts a shared baseline. That floor moves
 with the model — `all-minilm-l6-v2` uses no prefix and sits far lower — so
-`search_min_similarity` (default `0.65`) is config, not a constant, and needs
+`search_min_similarity` (default `0.63`) is config, not a constant, and needs
 retuning if you change `model_id`.
 
 Two callers act on it:
@@ -195,7 +208,7 @@ asked for: `candidate_count` is `top_k * mmr_candidate_multiplier`, so a larger
 `top_k` draws a wider candidate pool, which changes RRF ranks and changes what
 MMR selects. Measured on this repo's own docs, "configure OAuth SSO for the web
 dashboard" scored 0.674 at `top_k=2` and 0.646 at `top_k=5` — admitted and
-refused by the same 0.65 gate, same index, same query. KNN is nested, so its
+refused by the then-shipped 0.65 gate, same index, same query. KNN is nested, so its
 maximum does not move.
 
 The auto-search hook deliberately gates on something else: the cosine of the one

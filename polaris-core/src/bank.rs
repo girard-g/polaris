@@ -496,9 +496,22 @@ impl BankSet {
             });
             scored.truncate(opts.top_k);
         } else {
-            // One bank: there is nothing to merge, and RRF scores are perfectly
-            // comparable within a bank. Keep the existing ordering rather than
-            // reshuffling the dominant path.
+            // One bank: nothing to merge, so order by the within-bank hybrid
+            // score, which is comparable here in a way it never is across banks.
+            //
+            // This REPLACES MMR's ordering with relevance order. MMR's choice of
+            // which chunks survive is kept; the sequence it picked them in is
+            // not. That is deliberate — a reader scanning a terminal wants the
+            // best match first — but the previous comment here claimed the sort
+            // preserved the incoming order, which it does not.
+            //
+            // Measured with `polaris eval` over 200 corpus sentences, the two
+            // orderings are within a point: MRR 0.77 sorted against 0.76
+            // unsorted, with recall@1 and recall@3 identical at 0.73 and 0.79.
+            //
+            // Consequence worth knowing: `Bank::search` does not sort, so the
+            // MCP tool returns these same chunks in MMR order while the CLI
+            // returns them in relevance order. See docs/search.md.
             scored.sort_by(|(_, a), (_, b)| {
                 b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
             });

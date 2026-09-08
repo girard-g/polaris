@@ -154,28 +154,35 @@ On a typical laptop:
 
 The model is loaded once at startup and kept in memory for the lifetime of the process.
 
-## Result ordering differs between the CLI and the MCP tool
+## Result ordering
 
-Both return the same chunks; they sequence them differently, and it is worth
-knowing which you are looking at.
+MMR is a selection algorithm, not a presentation one. It decides which chunks
+survive — trading a little relevance for diversity, so a result set is not three
+paraphrases of the same paragraph — and the engine then orders the survivors by
+relevance, because a reader wants the best match first rather than the order a
+greedy loop happened to pick them in.
 
-`Bank::search` — used by the MCP `search` tool and by `polaris eval` — returns
-results in the order MMR selected them, which interleaves relevance with
-diversity. `BankSet::search` — used by `polaris search` on the CLI — re-sorts a
-single bank's results by the hybrid RRF score, so the strongest match comes
-first.
+That sort lives in `SearchEngine::search_scored`, which every caller goes
+through. It has to live in exactly one place: `BankSet` used to re-sort a single
+bank itself while `Bank::search` did not, so `polaris search` on the CLI and the
+`search` MCP tool returned the same chunks in different sequences for the same
+query — and `polaris eval`, which measures the `Bank` path, was not measuring
+what the CLI printed. `tests/bank_set_search.rs` now pins that the two paths
+return identical ids and scores.
 
-On the same query and index the divergence is visible: a chunk scoring 0.766 can
-sit at rank 2 on the CLI and rank 5 over MCP. Measured across 200 corpus
-sentences with `polaris eval`, though, the two orderings score within a point of
-each other — MRR 0.77 for relevance order against 0.76 for MMR order, with
-recall@1 and recall@3 identical. Neither is meaningfully better at retrieving
-the right chunk; they differ in how the surviving set is presented.
+Multi-bank search is the one case that reorders afterwards, and it has to:
+across banks the hybrid score is not comparable — it encodes a chunk's rank
+inside its own bank, so merging on it hands roughly half of `top_k` to whichever
+other database happens to be mounted. Those merges order on the query-chunk
+cosine instead.
 
-One caveat on that measurement: eval's queries are sentences lifted from the
-corpus, so the correct answer is usually a strong lexical *and* semantic match.
-That is a weaker test of diversity ordering than a real ambiguous question would
-be.
+Measured with `polaris eval` over 200 corpus sentences, relevance order scores
+MRR 0.77 against 0.76 for MMR's own order, with recall@1 and recall@3 identical
+at 0.73 and 0.79 — so this is a consistency and readability fix, not a retrieval
+win. One caveat on that measurement: eval's queries are sentences lifted from
+the corpus, so the correct answer is usually a strong lexical *and* semantic
+match, which is a weaker test of diversity ordering than a real ambiguous
+question would be.
 
 ## Confidence
 

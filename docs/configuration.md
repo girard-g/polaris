@@ -4,6 +4,13 @@
 
 Polaris reads a TOML config file. All fields are optional; unset fields use their defaults.
 
+`polaris setup` writes a starter `polaris.toml` containing just
+`search_min_similarity`, and gitignores it — it carries per-corpus tuning rather
+than anything a team shares. Keep it short: a key you do not set keeps tracking
+its built-in default through upgrades, whereas one written out is pinned. Note
+that a project-local `polaris.toml` replaces the global one at
+`~/.config/polaris/polaris.toml` rather than merging with it.
+
 ```toml
 # SQLite database file path (relative to CWD or absolute)
 db_path = "polaris.db"

@@ -15,7 +15,7 @@ These flags are accepted before any subcommand:
 
 ### `polaris setup [path]`
 
-Configure a project to use Polaris as an MCP server. Writes `.mcp.json` (pointing at the running polaris binary) and ensures the right entries exist in `.gitignore`.
+Configure a project to use Polaris as an MCP server. Writes `.mcp.json` (pointing at the running polaris binary) and a starter `polaris.toml`, and ensures the right entries exist in `.gitignore`.
 
 ```bash
 polaris setup            # configure current directory
@@ -35,9 +35,10 @@ polaris setup ./my-proj  # configure a specific directory
 1. Validates the target path exists and is a directory
 2. Resolves the running binary via `std::env::current_exe()` and writes its absolute path to `.mcp.json` under `mcpServers.polaris`
 3. If `.mcp.json` already exists, parses it and upserts the polaris entry, preserving any other servers
-4. Appends missing entries to `.gitignore` under a `# polaris` comment header (`polaris.db`, `polaris.db-shm`, `polaris.db-wal`, `.fastembed_cache/`, `.mcp.json`)
-5. Writes a Polaris MCP instruction block into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` at the project root, marker-delimited (`<!-- polaris:begin --> … <!-- polaris:end -->`). Preserves existing user content; refreshes only the block on re-run. Skipped if `--no-agents` is passed.
-6. Idempotent: re-running prints "already configured" / "already up to date" without rewriting files
+4. Writes a starter `polaris.toml` carrying `search_min_similarity`, the one value that needs tuning per corpus. Only written when absent — an existing file is your configuration and is never rewritten or merged into. The file is deliberately minimal: every other key keeps tracking its built-in default, so a full dump would freeze the project on today's values across upgrades.
+5. Appends missing entries to `.gitignore` under a `# polaris` comment header (`polaris.db`, `polaris.db-shm`, `polaris.db-wal`, `.fastembed_cache/`, `.mcp.json`, `polaris.toml`)
+6. Writes a Polaris MCP instruction block into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` at the project root, marker-delimited (`<!-- polaris:begin --> … <!-- polaris:end -->`). Preserves existing user content; refreshes only the block on re-run. Skipped if `--no-agents` is passed.
+7. Idempotent: re-running prints "already configured" / "already up to date" without rewriting files
 
 **Output (first run):**
 

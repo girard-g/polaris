@@ -154,6 +154,29 @@ On a typical laptop:
 
 The model is loaded once at startup and kept in memory for the lifetime of the process.
 
+## Result ordering differs between the CLI and the MCP tool
+
+Both return the same chunks; they sequence them differently, and it is worth
+knowing which you are looking at.
+
+`Bank::search` — used by the MCP `search` tool and by `polaris eval` — returns
+results in the order MMR selected them, which interleaves relevance with
+diversity. `BankSet::search` — used by `polaris search` on the CLI — re-sorts a
+single bank's results by the hybrid RRF score, so the strongest match comes
+first.
+
+On the same query and index the divergence is visible: a chunk scoring 0.766 can
+sit at rank 2 on the CLI and rank 5 over MCP. Measured across 200 corpus
+sentences with `polaris eval`, though, the two orderings score within a point of
+each other — MRR 0.77 for relevance order against 0.76 for MMR order, with
+recall@1 and recall@3 identical. Neither is meaningfully better at retrieving
+the right chunk; they differ in how the surviving set is presented.
+
+One caveat on that measurement: eval's queries are sentences lifted from the
+corpus, so the correct answer is usually a strong lexical *and* semantic match.
+That is a weaker test of diversity ordering than a real ambiguous question would
+be.
+
 ## Confidence
 
 `score` is the cosine of the query against the chunk embedding, so it means the

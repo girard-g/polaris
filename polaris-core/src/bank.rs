@@ -469,8 +469,9 @@ impl BankSet {
     /// `source_db = label`, ordered, and truncated to `top_k`.
     ///
     /// With more than one bank the ordering key is the query-chunk cosine, the
-    /// only signal comparable across banks; with a single bank it stays the
-    /// within-bank RRF score.
+    /// only signal comparable across banks. A single bank is returned exactly as
+    /// [`Bank::search`] would return it, so the CLI and the MCP tool cannot
+    /// disagree about ordering.
     pub fn search(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
         let mut scored: Vec<(f32, SearchResult)> = Vec::new();
 
@@ -495,28 +496,11 @@ impl BankSet {
                 b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
             });
             scored.truncate(opts.top_k);
-        } else {
-            // One bank: nothing to merge, so order by the within-bank hybrid
-            // score, which is comparable here in a way it never is across banks.
-            //
-            // This REPLACES MMR's ordering with relevance order. MMR's choice of
-            // which chunks survive is kept; the sequence it picked them in is
-            // not. That is deliberate — a reader scanning a terminal wants the
-            // best match first — but the previous comment here claimed the sort
-            // preserved the incoming order, which it does not.
-            //
-            // Measured with `polaris eval` over 200 corpus sentences, the two
-            // orderings are within a point: MRR 0.77 sorted against 0.76
-            // unsorted, with recall@1 and recall@3 identical at 0.73 and 0.79.
-            //
-            // Consequence worth knowing: `Bank::search` does not sort, so the
-            // MCP tool returns these same chunks in MMR order while the CLI
-            // returns them in relevance order. See docs/search.md.
-            scored.sort_by(|(_, a), (_, b)| {
-                b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            scored.truncate(opts.top_k);
         }
+        // A single bank needs no reordering: the engine already returned these
+        // in relevance order and already truncated to `top_k`. This branch used
+        // to re-sort here, which is how the CLI and the MCP tool ended up
+        // sequencing identical results differently.
 
         // Report the cosine in both branches: it is what the multi-bank merge
         // ordered on, and the only score that still means something once it

@@ -174,8 +174,25 @@ impl<'a> SearchEngine<'a> {
             })
             .collect();
 
-        // 6. MMR reranking.
-        Ok((mmr_rerank(boosted, top_k, self.mmr_lambda), query_embedding, confidence))
+        // 6. MMR reranking, then order the survivors by relevance.
+        //
+        // MMR is a *selection* algorithm here, not a presentation one: it decides
+        // which chunks survive, trading some relevance for diversity so the set
+        // is not three paraphrases of one paragraph. The sequence it happens to
+        // pick them in is not useful to a reader, who wants the best match first.
+        //
+        // `.0` is the boosted RRF total, not the MMR score — `mmr_rerank` selects
+        // on the latter but returns the original pair — so this sorts by
+        // relevance. Measured with `polaris eval` over 200 corpus sentences,
+        // relevance order scores MRR 0.77 against 0.76 for MMR order, with
+        // recall@1 and recall@3 identical.
+        //
+        // Sorting HERE rather than in a caller is what keeps the orderings
+        // identical: `BankSet` used to re-sort a single bank itself, so the CLI
+        // and the MCP tool returned the same chunks in different sequences.
+        let mut ranked = mmr_rerank(boosted, top_k, self.mmr_lambda);
+        ranked.sort_by(|(a, _), (b, _)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        Ok((ranked, query_embedding, confidence))
     }
 
     /// Format search results as a markdown string (for CLI / MCP output).

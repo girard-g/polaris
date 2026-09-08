@@ -15,3 +15,7 @@ GEMINI.md
 
 # polaris
 polaris.db
+
+# Hand-built retrieval gold set (gold.jsonl, negatives.txt, RESULTS.md, run.py)
+# used to validate search_min_similarity; local data, not part of the build.
+eval/

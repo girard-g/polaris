@@ -13,7 +13,38 @@ const GITIGNORE_ENTRIES: &[&str] = &[
     "polaris.db-wal",
     ".fastembed_cache/",
     ".mcp.json",
+    "polaris.toml",
 ];
+
+/// Render the starter `polaris.toml`.
+///
+/// Deliberately minimal. Every key is optional and anything omitted tracks the
+/// compiled-in default, so dumping the full settings list here would silently
+/// freeze this project on today's defaults across future upgrades. Only the one
+/// value a user actually has to tune per corpus is written out.
+pub fn polaris_toml_content(search_min_similarity: f32) -> String {
+    format!(
+        "\
+# Polaris configuration.
+#
+# Every key is optional — anything left out uses the built-in default, so a
+# short file keeps tracking upgrades. See docs/configuration.md for the rest.
+
+# Minimum query-to-chunk cosine similarity for a result to be used. Below it the
+# MCP `search` tool answers \"No reliable context found\" and the auto-search hook
+# stays silent, rather than handing over a chunk that does not answer the query.
+#
+# This value is calibrated for the default model (nomic-embed-text-v1.5). Run
+# `polaris eval` to measure the right one for YOUR corpus — it prints a
+# suggestion next to whatever is configured here.
+#
+# Retune it if you change `model_id`: all-minilm-l6-v2 embeds without a query
+# prefix and scores in a far lower band, where this value would refuse
+# everything and the hook would go silently dead.
+search_min_similarity = {search_min_similarity}
+"
+    )
+}
 
 /// Filenames in the project root that receive the Polaris instruction block,
 /// in the order `setup` processes them.
@@ -624,6 +655,23 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
         }
     }
 
+    // polaris.toml — created only when absent. An existing file is a user's
+    // tuned configuration and is never rewritten or merged into.
+    let toml_path = path.join("polaris.toml");
+    if toml_path.exists() {
+        println!(
+            "  {}  polaris.toml already present (left untouched)",
+            style("✓").green(),
+        );
+    } else {
+        write_atomic(&toml_path, &polaris_toml_content(cfg.search_min_similarity))?;
+        println!(
+            "  {}  Created polaris.toml (search_min_similarity = {})",
+            style("✓").green(),
+            cfg.search_min_similarity,
+        );
+    }
+
     // .gitignore
     let gitignore_path = path.join(".gitignore");
     let existing_gitignore = read_optional(&gitignore_path)?;
@@ -954,13 +1002,18 @@ mod tests {
         // Entries already present are not duplicated.
         assert_eq!(content.matches("polaris.db\n").count(), 1);
         assert_eq!(content.matches(".mcp.json\n").count(), 1);
-        assert_eq!(report.added, vec!["polaris.db-shm", "polaris.db-wal", ".fastembed_cache/"]);
+        assert!(content.contains("polaris.toml"));
+        assert_eq!(
+            report.added,
+            vec!["polaris.db-shm", "polaris.db-wal", ".fastembed_cache/", "polaris.toml"]
+        );
         assert_eq!(report.already_present, vec!["polaris.db", ".mcp.json"]);
     }
 
     #[test]
     fn gitignore_noop_when_all_present() {
-        let existing = "polaris.db\npolaris.db-shm\npolaris.db-wal\n.fastembed_cache/\n.mcp.json\n";
+        let existing =
+            "polaris.db\npolaris.db-shm\npolaris.db-wal\n.fastembed_cache/\n.mcp.json\npolaris.toml\n";
         let report = ensure_gitignore_entries(Some(existing));
         assert!(report.new_content.is_none(), "should not rewrite");
         assert!(report.added.is_empty());
@@ -1218,6 +1271,58 @@ second
     /// asserted against an empty index.
     fn register_vec_for_test() {
         polaris_core::db::register_vec_extension();
+    }
+
+    #[test]
+    fn polaris_toml_round_trips_into_the_real_config() {
+        // A template that does not parse would only surface the next time the
+        // user ran any polaris command, as a startup error on a file they did
+        // not write.
+        // Loaded through PolarisConfig::load rather than a bare parser, so the
+        // test covers the path a user's next polaris command actually takes.
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("polaris.toml");
+        std::fs::write(&file, polaris_toml_content(0.63)).unwrap();
+
+        let parsed = PolarisConfig::load(Some(&file)).expect("template must load");
+        assert!((parsed.search_min_similarity - 0.63).abs() < f32::EPSILON);
+        parsed.validate().expect("template must pass config validation");
+    }
+
+    #[test]
+    fn polaris_toml_reflects_the_configured_value_not_a_literal() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("polaris.toml");
+        std::fs::write(&file, polaris_toml_content(0.42)).unwrap();
+
+        let parsed = PolarisConfig::load(Some(&file)).unwrap();
+        assert!((parsed.search_min_similarity - 0.42).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn polaris_toml_is_gitignored() {
+        // Generated per-project alongside .mcp.json, which is ignored for the
+        // same reason: it carries machine-local paths and per-corpus tuning.
+        assert!(GITIGNORE_ENTRIES.contains(&"polaris.toml"));
+    }
+
+    #[test]
+    fn run_creates_polaris_toml_and_never_overwrites_one() {
+        let dir = TempDir::new().unwrap();
+        register_vec_for_test();
+
+        run(&PolarisConfig::default(), dir.path(), true, true, false).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("polaris.toml")).unwrap();
+        assert!(written.contains("search_min_similarity"));
+
+        // A second run must not clobber a user's edits.
+        std::fs::write(dir.path().join("polaris.toml"), "search_min_similarity = 0.11\n").unwrap();
+        run(&PolarisConfig::default(), dir.path(), true, true, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("polaris.toml")).unwrap(),
+            "search_min_similarity = 0.11\n",
+            "an existing polaris.toml is the user's config and must be left alone"
+        );
     }
 
     #[test]

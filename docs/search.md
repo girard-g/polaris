@@ -184,12 +184,27 @@ Two callers act on it:
 - **The auto-search hook** (`polaris hook search`) stays silent below it, so an
   unrelated prompt does not get documentation stapled to it.
 
-The MCP tool gates on the best score in the set, not the first result — MMR
-reorders for diversity, so the head is not necessarily the closest chunk. One
-consequence: because MMR also trades relevance for diversity, the same query can
-clear the gate at one `top_k` and not another. More candidates means more
-chances one of them is genuinely close, which is the behaviour you want, but it
-does mean the gate is not a pure function of the query.
+The MCP tool gates on the **confidence**: the highest query-chunk cosine in the
+KNN pool, taken before RRF fusion, the heading boost and MMR have reordered or
+truncated anything. That number answers "does this corpus cover the query at
+all", and it is a property of the query and the corpus alone.
+
+It has to be, because the obvious alternative is not. Taking the maximum across
+the *returned* results makes the verdict depend on how many results the caller
+asked for: `candidate_count` is `top_k * mmr_candidate_multiplier`, so a larger
+`top_k` draws a wider candidate pool, which changes RRF ranks and changes what
+MMR selects. Measured on this repo's own docs, "configure OAuth SSO for the web
+dashboard" scored 0.674 at `top_k=2` and 0.646 at `top_k=5` — admitted and
+refused by the same 0.65 gate, same index, same query. KNN is nested, so its
+maximum does not move.
+
+The auto-search hook deliberately gates on something else: the cosine of the one
+chunk it is about to inject. It hands a single chunk to the model invisibly,
+with no scores to weigh, so the question that matters is whether *that chunk* is
+relevant — not whether something relevant exists somewhere. Gating it on
+confidence would let a strong match elsewhere in the corpus open the gate for a
+weak lexical match that happened to rank first. The hook's `top_k` is fixed at
+1, so it never had the caller-varying-`top_k` problem in the first place.
 
 `polaris search` on the CLI always shows results with their real scores. Seeing
 the near-misses is the point when you are diagnosing retrieval or retuning the

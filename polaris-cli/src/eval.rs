@@ -14,7 +14,7 @@ pub fn format_report(r: &EvalReport, current_threshold: f32) -> String {
         r.sample_size,
         r.language.as_str()
     ));
-    if r.sample_size < MIN_RELIABLE_SAMPLE {
+    if r.sample_size > 0 && r.sample_size < MIN_RELIABLE_SAMPLE {
         out.push_str(&format!(
             "  ! only {} sentences — these numbers are noisy\n\n",
             r.sample_size
@@ -108,6 +108,11 @@ fn json_f32(v: f32) -> f64 {
 /// Render a report as JSON.
 pub fn report_json(r: &EvalReport, current_threshold: f32) -> String {
     serde_json::json!({
+        // A zero-sample run measured nothing, and its zeroed metrics would read
+        // to a CI gate diffing recall_3 as a total retrieval collapse. The
+        // plain renderer says so in prose; the machine-read path needs it more,
+        // not less, because nothing downstream is reading the prose.
+        "measured": r.sample_size > 0,
         "sample_size": r.sample_size,
         "skipped": r.skipped,
         "language": r.language.as_str(),
@@ -245,6 +250,32 @@ mod tests {
         assert!(
             !out.contains("another language"),
             "must not diagnose a language mismatch it never observed: {out}"
+        );
+    }
+
+    #[test]
+    fn json_flags_a_zero_sample_run_as_unmeasured() {
+        // The plain renderer explains a zero sample in prose; JSON is what a CI
+        // gate diffs, so an unflagged run of zeroes reads as a retrieval collapse.
+        let mut r = report();
+        r.sample_size = 0;
+        let v: serde_json::Value = serde_json::from_str(&report_json(&r, 0.65)).unwrap();
+        assert_eq!(v["measured"], serde_json::json!(false));
+
+        let mut ok = report();
+        ok.sample_size = 200;
+        let v: serde_json::Value = serde_json::from_str(&report_json(&ok, 0.65)).unwrap();
+        assert_eq!(v["measured"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn zero_sample_does_not_also_call_the_numbers_noisy() {
+        let mut r = report();
+        r.sample_size = 0;
+        let out = format_report(&r, 0.65);
+        assert!(
+            !out.contains("noisy"),
+            "a run that produced no numbers must not warn that its numbers are noisy: {out}"
         );
     }
 

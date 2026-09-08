@@ -98,10 +98,20 @@ fn default_heading_boost() -> f32 {
 }
 
 /// Measured against this repo's own index with the default
-/// `nomic-embed-text-v1.5`: on-topic prompts land at 0.73-0.85, off-topic ones
-/// at 0.52-0.57 (the prefixed-query floor). 0.65 sits in that gap.
+/// `nomic-embed-text-v1.5`. `polaris eval` over 200 corpus sentences puts the
+/// 10th percentile of on-topic scores at 0.632 and the 95th percentile of
+/// off-topic probes at 0.628, and recommends their midpoint: 0.63.
+///
+/// Those two numbers are 0.004 apart, so the classes overlap and no threshold
+/// separates them — this value trades false negatives against false positives
+/// rather than removing either. It was 0.65, which cost roughly twice the false
+/// negatives for the same false-positive rate on this corpus.
+///
+/// Re-tune per `model_id`, and re-run `polaris eval` after doing so: the
+/// off-topic floor comes from the model's `search_query: ` prefix, which gives
+/// any two texts a shared baseline, and it moves with the model.
 fn default_search_min_similarity() -> f32 {
-    0.65
+    0.63
 }
 
 fn default_rrf_k() -> usize {

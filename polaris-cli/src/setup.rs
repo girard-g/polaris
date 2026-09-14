@@ -59,7 +59,8 @@ search_min_similarity = {search_min_similarity}
 # db_path = \"polaris.db\"
 
 # Embedding model. Changing it requires a full re-index.
-# Options: nomic-embed-text-v1.5, mxbai-embed-large-v1, all-minilm-l6-v2
+# Options: nomic-embed-text-v1.5, nomic-embed-text-v1.5-quantized (faster,
+# slightly lower recall), mxbai-embed-large-v1, all-minilm-l6-v2
 # model_id = \"nomic-embed-text-v1.5\"
 
 # Embedding vector dimension (matryoshka truncation). Must match what is already

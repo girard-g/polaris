@@ -118,7 +118,7 @@ polaris index ./docs
 polaris search "your first query"
 ```
 
-The first search downloads the embedding model (~137 MB) to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux, `%LOCALAPPDATA%\polaris\models\` on Windows). See [Configuration → Model Caching](docs/configuration.md#model-caching) for the full resolution order and the `POLARIS_CACHE_DIR` override.
+The first search downloads the embedding model (~522 MB; ~131 MB for `nomic-embed-text-v1.5-quantized`) to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux, `%LOCALAPPDATA%\polaris\models\` on Windows). See [Configuration → Model Caching](docs/configuration.md#model-caching) for the full resolution order and the `POLARIS_CACHE_DIR` override.
 
 ## Usage
 

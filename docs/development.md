@@ -37,7 +37,7 @@ The first build downloads and compiles all dependencies including fastembed's ON
 
 ## First Run
 
-On first run, the embedding model is downloaded (~137 MB) and cached. Subsequent runs reuse the cache.
+On first run, the embedding model is downloaded (~522 MB) and cached. Subsequent runs reuse the cache.
 
 | Platform | Model cache location |
 |----------|----------------------|

@@ -51,7 +51,7 @@ pub struct Cli {
     #[arg(long, global = true, action = ArgAction::Append)]
     db: Vec<PathBuf>,
 
-    /// Embedding model to use [nomic-embed-text-v1.5 (default), mxbai-embed-large-v1, all-minilm-l6-v2]
+    /// Embedding model to use [nomic-embed-text-v1.5 (default), nomic-embed-text-v1.5-quantized, mxbai-embed-large-v1, all-minilm-l6-v2]
     #[arg(long, global = true)]
     model: Option<String>,
 

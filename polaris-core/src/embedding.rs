@@ -20,6 +20,14 @@ fn resolve_model(model_id: &str) -> Result<ModelInfo> {
             document_prefix: "search_document: ",
             query_prefix: "search_query: ",
         }),
+        // Same weights, int8-quantized: ~2× faster on CPU, a quarter of the
+        // download. Its vectors do not mix with fp32 ones, hence a distinct id.
+        "nomic-embed-text-v1.5-quantized" => Ok(ModelInfo {
+            fastembed_model: EmbeddingModel::NomicEmbedTextV15Q,
+            native_dim: 768,
+            document_prefix: "search_document: ",
+            query_prefix: "search_query: ",
+        }),
         "mxbai-embed-large-v1" => Ok(ModelInfo {
             fastembed_model: EmbeddingModel::MxbaiEmbedLargeV1,
             native_dim: 1024,
@@ -33,7 +41,7 @@ fn resolve_model(model_id: &str) -> Result<ModelInfo> {
             query_prefix: "",
         }),
         _ => Err(PolarisError::Config(format!(
-            "Unknown model '{}'. Supported: nomic-embed-text-v1.5, mxbai-embed-large-v1, all-minilm-l6-v2",
+            "Unknown model '{}'. Supported: nomic-embed-text-v1.5, nomic-embed-text-v1.5-quantized, mxbai-embed-large-v1, all-minilm-l6-v2",
             model_id
         ))),
     }
@@ -158,6 +166,27 @@ mod shared_embedding_tests {
         let b = a.clone();
         // Both handles should refer to the same Arc<EmbeddingEngine>.
         assert!(Arc::ptr_eq(&a.0, &b.0));
+    }
+}
+
+#[cfg(test)]
+mod model_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn quantized_nomic_resolves_like_fp32_nomic() {
+        let fp32 = resolve_model("nomic-embed-text-v1.5").unwrap();
+        let q = resolve_model("nomic-embed-text-v1.5-quantized").unwrap();
+        assert!(matches!(q.fastembed_model, EmbeddingModel::NomicEmbedTextV15Q));
+        assert_eq!(q.native_dim, fp32.native_dim);
+        assert_eq!(q.document_prefix, fp32.document_prefix);
+        assert_eq!(q.query_prefix, fp32.query_prefix);
+    }
+
+    #[test]
+    fn unknown_model_error_lists_quantized_nomic() {
+        let err = native_dim_for("nope").unwrap_err().to_string();
+        assert!(err.contains("nomic-embed-text-v1.5-quantized"), "{err}");
     }
 }
 

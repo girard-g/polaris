@@ -182,7 +182,7 @@ The hooks are a Claude Code feature; Codex, Cursor, and Gemini CLI users keep us
 
 ### Search hook performance
 
-The search hook loads the ONNX embedding model (~140 MB) on every qualifying prompt, adding ~1 second of latency before Claude starts responding. This is a deliberate trade-off: guaranteed doc grounding vs. speed.
+The search hook loads the ONNX embedding model on every qualifying prompt, adding ~1 second of latency before Claude starts responding. This is a deliberate trade-off: guaranteed doc grounding vs. speed. `model_id = "nomic-embed-text-v1.5-quantized"` roughly halves the cold-search time (728 → 318 ms measured) at a small recall cost — see [Embedding → Quantized nomic](embedding.md#quantized-nomic).
 
 | Scenario | Latency | What runs |
 |---|---|---|

@@ -145,11 +145,12 @@ In both cases, resolution is the same: delete (or move) the existing database an
 
 | `model_id` | Native dim | Recommended `embedding_dim` | Download size |
 |---|---|---|---|
-| `nomic-embed-text-v1.5` (default) | 768 | 512 | ~137 MB |
+| `nomic-embed-text-v1.5` (default) | 768 | 512 | ~522 MB |
+| `nomic-embed-text-v1.5-quantized` | 768 | 512 | ~131 MB |
 | `mxbai-embed-large-v1` | 1024 | 1024 | ~670 MB |
 | `all-minilm-l6-v2` | 384 | 384 | ~23 MB |
 
-`embedding_dim` may be set to any value in `[64, native_dim]`. Matryoshka truncation is applied automatically — lower dimensions trade recall for speed and storage. For `mxbai-embed-large-v1` and `all-minilm-l6-v2`, which do not have Matryoshka training, truncation is still applied but quality may degrade more steeply with smaller dimensions.
+`embedding_dim` may be set to any value in `[64, native_dim]`. Matryoshka truncation is applied automatically — lower dimensions trade recall for speed and storage. The quantized nomic variant trades a little recall for ~2× faster indexing and search start-up — see [Embedding → Quantized nomic](embedding.md#quantized-nomic). For `mxbai-embed-large-v1` and `all-minilm-l6-v2`, which do not have Matryoshka training, truncation is still applied but quality may degrade more steeply with smaller dimensions.
 
 Changing `model_id` requires deleting the database and re-indexing.
 

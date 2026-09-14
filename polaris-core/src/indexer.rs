@@ -7,7 +7,13 @@ use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
-const EMBED_BATCH_SIZE: usize = 32; // mirrors EmbeddingEngine's internal BATCH_SIZE
+// fastembed pads each batch to its longest chunk, and ONNX already spreads a
+// single sequence across every core, so on CPU a batch buys no parallelism —
+// only padding. Measured on 995 chunks: 32 → 4.2 chunks/s at 6.5 GB peak RSS,
+// 1 → 9.4 chunks/s at 1.0 GB, identical `polaris eval` metrics.
+// ponytail: tuned for the CPU execution provider (the only one we configure);
+// revisit if a GPU provider is added, where batching does pay.
+const EMBED_BATCH_SIZE: usize = 1;
 use pulldown_cmark::{Event, HeadingLevel, Options as CmarkOptions, Parser, Tag, TagEnd};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;

@@ -89,4 +89,4 @@ The lock is acquired only for the duration of the `embed()` call and released im
 
 ## Batch Size
 
-During indexing, chunks are embedded in batches of **32** (`EMBED_BATCH_SIZE = 32`). This is a memory-efficiency trade-off: larger batches are faster but require more RAM.
+During indexing, chunks are embedded one at a time (`EMBED_BATCH_SIZE = 1`). fastembed pads each batch to its longest sequence and ONNX Runtime already uses every core for a single sequence, so on CPU larger batches are both slower and far heavier on RAM (batch 32: 4.2 chunks/s at 6.5 GB; batch 1: 9.4 chunks/s at 1.0 GB). See [indexing.md](indexing.md#why-batch-size-1).

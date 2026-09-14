@@ -87,7 +87,7 @@ Internal `polaris hook <subcommand>` entry points invoked by Claude Code hooks. 
 - `Indexer` holds `Arc<EmbeddingEngine>` + chunking config
 - `index_path()` runs a **three-phase pipeline** optimised for large corpora:
   - **Phase A (parallel collect):** `rayon::par_iter()` reads each file once — SHA256 from in-memory bytes, then `chunk_markdown()`. Concurrent across all CPU cores.
-  - **Phase B (cross-file embedding):** All chunks from all pending files are flattened and embedded in batches of 32. Batches are always full (except the last), maximising ONNX throughput.
+  - **Phase B (cross-file embedding):** All chunks from all pending files are flattened and embedded one chunk per ONNX call — batching only adds padding on CPU.
   - **Phase C (single-transaction write):** One `BEGIN`/`COMMIT` for the entire run.
 - `Chunk` struct carries `heading_context` (e.g. `"Guide > Installation"`)
 - Files larger than `max_file_size` (default 10 MB) are skipped with an error recorded in `IndexReport.errors`
@@ -127,9 +127,9 @@ Path on disk
   → Chunk splitting (paragraph → sentence → word fallback)
   → Vec<FileData>
 
-── Phase B (sequential, full batches) ────────────────────────────────────
+── Phase B (sequential, one chunk per call) ──────────────────────────────
   → Flatten all chunks across all files → Vec<String>
-  → Batch embedding (32 chunks/batch via fastembed)
+  → Embedding via fastembed (1 chunk/call, no padding)
   → Vec<Vec<f32>> (indexed by global chunk position)
 
 ── Phase C (single transaction) ──────────────────────────────────────────

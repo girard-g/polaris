@@ -150,7 +150,7 @@ OpenIndex {
 }
 ```
 
-When a database exists at startup, `polaris serve` loads the model and opens the bank immediately, so the first search is warm. When none exists, it creates nothing: the first `index` call opens (and creates) it, and the first `search`/`status`/`eval` call opens a database that has appeared since — for example one built by `polaris index` in a terminal. On a brand-new project the first call after indexing therefore pays the ~1 s model load.
+When a database exists at startup, `polaris serve` loads the model and opens the bank immediately, so the first search is warm. When none exists, it creates nothing: the first `index` call opens (and creates) it, and the first `search`/`status`/`eval` call opens a database that has appeared since — for example one built by `polaris index` in a terminal. Indexing through the MCP `index` tool therefore pays the ~1 s model load on that call itself; only an index built with the CLI defers the load to the next `search`/`status`/`eval` call.
 
 `Bank` is cheaply cloneable (`Arc<BankInner>` internally) and serialises concurrent access through its own `Mutex<Database>`. MCP tool calls are typically serial, so this single-connection model is acceptable. The underlying SQLite connection runs in WAL mode.
 

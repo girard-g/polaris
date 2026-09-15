@@ -10,7 +10,7 @@ Prefer leaving keys commented. An unset key keeps tracking its built-in default 
 
 A project-local `polaris.toml` replaces the global one at `~/.config/polaris/polaris.toml` rather than merging with it.
 
-The example writes every key out to show its default. In a real file leave `model_id`, `embedding_dim` and `search_min_similarity` unset: unset, they follow the index.
+The example writes every key out to show its default, but `model_id`, `embedding_dim` and `search_min_similarity` are commented — those three are the ones that matter most left unset, since unset they follow the index (see [Model Selection](#model-selection)). Uncomment one only to pin it.
 
 ```toml
 # SQLite database file path (relative to CWD or absolute)
@@ -19,7 +19,8 @@ db_path = "polaris.db"
 # Embedding vector dimension
 # Must match the dimension already stored in the DB (checked on open)
 # Valid range: 64 to the model's native dimension (see "Supported Models" below)
-embedding_dim = 512
+# Unset, it follows the index, then the model default (512 for nomic).
+# embedding_dim = 512
 
 # Maximum chunk size in approximate tokens (1 token ≈ 4 chars)
 # Chunks that exceed this are split at paragraph/sentence/word boundaries
@@ -32,7 +33,8 @@ chunk_overlap_chars = 200
 # fastembed model identifier
 # Validated against the DB on every open — changing this requires deleting
 # the database and re-indexing all documents
-model_id = "nomic-embed-text-v1.5"
+# Unset, the first index that creates the database chooses it from your docs.
+# model_id = "nomic-embed-text-v1.5"
 
 # MMR lambda: 0.0 = pure diversity, 1.0 = pure relevance
 mmr_lambda = 0.7
@@ -53,7 +55,7 @@ max_top_k = 50
 
 # Minimum query-to-chunk cosine similarity for the MCP search tool and the
 # auto-search hook. Unset, it follows the index's model (see Search Threshold).
-search_min_similarity = 0.63
+# search_min_similarity = 0.63
 
 # Maximum file size (in bytes) the indexer will process; larger files are skipped
 max_file_size = 10485760  # 10 MiB
@@ -92,7 +94,7 @@ The choice is printed once, before any download:
 ◆  model: embeddinggemma-300m (38% English prose) — set model_id to override
 ```
 
-It is then recorded in the database. Every later command, including both Claude Code hooks, reads the model, dimension and search threshold from there, so nothing needs to be written to `polaris.toml`.
+The model and dimension are then recorded in the database. Every later command, including both Claude Code hooks, reads them from there and derives the search threshold from that model's default (see [Search Threshold](#search-threshold)), so nothing needs to be written to `polaris.toml`.
 
 `polaris index --dry-run` against a project with no index yet still runs this choice — a dry run has no other way to show which model it would use — but nothing is recorded, since a dry run creates no database. The line is prefixed to say so:
 
@@ -202,6 +204,31 @@ config has 'bge-small-en' — delete the database and re-index to switch models
 ```
 
 In both cases, resolution is the same: delete (or move) the existing database and re-index.
+
+## Upgrading from 2.3
+
+| Your setup | After upgrading |
+|---|---|
+| An index, and a `polaris.toml` with `search_min_similarity = 0.63` (written by older `polaris setup`) | Unchanged: model and dimension come from the index, the threshold stays 0.63 |
+| An index, no `polaris.toml` | Unchanged: model and dimension come from the index, the threshold is that model's default (0.63 for nomic) |
+| Database deleted, then re-indexed on mostly non-English docs | `embeddinggemma-300m` is chosen; an old pinned `search_min_similarity = 0.63` now prints a warning — delete the line to use 0.42 |
+| `model_id` set and different from the index | `Model mismatch` error, as before |
+| `model_id` set in `~/.config/polaris/polaris.toml` | Explicit everywhere: no project chooses its model |
+| An older Polaris binary opening an `embeddinggemma-300m` index | `Unknown model 'embeddinggemma-300m'` — upgrade that binary |
+| `extra_db_paths` pointing at an index built with another model | Error, now naming that database |
+| `polaris serve` in a project with an index | Unchanged: the model loads at startup |
+| `polaris serve` before any index exists | No empty `polaris.db` appears any more; the model loads on the first `index` call |
+
+A config file that pins `embedding_dim` now wins over `--model`: an explicit
+dimension is no longer clamped to the model's native size, it is validated
+against it. `embedding_dim = 768` in `polaris.toml` plus `polaris --model
+all-minilm-l6-v2 index ./docs` now fails with `embedding_dim must be in [64,
+384] for model 'all-minilm-l6-v2', got 768` instead of silently clamping to
+384 — delete or lower the pinned `embedding_dim` to switch models with `--model`.
+
+If a crash interrupts index creation, the database file can exist with no
+stored model; the MCP tools report `No index yet` for it and never pick a
+model for it, so delete the file and re-index.
 
 ## Supported Models
 

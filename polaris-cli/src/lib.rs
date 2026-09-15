@@ -761,7 +761,7 @@ async fn cmd_window(
 async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     tracing::info!("Starting Polaris MCP server (stdio transport)");
     tracing::info!("Database: {}", cfg.db_path.display());
-    if cfg.db_path.exists() {
+    if mcp::server::has_index(&cfg.db_path) {
         tracing::info!("Loading embedding model {} (dim {})…", cfg.model_id, cfg.embedding_dim);
     } else {
         // Spec §4.1.1: only indexing creates a database, so the model and the

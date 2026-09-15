@@ -77,7 +77,7 @@ pub fn open_index(cfg: PolarisConfig) -> Result<OpenIndex, PolarisError> {
 /// is warm; with none, nothing is loaded and no file is created.
 pub fn serve_state(mut cfg: PolarisConfig) -> Result<PolarisState, PolarisError> {
     polaris_core::config::resolve_effective(&mut cfg);
-    let bank = if cfg.db_path.exists() {
+    let bank = if has_index(&cfg.db_path) {
         OnceCell::new_with(Some(open_index(cfg.clone())?))
     } else {
         OnceCell::new()
@@ -99,6 +99,14 @@ async fn open_resolved(base: Arc<PolarisConfig>) -> Result<OpenIndex, String> {
     .await
     .map_err(|e| format!("Error: task failed: {e}"))?
     .map_err(|e| format!("Error: {e}"))
+}
+
+/// Whether an index is ready to open at `db_path`. Not `exists()`: `polaris
+/// index` creates the file, then the schema, and writes the stored model last.
+/// Opening inside that gap would resolve the default model and keep that bank
+/// for the whole session, so a file without a stored model is no index yet.
+pub(crate) fn has_index(db_path: &Path) -> bool {
+    polaris_core::db::read_index_metadata(db_path).model_id.is_some()
 }
 
 fn no_index_message(db_path: &Path) -> String {
@@ -164,7 +172,7 @@ impl PolarisServer {
         self.state
             .bank
             .get_or_try_init(move || async move {
-                if !base.db_path.exists() {
+                if !has_index(&base.db_path) {
                     return Err(no_index_message(&base.db_path));
                 }
                 open_resolved(base).await
@@ -522,6 +530,16 @@ mod tests {
         assert!(!db.exists(), "polaris serve must not create a database at startup");
     }
 
+    #[test]
+    fn serve_state_on_a_half_created_index_opens_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        std::fs::write(&db, b"").unwrap();
+        let state = serve_state(cfg_at(db.clone())).unwrap();
+        assert!(state.bank.get().is_none());
+        assert_eq!(std::fs::metadata(&db).unwrap().len(), 0, "no schema may be written");
+    }
+
     #[tokio::test]
     async fn read_tools_without_an_index_say_so_and_create_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -538,6 +556,29 @@ mod tests {
         }
         assert!(!db.exists());
         assert!(server.state.bank.get().is_none());
+    }
+
+    /// A CLI `polaris index` creates the file before it writes the stored
+    /// model. A read tool landing in that gap must not open the file with the
+    /// default model and keep that bank for the rest of the session.
+    #[tokio::test]
+    async fn read_tools_on_a_half_created_index_say_no_index_and_write_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        let server = server_for(serve_state(cfg_at(db.clone())).unwrap());
+        // An empty file is a valid SQLite database with no metadata yet.
+        std::fs::write(&db, b"").unwrap();
+
+        let search = server
+            .search(Parameters(SearchParams { query: "anything".into(), top_k: Some(2) }))
+            .await;
+        let status = server.status(Parameters(StatusParams {})).await;
+        let eval = server.eval(Parameters(EvalParams { sample: Some(5) })).await;
+        for response in [&search, &status, &eval] {
+            assert!(response.starts_with("No index yet at"), "{response}");
+        }
+        assert!(server.state.bank.get().is_none(), "a later call must be able to retry");
+        assert_eq!(std::fs::metadata(&db).unwrap().len(), 0, "no schema may be written");
     }
 
     #[tokio::test]

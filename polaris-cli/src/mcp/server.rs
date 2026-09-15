@@ -1,6 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+
+use tokio::sync::OnceCell;
 
 use rmcp::{
     Peer, RoleServer, ServerHandler, ServiceExt,
@@ -23,15 +25,87 @@ use super::types::{EvalParams, IndexParams, SearchParams, StatusParams};
 // Shared state
 // ---------------------------------------------------------------------------
 
+/// An opened index and the config resolved against it.
+#[derive(Clone)]
+pub struct OpenIndex {
+    /// Effective config: model, dimension and threshold resolved from this index.
+    pub config: Arc<PolarisConfig>,
+    /// Cheaply cloneable (`Arc<BankInner>`); serialises access through its
+    /// internal `Mutex<Database>`. MCP tool calls are typically serial.
+    pub bank: polaris_core::Bank,
+}
+
 /// Shared state for the MCP server.
-///
-/// `Bank` is cheaply cloneable (`Arc<BankInner>` internally) and serialises
-/// concurrent access through its internal `Mutex<Database>`. MCP tool calls
-/// are typically serial so this single-connection model is acceptable.
 #[derive(Clone)]
 pub struct PolarisState {
+    /// Config as resolved when the server started. When no index existed then,
+    /// model, dimension and threshold are resolved again when the index is
+    /// opened — tools read those from [`OpenIndex::config`], not from here.
     pub config: Arc<PolarisConfig>,
-    pub bank: polaris_core::Bank,
+    /// Set at startup when an index exists, otherwise on first use (spec
+    /// §4.1.1). `get_or_try_init` leaves the cell empty when initialisation
+    /// fails, so a `search` that finds no index, or an `index` whose model
+    /// failed to load, does not stop a later `index` from creating one. Do not
+    /// replace it with a cell that poisons on error.
+    pub bank: Arc<OnceCell<OpenIndex>>,
+}
+
+/// Load the model, then open (or create) the bank `cfg` describes. The model
+/// loads first, so a failed load leaves no database behind.
+pub fn open_index(cfg: PolarisConfig) -> Result<OpenIndex, PolarisError> {
+    let embed = polaris_core::SharedEmbedding::load(&cfg.model_id, cfg.embedding_dim)?;
+    let bank = polaris_core::Bank::open(
+        polaris_core::BankConfig {
+            repo_root: crate::corpus_root(),
+            index_path: cfg.db_path.clone(),
+            embedding_dim: cfg.embedding_dim,
+            model_id: cfg.model_id.clone(),
+            max_chunk_tokens: cfg.max_chunk_tokens,
+            chunk_overlap_chars: cfg.chunk_overlap_chars,
+            max_file_size: cfg.max_file_size,
+            mmr_lambda: cfg.mmr_lambda,
+            mmr_candidate_multiplier: cfg.mmr_candidate_multiplier,
+            heading_boost: cfg.heading_boost,
+            rrf_k: cfg.rrf_k,
+        },
+        embed,
+    )?;
+    Ok(OpenIndex { config: Arc::new(cfg), bank })
+}
+
+/// State for `polaris serve`. An existing index opens now, so the first search
+/// is warm; with none, nothing is loaded and no file is created.
+pub fn serve_state(mut cfg: PolarisConfig) -> Result<PolarisState, PolarisError> {
+    polaris_core::config::resolve_effective(&mut cfg);
+    let bank = if cfg.db_path.exists() {
+        OnceCell::new_with(Some(open_index(cfg.clone())?))
+    } else {
+        OnceCell::new()
+    };
+    Ok(PolarisState { config: Arc::new(cfg), bank: Arc::new(bank) })
+}
+
+/// Resolve `base` against the index (or, once Task 13 wires in selection,
+/// against the corpus) and open it: the model loads before the bank, so a
+/// failed load leaves no database behind. Shared by `existing_index` and
+/// `run_index`'s `get_or_try_init` initialisers, so this ordering is written
+/// once rather than duplicated in both.
+async fn open_resolved(base: Arc<PolarisConfig>) -> Result<OpenIndex, String> {
+    let mut cfg = (*base).clone();
+    tokio::task::spawn_blocking(move || {
+        polaris_core::config::resolve_effective(&mut cfg);
+        open_index(cfg)
+    })
+    .await
+    .map_err(|e| format!("Error: task failed: {e}"))?
+    .map_err(|e| format!("Error: {e}"))
+}
+
+fn no_index_message(db_path: &Path) -> String {
+    format!(
+        "No index yet at {} — call the `index` tool with your docs path (or run `polaris index <path>`), then try again.",
+        db_path.display()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +155,86 @@ impl PolarisServer {
             .map_err(|e| PolarisError::Mcp(format!("Wait error: {e}")))?;
 
         Ok(())
+    }
+
+    /// The open index, opening an existing database on first use. Never
+    /// creates one: with no database this answers that no index exists yet.
+    async fn existing_index(&self) -> Result<OpenIndex, String> {
+        let base = Arc::clone(&self.state.config);
+        self.state
+            .bank
+            .get_or_try_init(move || async move {
+                if !base.db_path.exists() {
+                    return Err(no_index_message(&base.db_path));
+                }
+                open_resolved(base).await
+            })
+            .await
+            .cloned()
+    }
+
+    /// Body of the `index` tool, apart from its MCP progress plumbing so tests
+    /// can drive it. Opens the index, creating it when none exists.
+    async fn run_index(
+        &self,
+        params: IndexParams,
+        on_progress: Option<Box<dyn Fn(f32, &str) + Send + Sync>>,
+    ) -> String {
+        let banner = self.session_banner();
+        let path = PathBuf::from(&params.path);
+        let recursive = params.recursive.unwrap_or(true);
+        let force = params.force.unwrap_or(false);
+
+        if !path.exists() {
+            return format!("Error: path not found: {}{banner}", params.path);
+        }
+
+        let base = Arc::clone(&self.state.config);
+        let opened = self.state.bank.get_or_try_init(move || open_resolved(base)).await.cloned();
+        let index = match opened {
+            Ok(index) => index,
+            Err(msg) => return format!("{msg}{banner}"),
+        };
+        let bank = index.bank.clone();
+        let opts = polaris_core::IndexOpts { recursive, force, dry_run: false };
+
+        let result = tokio::task::spawn_blocking(move || {
+            // Agents reach the MCP server without a shared cwd, so they
+            // naturally pass an absolute path — but `polaris setup` indexes
+            // relative ones, and document identity is the raw path string.
+            // Left alone, the two spellings produce disjoint `documents` rows
+            // and the older set becomes unreachable by removal detection.
+            // `under_indexed_root` already reconciles this on the hook path;
+            // reuse it, falling back to the raw path on a first-ever index.
+            let indexed: Vec<String> = bank
+                .document_hashes()
+                .map(|v| v.into_iter().map(|(p, _)| p).collect())
+                .unwrap_or_default();
+            let cwd = std::env::current_dir().ok();
+            let path = crate::hook::under_indexed_root(&path, cwd.as_deref(), &indexed)
+                .unwrap_or(path);
+
+            let index_result = match on_progress {
+                Some(cb) => bank.index_path_with_progress(&path, opts, cb),
+                None => bank.index_path(&path, opts),
+            };
+            match index_result {
+                Ok(report) => {
+                    let mut out = report.summary();
+                    if !report.errors.is_empty() {
+                        out.push_str("\n\nErrors:\n");
+                        for (path, err) in &report.errors {
+                            out.push_str(&format!("  - {}: {}\n", path.display(), err));
+                        }
+                    }
+                    out
+                }
+                Err(e) => format!("Error: {e}"),
+            }
+        })
+        .await;
+
+        format!("{}{banner}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
     }
 }
 
@@ -136,10 +290,14 @@ impl PolarisServer {
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let banner = self.session_banner();
-        let config = Arc::clone(&self.state.config);
+        let index = match self.existing_index().await {
+            Ok(index) => index,
+            Err(msg) => return format!("{msg}{banner}"),
+        };
+        let config = Arc::clone(&index.config);
         let top_k = (params.top_k.unwrap_or(5) as usize).min(config.max_top_k);
         let query = params.query.clone();
-        let bank = self.state.bank.clone();
+        let bank = index.bank.clone();
         let repo_root = bank.repo_root().to_path_buf();
 
         // Run the synchronous search on a blocking thread; capture the raw result
@@ -198,16 +356,6 @@ impl PolarisServer {
         peer: Peer<RoleServer>,
         meta: Meta,
     ) -> String {
-        let banner = self.session_banner();
-        let path = PathBuf::from(&params.path);
-        let recursive = params.recursive.unwrap_or(true);
-        let force = params.force.unwrap_or(false);
-        let bank = self.state.bank.clone();
-
-        if !path.exists() {
-            return format!("Error: path not found: {}{banner}", params.path);
-        }
-
         let progress_token = meta.get_progress_token();
         let handle = tokio::runtime::Handle::current();
 
@@ -230,44 +378,7 @@ impl PolarisServer {
                 None
             };
 
-        let opts = polaris_core::IndexOpts { recursive, force, dry_run: false };
-
-        let result = tokio::task::spawn_blocking(move || {
-            // Agents reach the MCP server without a shared cwd, so they
-            // naturally pass an absolute path — but `polaris setup` indexes
-            // relative ones, and document identity is the raw path string.
-            // Left alone, the two spellings produce disjoint `documents` rows
-            // and the older set becomes unreachable by removal detection.
-            // `under_indexed_root` already reconciles this on the hook path;
-            // reuse it, falling back to the raw path on a first-ever index.
-            let indexed: Vec<String> = bank
-                .document_hashes()
-                .map(|v| v.into_iter().map(|(p, _)| p).collect())
-                .unwrap_or_default();
-            let cwd = std::env::current_dir().ok();
-            let path = crate::hook::under_indexed_root(&path, cwd.as_deref(), &indexed)
-                .unwrap_or(path);
-
-            let index_result = match on_progress {
-                Some(cb) => bank.index_path_with_progress(&path, opts, cb),
-                None => bank.index_path(&path, opts),
-            };
-            match index_result {
-                Ok(report) => {
-                    let mut out = report.summary();
-                    if !report.errors.is_empty() {
-                        out.push_str("\n\nErrors:\n");
-                        for (path, err) in &report.errors {
-                            out.push_str(&format!("  - {}: {}\n", path.display(), err));
-                        }
-                    }
-                    out
-                }
-                Err(e) => format!("Error: {e}"),
-            }
-        }).await;
-
-        format!("{}{banner}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
+        self.run_index(params, on_progress).await
     }
 
     /// Get current status of the Polaris index.
@@ -277,8 +388,12 @@ impl PolarisServer {
     )]
     async fn status(&self, _params: Parameters<StatusParams>) -> String {
         let banner = self.session_banner();
-        let config = Arc::clone(&self.state.config);
-        let bank = self.state.bank.clone();
+        let index = match self.existing_index().await {
+            Ok(index) => index,
+            Err(msg) => return format!("{msg}{banner}"),
+        };
+        let config = Arc::clone(&index.config);
+        let bank = index.bank.clone();
 
         let result = tokio::task::spawn_blocking(move || {
             match bank.stats() {
@@ -308,8 +423,12 @@ impl PolarisServer {
     )]
     async fn eval(&self, Parameters(params): Parameters<EvalParams>) -> String {
         let banner = self.session_banner();
-        let config = Arc::clone(&self.state.config);
-        let bank = self.state.bank.clone();
+        let index = match self.existing_index().await {
+            Ok(index) => index,
+            Err(msg) => return format!("{msg}{banner}"),
+        };
+        let config = Arc::clone(&index.config);
+        let bank = index.bank.clone();
         let sample = params.sample.map(|s| s as usize).unwrap_or(config.eval.sample_size);
         if sample == 0 {
             return format!("Error: sample must be greater than 0{banner}");
@@ -378,18 +497,136 @@ impl ServerHandler for PolarisServer {
 mod tests {
     use super::*;
 
+    fn server_for(state: PolarisState) -> PolarisServer {
+        // Update-check does a detached network spawn from `PolarisServer::new`
+        // unless disabled; keep tests hermetic. `std::env::set_var` is unsafe
+        // because a concurrent reader elsewhere in the process could observe a
+        // torn write; wrapping it in `Once` means the write happens at most
+        // once, and happens-before every `PolarisServer::new` reached through
+        // this helper, rather than once per (parallel) test racing the others.
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe { std::env::set_var("POLARIS_NO_UPDATE_CHECK", "1") });
+        PolarisServer::new(state)
+    }
+
+    fn cfg_at(db_path: PathBuf) -> PolarisConfig {
+        PolarisConfig { db_path, ..PolarisConfig::default() }
+    }
+
+    #[test]
+    fn serve_state_without_an_index_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        let state = serve_state(cfg_at(db.clone())).unwrap();
+        assert!(state.bank.get().is_none());
+        assert!(!db.exists(), "polaris serve must not create a database at startup");
+    }
+
+    #[tokio::test]
+    async fn read_tools_without_an_index_say_so_and_create_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        let server = server_for(serve_state(cfg_at(db.clone())).unwrap());
+
+        let search = server
+            .search(Parameters(SearchParams { query: "anything".into(), top_k: Some(2) }))
+            .await;
+        let status = server.status(Parameters(StatusParams {})).await;
+        let eval = server.eval(Parameters(EvalParams { sample: Some(5) })).await;
+        for response in [&search, &status, &eval] {
+            assert!(response.starts_with("No index yet at"), "{response}");
+        }
+        assert!(!db.exists());
+        assert!(server.state.bank.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_index_creates_no_database_and_leaves_the_cell_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), "# A\n\nSome text.\n").unwrap();
+        let db = dir.path().join("polaris.db");
+        let mut cfg = cfg_at(db.clone());
+        cfg.apply_overrides(None, None, Some("bad-model".into()));
+        let server = server_for(serve_state(cfg).unwrap());
+
+        let response = server
+            .run_index(
+                IndexParams { path: docs.display().to_string(), recursive: None, force: None },
+                None,
+            )
+            .await;
+        assert!(response.starts_with("Error:"), "{response}");
+        assert!(!db.exists(), "a model that failed to load must leave no database");
+        assert!(server.state.bank.get().is_none(), "the cell must stay empty so a retry can succeed");
+    }
+
+    #[test]
+    #[ignore = "downloads ~1.2 GB EmbeddingGemma ONNX model; run with `cargo test -- --include-ignored`"]
+    fn serve_state_opens_an_existing_gemma_index_with_its_threshold() {
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        drop(polaris_core::db::Database::open(&db, 768, "embeddinggemma-300m").unwrap());
+
+        let state = serve_state(cfg_at(db)).unwrap();
+        let open = state.bank.get().expect("an existing index opens at startup");
+        assert_eq!(open.config.model_id, "embeddinggemma-300m");
+        assert_eq!(open.config.embedding_dim, 768);
+        assert_eq!(open.config.search_min_similarity, Some(0.42));
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads ~1.2 GB EmbeddingGemma ONNX model; run with `cargo test -- --include-ignored`"]
+    async fn an_index_created_after_startup_opens_lazily_with_its_model() {
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        let server = server_for(serve_state(cfg_at(db.clone())).unwrap());
+        let first = server
+            .search(Parameters(SearchParams { query: "how do I install polaris".into(), top_k: Some(2) }))
+            .await;
+        assert!(first.starts_with("No index yet"), "{first}");
+
+        // A CLI `polaris index` creates the index while the server is running.
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("guide.md"),
+            "# Installation Guide\n\nTo install polaris, run `cargo install polaris`.\n",
+        )
+        .unwrap();
+        {
+            let embed = polaris_core::SharedEmbedding::load("embeddinggemma-300m", 768).unwrap();
+            let bank = polaris_core::Bank::open(
+                polaris_core::BankConfig {
+                    repo_root: dir.path().to_path_buf(),
+                    index_path: db.clone(),
+                    embedding_dim: 768,
+                    model_id: "embeddinggemma-300m".into(),
+                    ..Default::default()
+                },
+                embed,
+            )
+            .unwrap();
+            bank.index_path(&docs, polaris_core::IndexOpts::default()).unwrap();
+        }
+
+        let status = server.status(Parameters(StatusParams {})).await;
+        assert!(status.contains("Model: embeddinggemma-300m"), "{status}");
+        let search = server
+            .search(Parameters(SearchParams { query: "how do I install polaris".into(), top_k: Some(2) }))
+            .await;
+        assert!(!search.starts_with("No index yet") && !search.starts_with("Error"), "{search}");
+    }
+
     /// Regression pin for the empty-index rendering bug: `results` empty must
     /// short-circuit to "No results found." rather than falling into the
     /// refusal branch, which folds `f32::MIN` over nothing and prints it.
     #[tokio::test]
     #[ignore = "Bank::open requires SharedEmbedding which downloads a ~137 MB ONNX model"]
     async fn search_on_empty_index_reports_no_results_not_f32_min() {
-        // Update-check does a detached network spawn from `PolarisServer::new`
-        // unless disabled; keep this test hermetic.
-        // SAFETY: single-threaded test process, set before any other thread
-        // reads the env var.
-        unsafe { std::env::set_var("POLARIS_NO_UPDATE_CHECK", "1") };
-
         polaris_core::db::register_vec_extension();
         let dir = tempfile::tempdir().unwrap();
         let index_path = dir.path().join("polaris.db");
@@ -406,9 +643,11 @@ mod tests {
         )
         .unwrap();
 
-        let server = PolarisServer::new(PolarisState {
-            config: Arc::new(PolarisConfig::default()),
-            bank,
+        let config = Arc::new(PolarisConfig::default());
+        let open = OpenIndex { config: Arc::clone(&config), bank };
+        let server = server_for(PolarisState {
+            config,
+            bank: Arc::new(tokio::sync::OnceCell::new_with(Some(open))),
         });
 
         let response = server

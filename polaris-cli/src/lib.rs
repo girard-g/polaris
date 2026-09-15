@@ -19,7 +19,7 @@ use polaris_core::db::{self, Database};
 use polaris_core::embedding::EmbeddingEngine;
 use polaris_core::error::{PolarisError, Result};
 use polaris_core::indexer::{IndexReport, Indexer, normalise_path};
-use mcp::{PolarisServer, PolarisState};
+use mcp::PolarisServer;
 use tui::{format_results_terminal, make_spinner};
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
@@ -761,31 +761,15 @@ async fn cmd_window(
 async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     tracing::info!("Starting Polaris MCP server (stdio transport)");
     tracing::info!("Database: {}", cfg.db_path.display());
-    tracing::info!("Embedding dim: {}", cfg.embedding_dim);
+    if cfg.db_path.exists() {
+        tracing::info!("Loading embedding model {} (dim {})…", cfg.model_id, cfg.embedding_dim);
+    } else {
+        // Spec §4.1.1: only indexing creates a database, so the model and the
+        // bank wait for the first `index` call or for an index to appear.
+        tracing::info!("No index yet; the model loads when one is created or opened");
+    }
 
-    tracing::info!("Loading embedding model…");
-    let embed = polaris_core::SharedEmbedding::load(&cfg.model_id, cfg.embedding_dim)?;
-
-    let bank_cfg = polaris_core::BankConfig {
-        repo_root: corpus_root(),
-        index_path: cfg.db_path.clone(),
-        embedding_dim: cfg.embedding_dim,
-        model_id: cfg.model_id.clone(),
-        max_chunk_tokens: cfg.max_chunk_tokens,
-        chunk_overlap_chars: cfg.chunk_overlap_chars,
-        max_file_size: cfg.max_file_size,
-        mmr_lambda: cfg.mmr_lambda,
-        mmr_candidate_multiplier: cfg.mmr_candidate_multiplier,
-        heading_boost: cfg.heading_boost,
-        rrf_k: cfg.rrf_k,
-    };
-    let bank = polaris_core::Bank::open(bank_cfg, embed.clone())?;
-
-    let state = PolarisState {
-        config: Arc::new(cfg),
-        bank,
-    };
-
+    let state = mcp::serve_state(cfg)?;
     let server = PolarisServer::new(state);
     server.serve_stdio().await?;
 

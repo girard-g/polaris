@@ -38,6 +38,10 @@ Search indexed documentation using semantic similarity.
 
 **Returns:** Markdown-formatted string with scored results.
 
+Below `search_min_similarity` it returns `No reliable context found (best match …, threshold …)` instead of results. When the index's model has no calibrated threshold, results are returned unfiltered followed by one line suggesting `polaris eval`.
+
+If no index exists yet, `search`, `status` and `eval` answer `No index yet at <path> — call the index tool with your docs path (or run polaris index <path>), then try again.`
+
 **Example response:**
 
 ```markdown
@@ -78,6 +82,8 @@ Unchanged: 8 files
 ```
 
 If the path does not exist, returns: `Error: path not found: <path>`
+
+When no index exists yet, `index` creates it. The server itself never creates a database: started before any index exists, it loads no model and opens no bank until the first `index` call, or until a database created by a CLI `polaris index` appears.
 
 ---
 
@@ -135,14 +141,20 @@ All four tools share a single `PolarisState`:
 
 ```rust
 PolarisState {
-    config: Arc<PolarisConfig>,
-    bank:   polaris_core::Bank,  // Arc<BankInner> with Mutex<Database> inside
+    config: Arc<PolarisConfig>,             // as resolved at startup
+    bank:   Arc<OnceCell<OpenIndex>>,       // opened at startup or on first use
+}
+OpenIndex {
+    config: Arc<PolarisConfig>,             // model, dim, threshold resolved from the index
+    bank:   polaris_core::Bank,             // Arc<BankInner> with Mutex<Database> inside
 }
 ```
 
+When a database exists at startup, `polaris serve` loads the model and opens the bank immediately, so the first search is warm. When none exists, it creates nothing: the first `index` call opens (and creates) it, and the first `search`/`status`/`eval` call opens a database that has appeared since — for example one built by `polaris index` in a terminal. On a brand-new project the first call after indexing therefore pays the ~1 s model load.
+
 `Bank` is cheaply cloneable (`Arc<BankInner>` internally) and serialises concurrent access through its own `Mutex<Database>`. MCP tool calls are typically serial, so this single-connection model is acceptable. The underlying SQLite connection runs in WAL mode.
 
-Each tool clones the `config` / `bank` handle and offloads all blocking work to `tokio::task::spawn_blocking`. The DB mutex is acquired inside the blocking closure — never across an `.await` point.
+Each tool clones the `OpenIndex` handles and offloads all blocking work to `tokio::task::spawn_blocking`. The DB mutex is acquired inside the blocking closure — never across an `.await` point.
 
 ## Error Handling in Tools
 

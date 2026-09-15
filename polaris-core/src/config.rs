@@ -10,7 +10,7 @@ pub struct PolarisConfig {
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
 
-    /// Embedding dimension (64–768, Matryoshka truncation)
+    /// Embedding dimension. Effective value; see [`resolve_effective`].
     #[serde(default = "default_embedding_dim")]
     pub embedding_dim: usize,
 
@@ -22,7 +22,7 @@ pub struct PolarisConfig {
     #[serde(default = "default_chunk_overlap_chars")]
     pub chunk_overlap_chars: usize,
 
-    /// fastembed model ID
+    /// fastembed model ID. Effective value; see [`resolve_effective`].
     #[serde(default = "default_model_id")]
     pub model_id: String,
 
@@ -63,6 +63,19 @@ pub struct PolarisConfig {
     /// `polaris eval` settings
     #[serde(default)]
     pub eval: EvalConfig,
+
+    /// The values the user actually set — in the config file, or through
+    /// `--model` / `--dim`. `None` means defaulted: [`resolve_effective`] fills
+    /// the matching public field from the index, then from the model table.
+    #[serde(skip)]
+    pub explicit: Explicit,
+}
+
+/// Which model-dependent settings were set by the user rather than defaulted.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Explicit {
+    pub model_id: Option<String>,
+    pub embedding_dim: Option<usize>,
 }
 
 fn default_db_path() -> PathBuf {
@@ -70,7 +83,8 @@ fn default_db_path() -> PathBuf {
 }
 
 fn default_embedding_dim() -> usize {
-    512
+    crate::embedding::default_dim_for(crate::embedding::DEFAULT_MODEL_ID)
+        .expect("the default model is in the model table")
 }
 
 fn default_max_chunk_tokens() -> usize {
@@ -82,7 +96,7 @@ fn default_chunk_overlap_chars() -> usize {
 }
 
 fn default_model_id() -> String {
-    "nomic-embed-text-v1.5".to_string()
+    crate::embedding::DEFAULT_MODEL_ID.to_string()
 }
 
 fn default_mmr_lambda() -> f32 {
@@ -169,6 +183,7 @@ impl Default for PolarisConfig {
             max_file_size: default_max_file_size(),
             extra_db_paths: Vec::new(),
             eval: EvalConfig::default(),
+            explicit: Explicit::default(),
         }
     }
 }
@@ -233,9 +248,19 @@ impl PolarisConfig {
                 let raw = std::fs::read_to_string(&p).map_err(|e| {
                     PolarisError::Config(format!("Cannot read {}: {e}", p.display()))
                 })?;
-                toml::from_str(&raw).map_err(|e| {
+                let mut cfg: Self = toml::from_str(&raw).map_err(|e| {
                     PolarisError::Config(format!("Invalid TOML in {}: {e}", p.display()))
-                })
+                })?;
+                // Serde fills absent keys with defaults, which erases whether the
+                // user wrote them. The key set is what records it.
+                let keys: toml::Table = toml::from_str(&raw).map_err(|e| {
+                    PolarisError::Config(format!("Invalid TOML in {}: {e}", p.display()))
+                })?;
+                cfg.explicit = Explicit {
+                    model_id: keys.contains_key("model_id").then(|| cfg.model_id.clone()),
+                    embedding_dim: keys.contains_key("embedding_dim").then_some(cfg.embedding_dim),
+                };
+                Ok(cfg)
             }
         }
     }
@@ -263,6 +288,7 @@ impl PolarisConfig {
     }
 
     /// Apply CLI overrides (None means "not specified", keep existing value).
+    /// A given `--dim` / `--model` counts as explicit.
     pub fn apply_overrides(
         &mut self,
         db_path: Option<PathBuf>,
@@ -274,10 +300,53 @@ impl PolarisConfig {
         }
         if let Some(d) = embedding_dim {
             self.embedding_dim = d;
+            self.explicit.embedding_dim = Some(d);
         }
         if let Some(m) = model_id {
+            self.explicit.model_id = Some(m.clone());
             self.model_id = m;
         }
+    }
+}
+
+/// Fill the effective model-dependent settings (spec §3.2): what the user set,
+/// then the index at `db_path`, then the model table.
+///
+/// Never fails and never creates a file: the index is peeked read-only and a
+/// missing or unreadable one falls through; `Database::open` reports genuine
+/// problems afterwards. A value assigned straight to a public field without
+/// recording it in [`PolarisConfig::explicit`] counts as defaulted and is
+/// overwritten — set model and dim through `apply_overrides`.
+pub fn resolve_effective(cfg: &mut PolarisConfig) {
+    let source = crate::db::read_index_metadata(&cfg.db_path);
+    apply_resolution(cfg, source);
+}
+
+/// Resolve against `source` — an existing index's metadata, or a model chosen
+/// for a new index — instead of peeking at `db_path`.
+pub(crate) fn apply_resolution(cfg: &mut PolarisConfig, source: crate::db::IndexMetadata) {
+    cfg.model_id = cfg
+        .explicit
+        .model_id
+        .clone()
+        .or_else(|| source.model_id.clone())
+        .unwrap_or_else(default_model_id);
+
+    // A stored dimension belongs to the stored model. When an explicit model
+    // contradicts the index, use that model's default instead: the stored one
+    // can exceed its native size, and `validate` would then report a dimension
+    // error in place of the `ModelMismatch` that `Database::open` gives.
+    let source_dim = source
+        .embedding_dim
+        .filter(|_| source.model_id.as_deref().is_none_or(|m| m == cfg.model_id));
+    // Unknown model: leave the dim alone; `validate` reports the model.
+    if let Some(dim) = cfg
+        .explicit
+        .embedding_dim
+        .or(source_dim)
+        .or_else(|| crate::embedding::default_dim_for(&cfg.model_id).ok())
+    {
+        cfg.embedding_dim = dim;
     }
 }
 
@@ -474,6 +543,154 @@ mod tests {
         assert_eq!(cfg.embedding_dim, 64);
         assert_eq!(cfg.model_id, "test-model");
         assert_eq!(cfg.db_path, PathBuf::from("polaris.db")); // default
+    }
+
+    // -----------------------------------------------------------------------
+    // Explicit vs defaulted, and resolution (spec §3)
+    // -----------------------------------------------------------------------
+
+    use crate::db::{Database, IndexMetadata, register_vec_extension};
+
+    fn cfg_at(db_path: PathBuf) -> PolarisConfig {
+        PolarisConfig { db_path, ..PolarisConfig::default() }
+    }
+
+    #[test]
+    fn load_records_only_the_keys_the_file_sets() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, r#"model_id = "embeddinggemma-300m""#).unwrap();
+        let cfg = PolarisConfig::load(Some(file.path())).unwrap();
+        assert_eq!(cfg.explicit.model_id.as_deref(), Some("embeddinggemma-300m"));
+        assert_eq!(cfg.explicit.embedding_dim, None);
+
+        let mut both = tempfile::NamedTempFile::new().unwrap();
+        writeln!(both, "embedding_dim = 256").unwrap();
+        writeln!(both, r#"model_id = "nomic-embed-text-v1.5""#).unwrap();
+        let cfg = PolarisConfig::load(Some(both.path())).unwrap();
+        assert_eq!(cfg.explicit.embedding_dim, Some(256));
+        assert_eq!(cfg.explicit.model_id.as_deref(), Some("nomic-embed-text-v1.5"));
+    }
+
+    #[test]
+    fn a_default_config_sets_nothing_explicitly() {
+        assert_eq!(PolarisConfig::default().explicit, Explicit::default());
+    }
+
+    #[test]
+    fn apply_overrides_marks_model_and_dim_explicit() {
+        let mut cfg = PolarisConfig::default();
+        cfg.apply_overrides(None, Some(256), Some("embeddinggemma-300m".into()));
+        assert_eq!(cfg.explicit.model_id.as_deref(), Some("embeddinggemma-300m"));
+        assert_eq!(cfg.explicit.embedding_dim, Some(256));
+        assert_eq!(cfg.model_id, "embeddinggemma-300m");
+        assert_eq!(cfg.embedding_dim, 256);
+    }
+
+    #[test]
+    fn resolve_without_an_index_uses_the_models_default_dim() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+
+        let mut cfg = cfg_at(db.clone());
+        resolve_effective(&mut cfg);
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("nomic-embed-text-v1.5", 512));
+
+        let mut cfg = cfg_at(db.clone());
+        cfg.apply_overrides(None, None, Some("embeddinggemma-300m".into()));
+        resolve_effective(&mut cfg);
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("embeddinggemma-300m", 768));
+
+        assert!(!db.exists(), "resolution must never create the database");
+    }
+
+    #[test]
+    fn resolve_takes_model_and_dim_from_an_existing_index() {
+        register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        { let _d = Database::open(&db, 768, "embeddinggemma-300m").unwrap(); }
+
+        let mut cfg = cfg_at(db);
+        resolve_effective(&mut cfg);
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("embeddinggemma-300m", 768));
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn resolve_falls_through_a_database_without_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
+        }
+        let mut cfg = cfg_at(db);
+        resolve_effective(&mut cfg);
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("nomic-embed-text-v1.5", 512));
+    }
+
+    #[test]
+    fn resolve_falls_through_an_unreadable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        std::fs::write(&db, b"not a database").unwrap();
+        let mut cfg = cfg_at(db);
+        resolve_effective(&mut cfg);
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("nomic-embed-text-v1.5", 512));
+    }
+
+    #[test]
+    fn explicit_dim_wins_over_the_index_and_still_fails_at_open() {
+        register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        { let _d = Database::open(&db, 768, "embeddinggemma-300m").unwrap(); }
+
+        let mut cfg = cfg_at(db.clone());
+        cfg.apply_overrides(None, Some(512), None);
+        resolve_effective(&mut cfg);
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("embeddinggemma-300m", 512));
+        assert!(matches!(
+            Database::open(&db, cfg.embedding_dim, &cfg.model_id),
+            Err(PolarisError::DimensionMismatch { db_dim: 768, config_dim: 512 })
+        ));
+    }
+
+    #[test]
+    fn explicit_model_contradicting_the_index_fails_with_model_mismatch() {
+        // An mxbai index stores dim 1024, above nomic's native 768. Taking the
+        // stored dim for an explicit nomic would fail `validate` with a
+        // dimension error and hide the real problem.
+        register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        { let _d = Database::open(&db, 1024, "mxbai-embed-large-v1").unwrap(); }
+
+        let mut cfg = cfg_at(db.clone());
+        cfg.apply_overrides(None, None, Some("nomic-embed-text-v1.5".into()));
+        resolve_effective(&mut cfg);
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("nomic-embed-text-v1.5", 512));
+        cfg.validate().expect("the model's own default dim is valid");
+        assert!(matches!(
+            Database::open(&db, cfg.embedding_dim, &cfg.model_id),
+            Err(PolarisError::ModelMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn an_index_that_records_no_model_still_supplies_its_dim() {
+        let mut cfg = PolarisConfig::default();
+        apply_resolution(&mut cfg, IndexMetadata { model_id: None, embedding_dim: Some(256) });
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("nomic-embed-text-v1.5", 256));
+    }
+
+    #[test]
+    fn resolution_leaves_an_unknown_model_for_validate_to_report() {
+        let mut cfg = PolarisConfig::default();
+        cfg.apply_overrides(None, None, Some("bad-model".into()));
+        apply_resolution(&mut cfg, IndexMetadata::default());
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("bad-model", 512));
+        assert!(cfg.validate().unwrap_err().to_string().contains("bad-model"));
     }
 }
 

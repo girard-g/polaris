@@ -287,6 +287,26 @@ impl Database {
             // Fresh database — create everything.
             self.create_schema(config_dim, config_model_id)?;
         } else {
+            // Validate model ID first: when both differ, the model is the
+            // actionable cause and the dimension only its consequence.
+            let stored_model: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='model_id'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+
+            if let Some(db_model) = stored_model {
+                if db_model != config_model_id {
+                    return Err(PolarisError::ModelMismatch {
+                        db_model,
+                        config_model: config_model_id.to_string(),
+                    });
+                }
+            }
+
             // Existing database — validate dimension.
             let stored_dim: Option<String> = self
                 .conn
@@ -308,25 +328,6 @@ impl Database {
                     });
                 }
                 self.embedding_dim = db_dim;
-            }
-
-            // Validate model ID.
-            let stored_model: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT value FROM metadata WHERE key='model_id'",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()?;
-
-            if let Some(db_model) = stored_model {
-                if db_model != config_model_id {
-                    return Err(PolarisError::ModelMismatch {
-                        db_model,
-                        config_model: config_model_id.to_string(),
-                    });
-                }
             }
 
             // Apply any pending schema migrations.
@@ -1632,6 +1633,20 @@ mod tests {
             }
             _ => panic!("expected ModelMismatch error"),
         }
+    }
+
+    #[test]
+    fn model_mismatch_is_reported_before_dimension_mismatch() {
+        // Both differ: the model is the actionable cause, the dim a consequence.
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("both.db");
+        { let _db = Database::open(&db_path, 1024, "mxbai-embed-large-v1").unwrap(); }
+
+        assert!(matches!(
+            Database::open(&db_path, 512, "nomic-embed-text-v1.5"),
+            Err(PolarisError::ModelMismatch { .. })
+        ));
     }
 
     #[test]

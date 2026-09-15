@@ -67,9 +67,10 @@ impl Cli {
     }
 
     /// Resolve the effective [`PolarisConfig`] from the base config file plus
-    /// CLI overrides (`--config`, `--db`, `--dim`, `--model`), applying the same
-    /// model/dim clamp and validation the dispatcher uses. Shared with the Pro
-    /// binary so `polaris index` selects the same database in both builds.
+    /// CLI overrides (`--config`, `--db`, `--dim`, `--model`), then fill model,
+    /// dimension and threshold the user did not set from the index at `db_path`
+    /// and the model table, and validate. Shared with the Pro binary so
+    /// `polaris index` selects the same database in both builds.
     pub fn resolve_config(&self) -> Result<PolarisConfig> {
         let mut cfg = PolarisConfig::load(self.config.as_deref())?;
 
@@ -81,16 +82,8 @@ impl Cli {
             cfg.extra_db_paths = extra_dbs;
         }
 
-        // If --model was given without --dim and the current dim exceeds the
-        // model's native maximum, clamp to the native dim so the user doesn't
-        // have to always pair --model with --dim manually.
-        if self.model.is_some() && self.dim.is_none() {
-            if let Ok(native) = polaris_core::embedding::native_dim_for(&cfg.model_id) {
-                if cfg.embedding_dim > native {
-                    cfg.embedding_dim = native;
-                }
-            }
-        }
+        // `--model` without `--dim` now gets that model's default dimension.
+        polaris_core::config::resolve_effective(&mut cfg);
 
         cfg.validate()?;
         Ok(cfg)
@@ -1223,5 +1216,48 @@ mod cli_tests {
             }
             _ => panic!("expected Search"),
         }
+    }
+
+    /// An empty config file, so a developer's global
+    /// `~/.config/polaris/polaris.toml` cannot leak into the test.
+    fn empty_config(dir: &std::path::Path) -> std::path::PathBuf {
+        let p = dir.join("empty.toml");
+        std::fs::write(&p, "").unwrap();
+        p
+    }
+
+    #[test]
+    fn model_without_dim_gets_that_models_default_dim() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = empty_config(dir.path());
+        let db = dir.path().join("none.db");
+        for (model, dim) in [
+            ("nomic-embed-text-v1.5", 512),
+            ("embeddinggemma-300m", 768),
+            ("mxbai-embed-large-v1", 1024),
+            ("all-minilm-l6-v2", 384),
+        ] {
+            let cli = Cli::try_parse_from([
+                "polaris", "--config", conf.to_str().unwrap(), "--db", db.to_str().unwrap(),
+                "--model", model, "status",
+            ])
+            .unwrap();
+            let cfg = cli.resolve_config().unwrap();
+            assert_eq!(cfg.embedding_dim, dim, "{model}");
+        }
+        assert!(!db.exists(), "resolving config must not create the database");
+    }
+
+    #[test]
+    fn explicit_dim_beats_the_models_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = empty_config(dir.path());
+        let db = dir.path().join("none.db");
+        let cli = Cli::try_parse_from([
+            "polaris", "--config", conf.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--model", "embeddinggemma-300m", "--dim", "256", "status",
+        ])
+        .unwrap();
+        assert_eq!(cli.resolve_config().unwrap().embedding_dim, 256);
     }
 }

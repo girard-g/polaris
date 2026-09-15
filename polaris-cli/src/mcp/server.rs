@@ -84,6 +84,38 @@ impl PolarisServer {
     }
 }
 
+/// What the `search` tool returns for a result set, and whether the results
+/// were handed over (and so count as a saving in the log).
+fn search_response(
+    results: &[polaris_core::SearchResult],
+    best: f32,
+    config: &PolarisConfig,
+) -> (String, bool) {
+    if results.is_empty() {
+        return ("No results found.".to_string(), false);
+    }
+    match config.search_min_similarity {
+        // Say nothing rather than hand back the corpus's nearest miss: an agent
+        // cannot tell a weak match from a strong one once the text is in its
+        // context, and acting on the wrong doc costs more than the search saved.
+        Some(threshold) if best < threshold => (
+            format!(
+                "No reliable context found (best match {best:.2}, threshold {threshold:.2}). The indexed docs likely do not cover this query — answer from your own knowledge or read the source directly."
+            ),
+            false,
+        ),
+        Some(_) => (SearchEngine::format_results(results), true),
+        None => (
+            format!(
+                "{}\n\nNote: {} has no calibrated search_min_similarity, so these results were not filtered by relevance. Run `polaris eval` and set search_min_similarity in polaris.toml to enable the gate.",
+                SearchEngine::format_results(results),
+                config.model_id
+            ),
+            true,
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
@@ -135,29 +167,14 @@ impl PolarisServer {
         // web dashboard" scored 0.674 at top_k=2 and 0.646 at top_k=5 — admitted
         // and refused by the then-shipped 0.65 gate on an identical index. KNN is
         // nested, so its maximum is a property of the query and the corpus alone.
-        let confident = !results.is_empty() && best >= config.search_min_similarity;
-
-        let formatted = if results.is_empty() {
-            "No results found.".to_string()
-        } else if confident {
-            SearchEngine::format_results(&results)
-        } else {
-            // Say nothing rather than hand back the corpus's nearest miss: an
-            // agent cannot tell a weak match from a strong one once the text is
-            // in its context, and acting on the wrong doc costs more than the
-            // search saved.
-            format!(
-                "No reliable context found (best match {best:.2}, threshold {:.2}). The indexed docs likely do not cover this query — answer from your own knowledge or read the source directly.",
-                config.search_min_similarity
-            )
-        };
+        let (formatted, handed_over) = search_response(&results, best, &config);
 
         // Log either way — a query that matched nothing is the signal that the
         // docs have a gap, which is worth more than the rows we do return. Pass
         // an empty slice unless we're returning the real results: the refusal
         // and empty-index paths never hand the agent any bytes, so the log
         // must not credit a saving that didn't happen.
-        let logged_results: &[polaris_core::SearchResult] = if confident { &results } else { &[] };
+        let logged_results: &[polaris_core::SearchResult] = if handed_over { &results } else { &[] };
         let _handle = crate::savings::spawn_search_log(
             bank,
             repo_root,
@@ -316,7 +333,7 @@ impl PolarisServer {
 
         format!(
             "{}{banner}",
-            crate::eval::format_report(&report, config.search_min_similarity)
+            crate::eval::format_report(&report, &config)
         )
     }
 }
@@ -400,5 +417,48 @@ mod tests {
 
         assert_eq!(response, "No results found.");
         assert!(!response.contains("340282"), "response leaked f32::MIN: {response}");
+    }
+
+    fn hit(score: f32) -> polaris_core::SearchResult {
+        polaris_core::SearchResult {
+            chunk_id: 1,
+            content: "Install with cargo.".into(),
+            heading_context: "Install".into(),
+            file_path: "docs/install.md".into(),
+            score,
+            source_db: None,
+        }
+    }
+
+    #[test]
+    fn search_refuses_below_a_calibrated_threshold() {
+        let mut cfg = PolarisConfig::default();
+        cfg.search_min_similarity = Some(0.63);
+        let (text, handed_over) = search_response(&[hit(0.5)], 0.5, &cfg);
+        assert!(text.starts_with("No reliable context found"), "{text}");
+        assert!(!handed_over);
+
+        let (text, handed_over) = search_response(&[hit(0.7)], 0.7, &cfg);
+        assert!(text.contains("docs/install.md") && !text.contains("Note:"), "{text}");
+        assert!(handed_over);
+    }
+
+    #[test]
+    fn uncalibrated_search_returns_results_with_one_note() {
+        let mut cfg = PolarisConfig::default();
+        cfg.apply_overrides(None, None, Some("all-minilm-l6-v2".into()));
+        cfg.search_min_similarity = None;
+        let (text, handed_over) = search_response(&[hit(0.2)], 0.2, &cfg);
+        assert!(text.contains("docs/install.md"), "{text}");
+        assert!(text.contains("all-minilm-l6-v2 has no calibrated search_min_similarity"), "{text}");
+        assert!(text.contains("polaris eval"), "{text}");
+        assert!(handed_over);
+    }
+
+    #[test]
+    fn empty_results_say_so_whatever_the_threshold() {
+        let (text, handed_over) = search_response(&[], f32::MIN, &PolarisConfig::default());
+        assert_eq!(text, "No results found.");
+        assert!(!handed_over);
     }
 }

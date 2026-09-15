@@ -5,8 +5,16 @@ use polaris_core::config::PolarisConfig;
 use polaris_core::error::{PolarisError, Result};
 use polaris_core::eval::{EvalReport, MIN_RELIABLE_SAMPLE};
 
+/// How the effective `search_min_similarity` reads in `status` and `eval`.
+pub fn threshold_label(cfg: &PolarisConfig) -> String {
+    match cfg.search_min_similarity {
+        Some(t) => format!("{t:.2}"),
+        None => format!("uncalibrated for {}", cfg.model_id),
+    }
+}
+
 /// Render a report for the terminal.
-pub fn format_report(r: &EvalReport, current_threshold: f32) -> String {
+pub fn format_report(r: &EvalReport, cfg: &PolarisConfig) -> String {
     let mut out = String::new();
 
     out.push_str(&format!(
@@ -70,7 +78,8 @@ pub fn format_report(r: &EvalReport, current_threshold: f32) -> String {
             out.push_str(&format!("  positives p10      {:.2}\n", r.positive_p10));
             out.push_str(&format!("  probes     p95      {:.2}\n", floor));
             out.push_str(&format!(
-                "  -> suggested search_min_similarity = {t:.2}  (currently {current_threshold:.2})\n"
+                "  -> suggested search_min_similarity = {t:.2}  (currently {})\n",
+                threshold_label(cfg)
             ));
         }
         (None, Some(floor)) => {
@@ -106,7 +115,7 @@ fn json_f32(v: f32) -> f64 {
 }
 
 /// Render a report as JSON.
-pub fn report_json(r: &EvalReport, current_threshold: f32) -> String {
+pub fn report_json(r: &EvalReport, cfg: &PolarisConfig) -> String {
     serde_json::json!({
         // A zero-sample run measured nothing, and its zeroed metrics would read
         // to a CI gate diffing recall_3 as a total retrieval collapse. The
@@ -124,7 +133,7 @@ pub fn report_json(r: &EvalReport, current_threshold: f32) -> String {
         "positive_median": json_f32(r.positive_median),
         "probe_p95": r.probe_p95.map(json_f32),
         "suggested_threshold": r.suggested_threshold.map(json_f32),
-        "current_threshold": json_f32(current_threshold),
+        "current_threshold": cfg.search_min_similarity.map(json_f32),
         "corpus_fingerprint": r.corpus_fingerprint,
         "corpus_changed": r.corpus_changed,
     })
@@ -169,9 +178,9 @@ pub fn run(cfg: &PolarisConfig, sample: Option<usize>, json: bool) -> Result<()>
     )?;
 
     if json {
-        println!("{}", report_json(&report, cfg.search_min_similarity));
+        println!("{}", report_json(&report, cfg));
     } else {
-        print!("{}", format_report(&report, cfg.search_min_similarity));
+        print!("{}", format_report(&report, cfg));
     }
     Ok(())
 }
@@ -219,9 +228,23 @@ mod tests {
         }
     }
 
+    fn pinned(t: f32) -> PolarisConfig {
+        let mut c = PolarisConfig::default();
+        c.search_min_similarity = Some(t);
+        c.explicit.search_min_similarity = Some(t);
+        c
+    }
+
+    fn uncalibrated(model: &str) -> PolarisConfig {
+        let mut c = PolarisConfig::default();
+        c.apply_overrides(None, None, Some(model.to_string()));
+        c.search_min_similarity = None;
+        c
+    }
+
     #[test]
     fn plain_output_shows_metrics_and_threshold() {
-        let out = format_report(&report(), 0.65);
+        let out = format_report(&report(), &pinned(0.65));
         assert!(out.contains("recall@1"));
         assert!(out.contains("0.89"));
         assert!(out.contains("0.63"), "suggested threshold missing: {out}");
@@ -234,7 +257,7 @@ mod tests {
         r.suggested_threshold = None;
         r.probe_p95 = None;
         r.language = Language::Unknown;
-        let out = format_report(&r, 0.65);
+        let out = format_report(&r, &pinned(0.65));
         assert!(out.contains("eval.probes"), "must point at the escape hatch: {out}");
     }
 
@@ -245,7 +268,7 @@ mod tests {
         let mut r = report();
         r.sample_size = 0;
         r.suggested_threshold = None;
-        let out = format_report(&r, 0.65);
+        let out = format_report(&r, &pinned(0.65));
         assert!(out.contains("no sentences could be sampled"), "got: {out}");
         assert!(
             !out.contains("another language"),
@@ -259,12 +282,12 @@ mod tests {
         // gate diffs, so an unflagged run of zeroes reads as a retrieval collapse.
         let mut r = report();
         r.sample_size = 0;
-        let v: serde_json::Value = serde_json::from_str(&report_json(&r, 0.65)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&report_json(&r, &pinned(0.65))).unwrap();
         assert_eq!(v["measured"], serde_json::json!(false));
 
         let mut ok = report();
         ok.sample_size = 200;
-        let v: serde_json::Value = serde_json::from_str(&report_json(&ok, 0.65)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&report_json(&ok, &pinned(0.65))).unwrap();
         assert_eq!(v["measured"], serde_json::json!(true));
     }
 
@@ -272,11 +295,32 @@ mod tests {
     fn zero_sample_does_not_also_call_the_numbers_noisy() {
         let mut r = report();
         r.sample_size = 0;
-        let out = format_report(&r, 0.65);
+        let out = format_report(&r, &pinned(0.65));
         assert!(
             !out.contains("noisy"),
             "a run that produced no numbers must not warn that its numbers are noisy: {out}"
         );
+    }
+
+    #[test]
+    fn plain_output_names_an_uncalibrated_model() {
+        let out = format_report(&report(), &uncalibrated("all-minilm-l6-v2"));
+        assert!(out.contains("uncalibrated for all-minilm-l6-v2"), "{out}");
+    }
+
+    #[test]
+    fn json_current_threshold_is_null_when_uncalibrated() {
+        let v: serde_json::Value =
+            serde_json::from_str(&report_json(&report(), &uncalibrated("all-minilm-l6-v2"))).unwrap();
+        assert!(v["current_threshold"].is_null(), "{v}");
+        let v: serde_json::Value = serde_json::from_str(&report_json(&report(), &pinned(0.65))).unwrap();
+        assert_eq!(v["current_threshold"], 0.65);
+    }
+
+    #[test]
+    fn threshold_label_shows_the_value_or_the_uncalibrated_model() {
+        assert_eq!(threshold_label(&pinned(0.42)), "0.42");
+        assert_eq!(threshold_label(&uncalibrated("mxbai-embed-large-v1")), "uncalibrated for mxbai-embed-large-v1");
     }
 
     #[test]
@@ -299,7 +343,7 @@ mod tests {
             corpus_fingerprint: "abc".to_string(),
             config_json: "{}".to_string(),
         });
-        let out = format_report(&r, 0.65);
+        let out = format_report(&r, &pinned(0.65));
         assert!(out.contains("deltas omitted"), "got: {out}");
         assert!(
             !out.contains("since last run"),
@@ -311,7 +355,7 @@ mod tests {
     fn plain_output_warns_on_a_small_sample() {
         let mut r = report();
         r.sample_size = 12;
-        let out = format_report(&r, 0.65);
+        let out = format_report(&r, &pinned(0.65));
         assert!(out.to_lowercase().contains("noisy"), "no small-sample warning: {out}");
     }
 
@@ -335,7 +379,7 @@ mod tests {
     #[test]
     fn json_output_is_valid_and_carries_the_metrics() {
         let val: serde_json::Value =
-            serde_json::from_str(&report_json(&report(), 0.65)).unwrap();
+            serde_json::from_str(&report_json(&report(), &pinned(0.65))).unwrap();
         assert_eq!(val["recall_3"], 0.89);
         assert_eq!(val["suggested_threshold"], 0.63);
     }

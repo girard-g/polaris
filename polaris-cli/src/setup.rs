@@ -722,11 +722,14 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
             style("✓").green(),
         );
     } else {
-        write_atomic(&toml_path, &polaris_toml_content(cfg.search_min_similarity))?;
+        // ponytail: the live key goes away with the reference-only template;
+        // until then keep writing today's value for an uncalibrated model.
+        let threshold = cfg.search_min_similarity.unwrap_or(0.63);
+        write_atomic(&toml_path, &polaris_toml_content(threshold))?;
         println!(
             "  {}  Created polaris.toml (search_min_similarity = {})",
             style("✓").green(),
-            cfg.search_min_similarity,
+            threshold,
         );
     }
 
@@ -1343,7 +1346,7 @@ second
         std::fs::write(&file, polaris_toml_content(0.63)).unwrap();
 
         let parsed = PolarisConfig::load(Some(&file)).expect("template must load");
-        assert!((parsed.search_min_similarity - 0.63).abs() < f32::EPSILON);
+        assert!((parsed.search_min_similarity.unwrap() - 0.63).abs() < f32::EPSILON);
         parsed.validate().expect("template must pass config validation");
     }
 
@@ -1377,7 +1380,7 @@ second
         // and the user would only find out by trusting it.
         let defaults = PolarisConfig::default();
         let revived = uncomment_reference_lines(&polaris_toml_content(
-            defaults.search_min_similarity,
+            defaults.search_min_similarity.unwrap(),
         ));
 
         let dir = TempDir::new().unwrap();
@@ -1423,7 +1426,7 @@ second
         std::fs::write(&file, polaris_toml_content(0.42)).unwrap();
 
         let parsed = PolarisConfig::load(Some(&file)).unwrap();
-        assert!((parsed.search_min_similarity - 0.42).abs() < f32::EPSILON);
+        assert!((parsed.search_min_similarity.unwrap() - 0.42).abs() < f32::EPSILON);
     }
 
     #[test]

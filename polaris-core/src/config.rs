@@ -46,11 +46,12 @@ pub struct PolarisConfig {
     #[serde(default = "default_max_top_k")]
     pub max_top_k: usize,
 
-    /// Minimum query-to-chunk cosine similarity for the auto-search hook to
-    /// inject a result. Model-dependent: the default suits the default
-    /// `model_id`, and a different embedding model needs it re-tuned.
+    /// Minimum query-to-chunk cosine similarity for the MCP `search` tool to
+    /// return results and the auto-search hook to inject one. Effective value;
+    /// see [`resolve_effective`]. `None` means uncalibrated: search is not
+    /// gated and the hook stays silent.
     #[serde(default = "default_search_min_similarity")]
-    pub search_min_similarity: f32,
+    pub search_min_similarity: Option<f32>,
 
     /// Maximum file size in bytes that the indexer will process (larger files are skipped)
     #[serde(default = "default_max_file_size")]
@@ -76,6 +77,7 @@ pub struct PolarisConfig {
 pub struct Explicit {
     pub model_id: Option<String>,
     pub embedding_dim: Option<usize>,
+    pub search_min_similarity: Option<f32>,
 }
 
 fn default_db_path() -> PathBuf {
@@ -121,11 +123,12 @@ fn default_heading_boost() -> f32 {
 /// rather than removing either. It was 0.65, which cost roughly twice the false
 /// negatives for the same false-positive rate on this corpus.
 ///
-/// Re-tune per `model_id`, and re-run `polaris eval` after doing so: the
-/// off-topic floor comes from the model's `search_query: ` prefix, which gives
-/// any two texts a shared baseline, and it moves with the model.
-fn default_search_min_similarity() -> f32 {
-    0.63
+/// Before resolution: the default model's threshold, so a config that is never
+/// resolved gates exactly as it always has. The evidence behind each model's
+/// value lives with the model table in `embedding.rs`.
+fn default_search_min_similarity() -> Option<f32> {
+    crate::embedding::default_threshold_for(crate::embedding::DEFAULT_MODEL_ID)
+        .expect("the default model is in the model table")
 }
 
 fn default_rrf_k() -> usize {
@@ -259,6 +262,11 @@ impl PolarisConfig {
                 cfg.explicit = Explicit {
                     model_id: keys.contains_key("model_id").then(|| cfg.model_id.clone()),
                     embedding_dim: keys.contains_key("embedding_dim").then_some(cfg.embedding_dim),
+                    search_min_similarity: if keys.contains_key("search_min_similarity") {
+                        cfg.search_min_similarity
+                    } else {
+                        None
+                    },
                 };
                 Ok(cfg)
             }
@@ -273,11 +281,12 @@ impl PolarisConfig {
             self.max_chunk_tokens,
             self.chunk_overlap_chars,
         )?;
-        if !(0.0..=1.0).contains(&self.search_min_similarity) {
-            return Err(PolarisError::Config(format!(
-                "search_min_similarity must be in [0.0, 1.0], got {}",
-                self.search_min_similarity
-            )));
+        if let Some(t) = self.search_min_similarity {
+            if !(0.0..=1.0).contains(&t) {
+                return Err(PolarisError::Config(format!(
+                    "search_min_similarity must be in [0.0, 1.0], got {t}"
+                )));
+            }
         }
         if self.eval.sample_size == 0 {
             return Err(PolarisError::Config(
@@ -339,7 +348,7 @@ pub(crate) fn apply_resolution(cfg: &mut PolarisConfig, source: crate::db::Index
     let source_dim = source
         .embedding_dim
         .filter(|_| source.model_id.as_deref().is_none_or(|m| m == cfg.model_id));
-    // Unknown model: leave the dim alone; `validate` reports the model.
+    // Unknown model: leave dim and threshold alone; `validate` reports the model.
     if let Some(dim) = cfg
         .explicit
         .embedding_dim
@@ -347,6 +356,12 @@ pub(crate) fn apply_resolution(cfg: &mut PolarisConfig, source: crate::db::Index
         .or_else(|| crate::embedding::default_dim_for(&cfg.model_id).ok())
     {
         cfg.embedding_dim = dim;
+    }
+
+    if let Some(t) = cfg.explicit.search_min_similarity {
+        cfg.search_min_similarity = Some(t);
+    } else if let Ok(default) = crate::embedding::default_threshold_for(&cfg.model_id) {
+        cfg.search_min_similarity = default;
     }
 }
 
@@ -692,6 +707,56 @@ mod tests {
         assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("bad-model", 512));
         assert!(cfg.validate().unwrap_err().to_string().contains("bad-model"));
     }
+
+    #[test]
+    fn threshold_follows_the_resolved_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        for (model, expected) in [
+            ("nomic-embed-text-v1.5", Some(0.63)),
+            ("nomic-embed-text-v1.5-quantized", Some(0.63)),
+            ("embeddinggemma-300m", Some(0.42)),
+            ("mxbai-embed-large-v1", None),
+            ("all-minilm-l6-v2", None),
+        ] {
+            let mut cfg = cfg_at(db.clone());
+            cfg.apply_overrides(None, None, Some(model.into()));
+            resolve_effective(&mut cfg);
+            assert_eq!(cfg.search_min_similarity, expected, "{model}");
+        }
+    }
+
+    #[test]
+    fn threshold_follows_the_model_of_an_existing_index() {
+        register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        { let _d = Database::open(&db, 768, "embeddinggemma-300m").unwrap(); }
+        let mut cfg = cfg_at(db);
+        resolve_effective(&mut cfg);
+        assert_eq!(cfg.search_min_similarity, Some(0.42));
+    }
+
+    #[test]
+    fn an_explicit_threshold_is_kept_for_any_model() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, r#"model_id = "all-minilm-l6-v2""#).unwrap();
+        writeln!(file, "search_min_similarity = 0.3").unwrap();
+        let mut cfg = PolarisConfig::load(Some(file.path())).unwrap();
+        assert_eq!(cfg.explicit.search_min_similarity, Some(0.3));
+        let dir = tempfile::tempdir().unwrap();
+        cfg.db_path = dir.path().join("polaris.db");
+        resolve_effective(&mut cfg);
+        assert_eq!(cfg.search_min_similarity, Some(0.3));
+    }
+
+    #[test]
+    fn a_threshold_the_file_omits_is_not_explicit() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, r#"db_path = "x.db""#).unwrap();
+        let cfg = PolarisConfig::load(Some(file.path())).unwrap();
+        assert_eq!(cfg.explicit.search_min_similarity, None);
+    }
 }
 
 #[cfg(test)]
@@ -709,10 +774,20 @@ mod opts_tests {
     #[test]
     fn validate_rejects_out_of_range_min_similarity() {
         let mut cfg = PolarisConfig::default();
-        cfg.search_min_similarity = 1.5;
+        cfg.search_min_similarity = Some(1.5);
         assert!(cfg.validate().is_err());
-        cfg.search_min_similarity = 0.65;
+        cfg.search_min_similarity = Some(0.65);
         assert!(cfg.validate().is_ok());
+        cfg.search_min_similarity = None;
+        assert!(cfg.validate().is_ok(), "uncalibrated is a valid state");
+    }
+
+    #[test]
+    fn an_unresolved_config_keeps_todays_threshold() {
+        // Spec §6: anything that never resolves must behave exactly as before.
+        assert_eq!(PolarisConfig::default().search_min_similarity, Some(0.63));
+        let parsed: PolarisConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.search_min_similarity, Some(0.63));
     }
 
     #[test]

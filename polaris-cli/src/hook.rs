@@ -424,6 +424,12 @@ pub fn perform_search(
         return Ok(None);
     }
 
+    // No calibrated threshold for this model: never inject (spec §5.2). Checked
+    // before the database opens and the model loads, so it costs no latency.
+    let Some(threshold) = cfg.search_min_similarity else {
+        return Ok(None);
+    };
+
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
     let search = SearchEngine::new(
@@ -461,7 +467,7 @@ pub fn perform_search(
         return Ok(None);
     };
 
-    if similarity < cfg.search_min_similarity {
+    if similarity < threshold {
         return Ok(None);
     }
 
@@ -1235,5 +1241,20 @@ mod tests {
             result.is_none(),
             "off-topic query must not pass on lexical overlap alone, got: {result:?}"
         );
+    }
+
+    #[test]
+    fn perform_search_is_silent_for_an_uncalibrated_model_without_loading_it() {
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("polaris.db");
+        drop(Database::open(&db_path, 512, "bad-model").unwrap());
+
+        let mut cfg = cfg_with_db(db_path);
+        cfg.apply_overrides(None, None, Some("bad-model".into()));
+        cfg.search_min_similarity = None;
+
+        let result = perform_search("how does the indexer work in polaris?", None, &cfg);
+        assert!(matches!(result, Ok(None)), "expected a silent no-op, got {result:?}");
     }
 }

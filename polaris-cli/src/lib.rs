@@ -837,6 +837,11 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
         style("·").dim(),
         stats.embedding_dim,
     );
+    println!(
+        "  {}  {}",
+        style(format!("{:<w$}", "threshold")).dim(),
+        eval::threshold_label(&cfg),
+    );
     println!();
 
     // ── Documents group ──────────────────────────────────────────────────────

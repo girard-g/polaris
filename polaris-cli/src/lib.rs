@@ -1265,4 +1265,41 @@ mod cli_tests {
         .unwrap();
         assert_eq!(cli.resolve_config().unwrap().embedding_dim, 256);
     }
+
+    #[test]
+    fn resolve_config_on_a_gemma_index_without_polaris_toml() {
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let conf = empty_config(dir.path());
+        let db = dir.path().join("polaris.db");
+        drop(polaris_core::db::Database::open(&db, 768, "embeddinggemma-300m").unwrap());
+
+        let cli = Cli::try_parse_from([
+            "polaris", "--config", conf.to_str().unwrap(), "--db", db.to_str().unwrap(), "status",
+        ])
+        .unwrap();
+        let cfg = cli.resolve_config().unwrap();
+        assert_eq!(cfg.model_id, "embeddinggemma-300m");
+        assert_eq!(cfg.embedding_dim, 768);
+        assert_eq!(cfg.search_min_similarity, Some(0.42));
+    }
+
+    #[test]
+    fn resolve_config_keeps_a_pinned_threshold_on_a_nomic_index() {
+        // Spec §6 row 1: nomic DB + polaris.toml pinning 0.63 — identical.
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("polaris.toml");
+        std::fs::write(&conf, "search_min_similarity = 0.63\n").unwrap();
+        let db = dir.path().join("polaris.db");
+        drop(polaris_core::db::Database::open(&db, 512, "nomic-embed-text-v1.5").unwrap());
+
+        let cli = Cli::try_parse_from([
+            "polaris", "--config", conf.to_str().unwrap(), "--db", db.to_str().unwrap(), "status",
+        ])
+        .unwrap();
+        let cfg = cli.resolve_config().unwrap();
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("nomic-embed-text-v1.5", 512));
+        assert_eq!(cfg.search_min_similarity, Some(0.63));
+    }
 }

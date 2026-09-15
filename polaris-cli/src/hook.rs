@@ -287,6 +287,16 @@ impl Drop for CwdGuard {
     }
 }
 
+/// The config a hook acts on, resolved once the DB-exists gate has passed:
+/// model, dimension and threshold come from the index when polaris.toml does
+/// not set them. Called only after the gates, so a prompt that fails the length
+/// gate, or a project with no index, never pays for peeking at the database.
+pub(crate) fn effective_config(cfg: &PolarisConfig) -> PolarisConfig {
+    let mut cfg = cfg.clone();
+    polaris_core::config::resolve_effective(&mut cfg);
+    cfg
+}
+
 /// Apply the gates and (if eligible) run a single-file index pass. Pure
 /// failures (DB locked, etc.) bubble up as `Err`; the caller decides whether
 /// to surface them — `run_index` swallows them into stderr.
@@ -322,6 +332,8 @@ pub fn perform_index(
     if !cfg.db_path.exists() {
         return Ok(HookIndexReport { indexed_new_or_modified: 0 });
     }
+
+    let cfg = &effective_config(cfg);
 
     // `register_vec_extension` is called by `main.rs::run` before dispatching,
     // so we don't re-register here.
@@ -423,6 +435,8 @@ pub fn perform_search(
     if !cfg.db_path.exists() {
         return Ok(None);
     }
+
+    let cfg = &effective_config(cfg);
 
     // No calibrated threshold for this model: never inject (spec §5.2). Checked
     // before the database opens and the model loads, so it costs no latency.
@@ -533,6 +547,97 @@ mod tests {
         let mut cfg = PolarisConfig::default();
         cfg.db_path = db_path;
         cfg
+    }
+
+    fn gemma_index_without_documents(dir: &std::path::Path) -> PathBuf {
+        polaris_core::db::register_vec_extension();
+        let db_path = dir.join("polaris.db");
+        drop(Database::open(&db_path, 768, "embeddinggemma-300m").unwrap());
+        db_path
+    }
+
+    #[test]
+    fn effective_config_takes_model_dim_and_threshold_from_a_gemma_index() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = effective_config(&cfg_with_db(gemma_index_without_documents(dir.path())));
+        assert_eq!(cfg.model_id, "embeddinggemma-300m");
+        assert_eq!(cfg.embedding_dim, 768);
+        assert_eq!(cfg.search_min_similarity, Some(0.42));
+    }
+
+    #[test]
+    fn perform_index_opens_a_gemma_index_without_a_mismatch() {
+        // Before resolution the default nomic/512 config hit a mismatch error
+        // on every Markdown write in a Gemma project.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = cfg_with_db(gemma_index_without_documents(dir.path()));
+        let report = perform_index(&dir.path().join("docs/new.md"), None, &cfg)
+            .expect("the hook must open a Gemma index");
+        assert_eq!(report.indexed_new_or_modified, 0, "no indexed root yet");
+    }
+
+    #[test]
+    fn perform_search_on_an_uncalibrated_index_is_silent_without_loading_the_model() {
+        // The minilm index has no default threshold: resolved from the index,
+        // the hook must return before opening it with the default nomic config
+        // (which would fail with a mismatch).
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("polaris.db");
+        drop(Database::open(&db_path, 384, "all-minilm-l6-v2").unwrap());
+
+        let result = perform_search("how does the indexer work in polaris?", None, &cfg_with_db(db_path));
+        assert!(matches!(result, Ok(None)), "got {result:?}");
+    }
+
+    /// Build a real Gemma index over `docs` at `dir/polaris.db`.
+    fn gemma_index(dir: &std::path::Path, docs: &std::path::Path) -> PathBuf {
+        polaris_core::db::register_vec_extension();
+        let db_path = dir.join("polaris.db");
+        let db = Database::open(&db_path, 768, "embeddinggemma-300m").unwrap();
+        let engine = Arc::new(EmbeddingEngine::new(768, "embeddinggemma-300m").unwrap());
+        let indexer = Indexer::new(engine, 450, 200, 10 * 1024 * 1024);
+        indexer.index_path(&db, docs, true, false, false, None).unwrap();
+        db_path
+    }
+
+    #[test]
+    #[ignore = "downloads ~1.2 GB EmbeddingGemma ONNX model; run with `cargo test -- --include-ignored`"]
+    fn search_hook_injects_from_a_gemma_index_without_polaris_toml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("guide.md"),
+            "# Installation Guide\n\nTo install polaris, run `cargo install polaris`.\n",
+        )
+        .unwrap();
+        let db_path = gemma_index(dir.path(), &docs);
+
+        let result = perform_search(
+            "how do I install polaris on my machine?",
+            Some(dir.path()),
+            &cfg_with_db(db_path),
+        )
+        .expect("the hook must open a Gemma index with the default config");
+        let output = result.expect("a relevant query must clear the 0.42 Gemma threshold");
+        assert!(output.contains("guide.md"), "{output}");
+    }
+
+    #[test]
+    #[ignore = "downloads ~1.2 GB EmbeddingGemma ONNX model; run with `cargo test -- --include-ignored`"]
+    fn index_hook_reindexes_into_a_gemma_index_without_polaris_toml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("seed.md"), "# Seed\nbody\n").unwrap();
+        let db_path = gemma_index(dir.path(), &docs);
+
+        let new_file = docs.join("new.md");
+        std::fs::write(&new_file, "# New\nfresh content\n").unwrap();
+        let report = perform_index(&new_file, None, &cfg_with_db(db_path))
+            .expect("no ModelMismatch on a Gemma index");
+        assert!(report.indexed_new_or_modified > 0, "{report:?}");
     }
 
     #[test]

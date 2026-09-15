@@ -18,54 +18,58 @@ const GITIGNORE_ENTRIES: &[&str] = &[
 
 /// Render the starter `polaris.toml`.
 ///
-/// Exactly one key is live: `search_min_similarity`, the value that has to be
-/// tuned per corpus. Everything else ships commented out as a reference, which
-/// documents the full surface without pinning any of it — a commented key is
-/// inert, so it keeps tracking its built-in default across upgrades, whereas a
-/// key written out freezes this project on today's value forever.
-///
-/// The live key is deliberately first. TOML requires every top-level key to
-/// precede any table, so a user who uncomments the `[eval]` block at the bottom
-/// would otherwise find `search_min_similarity` swallowed into it.
-pub fn polaris_toml_content(search_min_similarity: f32) -> String {
-    format!(
-        "\
+/// Every key ships commented out as a reference. A commented key is inert, so
+/// it keeps tracking its built-in default across upgrades — which matters most
+/// for `model_id`, `embedding_dim` and `search_min_similarity`: unset, the
+/// first index chooses the model from the corpus and the other two follow it.
+/// The file is written before that first index, when the model is not known
+/// yet, so the threshold block lists every model's default instead of one value.
+pub fn polaris_toml_content() -> String {
+    "\
 # Polaris configuration.
 #
-# Only the key below is active. Everything after it is commented out and serves
-# as a reference: uncomment a line to override that default. Leaving a key
-# commented is not the same as copying its current value — an omitted key keeps
-# following the built-in default through upgrades, a written one does not.
-
-# Minimum query-to-chunk cosine similarity for a result to be used. Below it the
-# MCP `search` tool answers \"No reliable context found\" and the auto-search hook
-# stays silent, rather than handing over a chunk that does not answer the query.
-#
-# Calibrated for the default model (nomic-embed-text-v1.5). Run `polaris eval`
-# to measure the right one for YOUR corpus — it prints a suggestion next to
-# whatever is configured here.
-#
-# Retune it if you change `model_id`: all-minilm-l6-v2 embeds without a query
-# prefix and scores in a far lower band, where this value would refuse
-# everything and the hook would go silently dead.
-search_min_similarity = {search_min_similarity}
-
+# Every key below is commented out and serves as a reference: uncomment a line
+# to override that default. Leaving a key commented is not the same as copying
+# its current value — an omitted key keeps following the built-in default
+# through upgrades, a written one does not.
 
 # ---------------------------------------------------------------------------
 # Reference — defaults shown, all commented out
 # ---------------------------------------------------------------------------
 
+# Minimum query-to-chunk cosine similarity for a result to be used. Below it the
+# MCP `search` tool answers \"No reliable context found\" and the auto-search hook
+# stays silent, rather than handing over a chunk that does not answer the query.
+#
+# Unset, it follows the embedding model of the index:
+#
+#   nomic-embed-text-v1.5            0.63
+#   nomic-embed-text-v1.5-quantized  0.63
+#   embeddinggemma-300m              0.42
+#   mxbai-embed-large-v1             uncalibrated
+#   all-minilm-l6-v2                 uncalibrated
+#
+# Uncalibrated: `search` returns results unfiltered and the hook never injects.
+# `polaris eval` suggests a value for YOUR corpus — a hint, not a setting: on
+# real queries it has undershot by about 0.1. Setting one pins it for any model.
+# search_min_similarity = 0.63
+
 # SQLite database file, relative to the working directory or absolute.
 # db_path = \"polaris.db\"
 
-# Embedding model. Changing it requires a full re-index.
+# Embedding model. Unset, the first index chooses it from the Markdown it reads:
+# English prose (90% or more) gets nomic-embed-text-v1.5, anything else gets
+# embeddinggemma-300m. Setting it disables that choice. Changing it later
+# requires deleting the database and re-indexing.
 # Options: nomic-embed-text-v1.5, nomic-embed-text-v1.5-quantized (faster,
-# slightly lower recall), mxbai-embed-large-v1, all-minilm-l6-v2
+# slightly lower recall), embeddinggemma-300m (multilingual),
+# mxbai-embed-large-v1, all-minilm-l6-v2
 # model_id = \"nomic-embed-text-v1.5\"
 
-# Embedding vector dimension (matryoshka truncation). Must match what is already
-# stored in the database, which is checked on open. Valid from 64 up to the
-# model's native dimension.
+# Embedding vector dimension (matryoshka truncation). Unset, it follows the
+# index, then the model: 512 for nomic, 768 for embeddinggemma-300m, the native
+# size otherwise. Must match what is already stored in the database, which is
+# checked on open. Valid from 64 up to the model's native dimension.
 # embedding_dim = 512
 
 # Chunking. Tokens are approximated as chars / 4, so 450 is roughly 1800 chars.
@@ -92,7 +96,8 @@ search_min_similarity = {search_min_similarity}
 # Upper bound on the top_k a search request may ask for.
 # max_top_k = 50
 
-# Additional read-only databases fused into search results.
+# Additional read-only databases fused into search results. They must share
+# the index's model and dimension.
 # extra_db_paths = []
 
 # `polaris eval` settings. This is a TOML table, so it must stay below every
@@ -101,7 +106,7 @@ search_min_similarity = {search_min_similarity}
 # sample_size = 200
 # probes = []
 "
-    )
+    .to_string()
 }
 
 /// Filenames in the project root that receive the Polaris instruction block,
@@ -722,15 +727,8 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
             style("✓").green(),
         );
     } else {
-        // ponytail: the live key goes away with the reference-only template;
-        // until then keep writing today's value for an uncalibrated model.
-        let threshold = cfg.search_min_similarity.unwrap_or(0.63);
-        write_atomic(&toml_path, &polaris_toml_content(threshold))?;
-        println!(
-            "  {}  Created polaris.toml (search_min_similarity = {})",
-            style("✓").green(),
-            threshold,
-        );
+        write_atomic(&toml_path, &polaris_toml_content())?;
+        println!("  {}  Created polaris.toml (reference, all keys commented)", style("✓").green());
     }
 
     // .gitignore
@@ -1354,16 +1352,47 @@ second
     fn polaris_toml_round_trips_into_the_real_config() {
         // A template that does not parse would only surface the next time the
         // user ran any polaris command, as a startup error on a file they did
-        // not write.
-        // Loaded through PolarisConfig::load rather than a bare parser, so the
-        // test covers the path a user's next polaris command actually takes.
+        // not write. Loaded through PolarisConfig::load, the path a user's next
+        // polaris command actually takes.
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("polaris.toml");
-        std::fs::write(&file, polaris_toml_content(0.63)).unwrap();
+        std::fs::write(&file, polaris_toml_content()).unwrap();
 
-        let parsed = PolarisConfig::load(Some(&file)).expect("template must load");
-        assert!((parsed.search_min_similarity.unwrap() - 0.63).abs() < f32::EPSILON);
+        let mut parsed = PolarisConfig::load(Some(&file)).expect("template must load");
+        assert_eq!(
+            parsed.explicit,
+            polaris_core::config::Explicit::default(),
+            "the template must pin nothing"
+        );
+        parsed.db_path = dir.path().join("polaris.db");
+        polaris_core::config::resolve_effective(&mut parsed);
+        assert_eq!(parsed.search_min_similarity, Some(0.63), "unset follows the default model");
         parsed.validate().expect("template must pass config validation");
+    }
+
+    #[test]
+    fn polaris_toml_has_no_live_threshold() {
+        let rendered = polaris_toml_content();
+        assert!(
+            !rendered.lines().any(|l| l.trim_start().starts_with("search_min_similarity")),
+            "a live key would pin the threshold for whatever model the index gets"
+        );
+    }
+
+    #[test]
+    fn polaris_toml_lists_every_models_threshold_default() {
+        let rendered = polaris_toml_content();
+        for model in polaris_core::embedding::SUPPORTED_MODELS {
+            let line = rendered
+                .lines()
+                .find(|l| l.split_whitespace().nth(1) == Some(*model))
+                .unwrap_or_else(|| panic!("no threshold line for {model}"));
+            let expected = match polaris_core::embedding::default_threshold_for(model).unwrap() {
+                Some(t) => format!("{t:.2}"),
+                None => "uncalibrated".to_string(),
+            };
+            assert_eq!(line.split_whitespace().nth(2), Some(expected.as_str()), "{line}");
+        }
     }
 
     /// Uncomment every reference line in the template. Prose comments are left
@@ -1395,9 +1424,7 @@ second
         // ships a file quietly documenting a value the code no longer uses —
         // and the user would only find out by trusting it.
         let defaults = PolarisConfig::default();
-        let revived = uncomment_reference_lines(&polaris_toml_content(
-            defaults.search_min_similarity.unwrap(),
-        ));
+        let revived = uncomment_reference_lines(&polaris_toml_content());
 
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("polaris.toml");
@@ -1422,27 +1449,6 @@ second
         assert!((loaded.heading_boost - defaults.heading_boost).abs() < f32::EPSILON);
 
         loaded.validate().expect("the documented defaults must be a valid config");
-    }
-
-    #[test]
-    fn live_key_precedes_the_commented_eval_table() {
-        // TOML puts every top-level key before any table. If the live key drifted
-        // below the commented [eval] block, uncommenting that block would pull
-        // search_min_similarity into the table and break the file.
-        let rendered = polaris_toml_content(0.63);
-        let live = rendered.find("\nsearch_min_similarity = ").expect("live key");
-        let table = rendered.find("# [eval]").expect("eval reference");
-        assert!(live < table, "the live key must stay above the [eval] table");
-    }
-
-    #[test]
-    fn polaris_toml_reflects_the_configured_value_not_a_literal() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("polaris.toml");
-        std::fs::write(&file, polaris_toml_content(0.42)).unwrap();
-
-        let parsed = PolarisConfig::load(Some(&file)).unwrap();
-        assert!((parsed.search_min_similarity.unwrap() - 0.42).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -4,14 +4,11 @@
 
 Polaris reads a TOML config file. All fields are optional; unset fields use their defaults.
 
-`polaris setup` writes a starter `polaris.toml` and gitignores it — it carries
-per-corpus tuning rather than anything a team shares. One key is live,
-`search_min_similarity`; every other setting follows commented out as a
-reference you can uncomment as needed. Prefer leaving keys commented: an unset
-key keeps tracking its built-in default through upgrades, whereas one written
-out is pinned to whatever it said the day you wrote it. Note that a
-project-local `polaris.toml` replaces the global one at
-`~/.config/polaris/polaris.toml` rather than merging with it.
+`polaris setup` writes a starter `polaris.toml` and gitignores it: it carries per-corpus tuning rather than anything a team shares. Every setting in it is commented out as a reference you can uncomment as needed, including a table of each model's default `search_min_similarity`.
+
+Prefer leaving keys commented. An unset key keeps tracking its built-in default through upgrades, whereas one written out is pinned to whatever it said the day you wrote it. This matters most for `model_id`, `embedding_dim` and `search_min_similarity`: unset, the first index chooses the model from your docs and the other two follow it (see [Model Selection](#model-selection)).
+
+A project-local `polaris.toml` replaces the global one at `~/.config/polaris/polaris.toml` rather than merging with it.
 
 ```toml
 # SQLite database file path (relative to CWD or absolute)

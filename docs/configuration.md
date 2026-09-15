@@ -10,7 +10,7 @@ Prefer leaving keys commented. An unset key keeps tracking its built-in default 
 
 A project-local `polaris.toml` replaces the global one at `~/.config/polaris/polaris.toml` rather than merging with it.
 
-The example writes every key out to show its default, but `model_id`, `embedding_dim` and `search_min_similarity` are commented — those three are the ones that matter most left unset, since unset they follow the index (see [Model Selection](#model-selection)). Uncomment one only to pin it.
+The example below shows every key with its default value; `model_id`, `embedding_dim` and `search_min_similarity` stay commented for the reason above. Uncomment a line only to override it.
 
 ```toml
 # SQLite database file path (relative to CWD or absolute)

@@ -108,7 +108,7 @@ pub(crate) mod test_fixtures {
     /// level further from `src/mcp/`) rather than importing this module.
     pub(crate) const EN_PROSE: &str = include_str!("../tests/fixtures/en_prose.md");
 
-    /// French prose, ~130 words. Read the same way as `EN_PROSE`.
+    /// French prose, 132 words (per `words()`). Read the same way as `EN_PROSE`.
     pub(crate) const FR_PROSE: &str = include_str!("../tests/fixtures/fr_prose.md");
 
     /// German prose, ~110 words. Used only here, so it stays inline.

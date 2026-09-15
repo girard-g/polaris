@@ -578,6 +578,26 @@ async fn cmd_search(
         }
     }
 
+    // Every database searched together must share the primary's model and
+    // dimension. Check before loading the model, and name the offending file:
+    // the open error alone does not say which of several databases it was.
+    for extra in &cfg.extra_db_paths {
+        let meta = db::read_index_metadata(extra);
+        let model_differs = meta.model_id.as_deref().is_some_and(|m| m != cfg.model_id);
+        let dim_differs = meta.embedding_dim.is_some_and(|d| d != cfg.embedding_dim);
+        if model_differs || dim_differs {
+            return Err(PolarisError::Config(format!(
+                "{} was indexed with model '{}' at dim {}, but {} uses '{}' at dim {} — databases searched together must share one model and dimension",
+                extra.display(),
+                meta.model_id.as_deref().unwrap_or("?"),
+                meta.embedding_dim.map_or_else(|| "?".to_string(), |d| d.to_string()),
+                cfg.db_path.display(),
+                cfg.model_id,
+                cfg.embedding_dim,
+            )));
+        }
+    }
+
     let embed = polaris_core::SharedEmbedding::load(&cfg.model_id, cfg.embedding_dim)?;
     let mut set = polaris_core::BankSet::new(embed.clone());
 
@@ -1301,5 +1321,33 @@ mod cli_tests {
         let cfg = cli.resolve_config().unwrap();
         assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("nomic-embed-text-v1.5", 512));
         assert_eq!(cfg.search_min_similarity, Some(0.63));
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    fn cfg_at(db_path: PathBuf) -> PolarisConfig {
+        PolarisConfig { db_path, ..PolarisConfig::default() }
+    }
+
+    #[tokio::test]
+    async fn search_names_the_extra_database_built_with_another_model() {
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary.db");
+        let extra = dir.path().join("extra.db");
+        drop(Database::open(&primary, 512, "nomic-embed-text-v1.5").unwrap());
+        drop(Database::open(&extra, 768, "embeddinggemma-300m").unwrap());
+
+        let mut cfg = cfg_at(primary);
+        cfg.extra_db_paths = vec![extra.clone()];
+        let err = cmd_search(cfg, "anything at all", 5, OutputFormat::Plain, false, 1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&extra.display().to_string()), "{err}");
+        assert!(err.contains("embeddinggemma-300m"), "{err}");
     }
 }

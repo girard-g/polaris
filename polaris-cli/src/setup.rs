@@ -958,6 +958,7 @@ fn run_initial_index(cfg: &PolarisConfig, setup_path: &Path) -> Result<()> {
     {
         println!("  {}  {line}", console::style("ℹ").cyan());
     }
+    crate::warn_pinned_threshold(&cfg);
     let cfg = &cfg;
     // `register_vec_extension` is called by `main.rs::run` before dispatching,
     // so we don't re-register here. Use the passed-in cfg directly so the

@@ -409,6 +409,15 @@ pub fn warn_extra_dbs_ignored(cfg: &PolarisConfig) {
     }
 }
 
+/// Print [`polaris_core::config::pinned_threshold_warning`] to stderr, if any.
+///
+/// `pub` so the `polaris-pro` binary can print the identical line.
+pub fn warn_pinned_threshold(cfg: &PolarisConfig) {
+    if let Some(msg) = polaris_core::config::pinned_threshold_warning(cfg) {
+        eprintln!("  {}  {msg}", style("⚠").yellow());
+    }
+}
+
 /// Open the database an index run writes to. A dry run against an index that
 /// does not exist yet uses an in-memory database: every file is new either way,
 /// and creating the file would pin a model before any real run chose one.
@@ -452,6 +461,7 @@ async fn cmd_index(
         let line = if dry_run { format!("(dry run) {line} — nothing recorded") } else { line };
         eprintln!("{}  {line}", style("◆").cyan().bold());
     }
+    warn_pinned_threshold(&cfg);
 
     // The model loads before the database opens: a failed download must not
     // leave a database pinned to a model that never loaded (spec §4.3).
@@ -783,8 +793,34 @@ async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     Ok(())
 }
 
+/// The `polaris status --output json` payload. A free function, not inlined in
+/// `cmd_status`, so its shape is unit-testable without capturing stdout.
+fn status_json(cfg: &PolarisConfig, stats: &polaris_core::db::DbStats) -> String {
+    #[derive(serde::Serialize)]
+    struct StatusJson {
+        documents: usize,
+        chunks: usize,
+        db_bytes: u64,
+        embedding_dim: usize,
+        last_indexed: Option<String>,
+        search_min_similarity: Option<f64>,
+        threshold_source: &'static str,
+    }
+    let json = StatusJson {
+        documents: stats.doc_count,
+        chunks: stats.chunk_count,
+        db_bytes: stats.db_size_bytes,
+        embedding_dim: stats.embedding_dim,
+        last_indexed: stats.last_indexed.clone(),
+        search_min_similarity: cfg.search_min_similarity.map(crate::eval::json_f32),
+        threshold_source: cfg.threshold_source().as_str(),
+    };
+    serde_json::to_string_pretty(&json).unwrap()
+}
+
 async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
     warn_extra_dbs_ignored(&cfg);
+    warn_pinned_threshold(&cfg);
 
     if output == OutputFormat::Plain {
         println!();
@@ -823,22 +859,7 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
     let stats = db.get_stats(&cfg.db_path)?;
 
     if output == OutputFormat::Json {
-        #[derive(serde::Serialize)]
-        struct StatusJson {
-            documents: usize,
-            chunks: usize,
-            db_bytes: u64,
-            embedding_dim: usize,
-            last_indexed: Option<String>,
-        }
-        let json = StatusJson {
-            documents: stats.doc_count,
-            chunks: stats.chunk_count,
-            db_bytes: stats.db_size_bytes,
-            embedding_dim: stats.embedding_dim,
-            last_indexed: stats.last_indexed.clone(),
-        };
-        println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        println!("{}", status_json(&cfg, &stats));
         return Ok(());
     }
 
@@ -1340,6 +1361,25 @@ mod command_tests {
 
     fn cfg_at(db_path: PathBuf) -> PolarisConfig {
         PolarisConfig { db_path, ..PolarisConfig::default() }
+    }
+
+    #[test]
+    fn status_json_reports_the_threshold_and_its_source() {
+        let mut cfg = PolarisConfig::default();
+        cfg.apply_overrides(None, None, Some("embeddinggemma-300m".into()));
+        polaris_core::config::resolve_effective(&mut cfg);
+        let stats = db::DbStats {
+            doc_count: 1,
+            chunk_count: 2,
+            empty_doc_count: 0,
+            total_source_bytes: 10,
+            last_indexed: None,
+            db_size_bytes: 100,
+            embedding_dim: cfg.embedding_dim,
+        };
+        let v: serde_json::Value = serde_json::from_str(&status_json(&cfg, &stats)).unwrap();
+        assert_eq!(v["search_min_similarity"], 0.42);
+        assert_eq!(v["threshold_source"], "model_default");
     }
 
     #[tokio::test]

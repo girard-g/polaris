@@ -5,11 +5,14 @@ use polaris_core::config::PolarisConfig;
 use polaris_core::error::{PolarisError, Result};
 use polaris_core::eval::{EvalReport, MIN_RELIABLE_SAMPLE};
 
-/// How the effective `search_min_similarity` reads in `status` and `eval`.
+/// How the effective `search_min_similarity` reads in `status` and `eval`,
+/// with where it came from.
 pub fn threshold_label(cfg: &PolarisConfig) -> String {
-    match cfg.search_min_similarity {
-        Some(t) => format!("{t:.2}"),
-        None => format!("uncalibrated for {}", cfg.model_id),
+    use polaris_core::config::ThresholdSource;
+    match (cfg.threshold_source(), cfg.search_min_similarity) {
+        (ThresholdSource::Explicit, Some(t)) => format!("{t:.2} (pinned in polaris.toml)"),
+        (ThresholdSource::ModelDefault, Some(t)) => format!("{t:.2} ({} default)", cfg.model_id),
+        _ => format!("uncalibrated for {}", cfg.model_id),
     }
 }
 
@@ -73,14 +76,13 @@ pub fn format_report(r: &EvalReport, cfg: &PolarisConfig) -> String {
         return out;
     }
 
+    out.push_str(&format!("  search_min_similarity  {}\n", threshold_label(cfg)));
+
     match (r.suggested_threshold, r.probe_p95) {
         (Some(t), Some(floor)) => {
             out.push_str(&format!("  positives p10      {:.2}\n", r.positive_p10));
             out.push_str(&format!("  probes     p95      {:.2}\n", floor));
-            out.push_str(&format!(
-                "  -> suggested search_min_similarity = {t:.2}  (currently {})\n",
-                threshold_label(cfg)
-            ));
+            out.push_str(&format!("  -> suggested search_min_similarity = {t:.2}\n"));
         }
         (None, Some(floor)) => {
             out.push_str(&format!(
@@ -110,7 +112,7 @@ pub fn format_report(r: &EvalReport, cfg: &PolarisConfig) -> String {
 /// `0.89f32 as f64` == `0.8899999856948853`) — that reads as false precision
 /// and breaks equality against a JSON literal on the reading side. Do not
 /// "simplify" this back to `as f64`.
-fn json_f32(v: f32) -> f64 {
+pub(crate) fn json_f32(v: f32) -> f64 {
     format!("{v}").parse().unwrap_or(v as f64)
 }
 
@@ -134,6 +136,7 @@ pub fn report_json(r: &EvalReport, cfg: &PolarisConfig) -> String {
         "probe_p95": r.probe_p95.map(json_f32),
         "suggested_threshold": r.suggested_threshold.map(json_f32),
         "current_threshold": cfg.search_min_similarity.map(json_f32),
+        "threshold_source": cfg.threshold_source().as_str(),
         "corpus_fingerprint": r.corpus_fingerprint,
         "corpus_changed": r.corpus_changed,
     })
@@ -148,6 +151,8 @@ pub fn run(cfg: &PolarisConfig, sample: Option<usize>, json: bool) -> Result<()>
             cfg.db_path.display()
         )));
     }
+
+    crate::warn_pinned_threshold(cfg);
 
     // The CLI override bypassed PolarisConfig::validate, which rejects
     // eval.sample_size == 0 — so `--sample 0` reached the engine, produced
@@ -318,9 +323,33 @@ mod tests {
     }
 
     #[test]
-    fn threshold_label_shows_the_value_or_the_uncalibrated_model() {
-        assert_eq!(threshold_label(&pinned(0.42)), "0.42");
-        assert_eq!(threshold_label(&uncalibrated("mxbai-embed-large-v1")), "uncalibrated for mxbai-embed-large-v1");
+    fn threshold_label_names_the_source() {
+        let mut defaulted = PolarisConfig::default();
+        let dir = tempfile::TempDir::new().unwrap();
+        defaulted.db_path = dir.path().join("polaris.db");
+        polaris_core::config::resolve_effective(&mut defaulted);
+        assert_eq!(threshold_label(&defaulted), "0.63 (nomic-embed-text-v1.5 default)");
+        assert_eq!(threshold_label(&pinned(0.42)), "0.42 (pinned in polaris.toml)");
+        assert_eq!(
+            threshold_label(&uncalibrated("mxbai-embed-large-v1")),
+            "uncalibrated for mxbai-embed-large-v1"
+        );
+    }
+
+    #[test]
+    fn json_reports_the_threshold_source() {
+        let v: serde_json::Value = serde_json::from_str(&report_json(&report(), &pinned(0.65))).unwrap();
+        assert_eq!(v["threshold_source"], "explicit");
+        let v: serde_json::Value =
+            serde_json::from_str(&report_json(&report(), &uncalibrated("all-minilm-l6-v2"))).unwrap();
+        assert_eq!(v["threshold_source"], "uncalibrated");
+    }
+
+    #[test]
+    fn plain_output_labels_the_current_threshold_once() {
+        let out = format_report(&report(), &pinned(0.65));
+        assert_eq!(out.matches("0.65 (pinned in polaris.toml)").count(), 1, "{out}");
+        assert!(out.contains("-> suggested search_min_similarity = 0.63"), "{out}");
     }
 
     #[test]

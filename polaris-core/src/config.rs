@@ -80,6 +80,27 @@ pub struct Explicit {
     pub search_min_similarity: Option<f32>,
 }
 
+/// Where the effective `search_min_similarity` came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThresholdSource {
+    /// Set in a config file.
+    Explicit,
+    /// The resolved model's built-in default.
+    ModelDefault,
+    /// No explicit value and no default for the model.
+    Uncalibrated,
+}
+
+impl ThresholdSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThresholdSource::Explicit => "explicit",
+            ThresholdSource::ModelDefault => "model_default",
+            ThresholdSource::Uncalibrated => "uncalibrated",
+        }
+    }
+}
+
 fn default_db_path() -> PathBuf {
     PathBuf::from("polaris.db")
 }
@@ -316,6 +337,18 @@ impl PolarisConfig {
             self.model_id = m;
         }
     }
+
+    /// Where the effective `search_min_similarity` came from. Meaningful after
+    /// [`resolve_effective`].
+    pub fn threshold_source(&self) -> ThresholdSource {
+        if self.explicit.search_min_similarity.is_some() {
+            ThresholdSource::Explicit
+        } else if self.search_min_similarity.is_some() {
+            ThresholdSource::ModelDefault
+        } else {
+            ThresholdSource::Uncalibrated
+        }
+    }
 }
 
 /// Fill the effective model-dependent settings (spec §3.2): what the user set,
@@ -363,6 +396,22 @@ pub(crate) fn apply_resolution(cfg: &mut PolarisConfig, source: crate::db::Index
     } else if let Ok(default) = crate::embedding::default_threshold_for(&cfg.model_id) {
         cfg.search_min_similarity = default;
     }
+}
+
+/// One line when a pinned `search_min_similarity` sits 0.10 or more from the
+/// effective model's calibrated default (spec §5.4) — typically a 0.63 written
+/// by an older `polaris setup`, now on an `embeddinggemma-300m` index. `None`
+/// when nothing is pinned or the model has no default. Hooks never print it.
+pub fn pinned_threshold_warning(cfg: &PolarisConfig) -> Option<String> {
+    let pinned = cfg.explicit.search_min_similarity?;
+    let default = crate::embedding::default_threshold_for(&cfg.model_id).ok()??;
+    // Epsilon: in f32, 0.52 - 0.42 is 0.09999999.
+    ((pinned - default).abs() >= 0.10 - 1e-6).then(|| {
+        format!(
+            "search_min_similarity = {pinned:.2} is pinned in polaris.toml; {} defaults to {default:.2}",
+            cfg.model_id
+        )
+    })
 }
 
 /// Options for `Bank::index_path` and `Bank::index_diff`.
@@ -756,6 +805,68 @@ mod tests {
         writeln!(file, r#"db_path = "x.db""#).unwrap();
         let cfg = PolarisConfig::load(Some(file.path())).unwrap();
         assert_eq!(cfg.explicit.search_min_similarity, None);
+    }
+
+    #[test]
+    fn threshold_source_distinguishes_pinned_default_and_uncalibrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+
+        let mut defaulted = cfg_at(db.clone());
+        resolve_effective(&mut defaulted);
+        assert_eq!(defaulted.threshold_source(), ThresholdSource::ModelDefault);
+
+        let mut pinned = cfg_at(db.clone());
+        pinned.explicit.search_min_similarity = Some(0.5);
+        resolve_effective(&mut pinned);
+        assert_eq!(pinned.threshold_source(), ThresholdSource::Explicit);
+
+        let mut minilm = cfg_at(db);
+        minilm.apply_overrides(None, None, Some("all-minilm-l6-v2".into()));
+        resolve_effective(&mut minilm);
+        assert_eq!(minilm.threshold_source(), ThresholdSource::Uncalibrated);
+
+        assert_eq!(ThresholdSource::Explicit.as_str(), "explicit");
+        assert_eq!(ThresholdSource::ModelDefault.as_str(), "model_default");
+        assert_eq!(ThresholdSource::Uncalibrated.as_str(), "uncalibrated");
+    }
+
+    fn gemma_with_pin(pin: f32) -> PolarisConfig {
+        let mut cfg = PolarisConfig::default();
+        cfg.apply_overrides(None, None, Some("embeddinggemma-300m".into()));
+        cfg.explicit.search_min_similarity = Some(pin);
+        apply_resolution(&mut cfg, IndexMetadata::default());
+        cfg
+    }
+
+    #[test]
+    fn a_pin_far_from_the_models_default_warns() {
+        assert_eq!(
+            pinned_threshold_warning(&gemma_with_pin(0.63)).as_deref(),
+            Some("search_min_similarity = 0.63 is pinned in polaris.toml; embeddinggemma-300m defaults to 0.42")
+        );
+    }
+
+    #[test]
+    fn the_warning_starts_at_a_difference_of_0_10() {
+        assert!(pinned_threshold_warning(&gemma_with_pin(0.52)).is_some());
+        assert!(pinned_threshold_warning(&gemma_with_pin(0.32)).is_some());
+        assert!(pinned_threshold_warning(&gemma_with_pin(0.51)).is_none());
+        assert!(pinned_threshold_warning(&gemma_with_pin(0.42)).is_none());
+    }
+
+    #[test]
+    fn no_warning_without_a_pin_or_without_a_model_default() {
+        let mut unpinned = PolarisConfig::default();
+        unpinned.apply_overrides(None, None, Some("embeddinggemma-300m".into()));
+        apply_resolution(&mut unpinned, IndexMetadata::default());
+        assert!(pinned_threshold_warning(&unpinned).is_none());
+
+        let mut minilm = PolarisConfig::default();
+        minilm.apply_overrides(None, None, Some("all-minilm-l6-v2".into()));
+        minilm.explicit.search_min_similarity = Some(0.9);
+        apply_resolution(&mut minilm, IndexMetadata::default());
+        assert!(pinned_threshold_warning(&minilm).is_none());
     }
 }
 

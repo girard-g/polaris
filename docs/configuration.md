@@ -10,6 +10,8 @@ Prefer leaving keys commented. An unset key keeps tracking its built-in default 
 
 A project-local `polaris.toml` replaces the global one at `~/.config/polaris/polaris.toml` rather than merging with it.
 
+The example writes every key out to show its default. In a real file leave `model_id`, `embedding_dim` and `search_min_similarity` unset: unset, they follow the index.
+
 ```toml
 # SQLite database file path (relative to CWD or absolute)
 db_path = "polaris.db"
@@ -49,8 +51,8 @@ rrf_k = 60
 # Cap on the `top_k` value accepted by search commands (prevents runaway queries)
 max_top_k = 50
 
-# Minimum query-to-chunk cosine similarity for the auto-search hook to inject
-# a result. Model-dependent: retune it if you change `model_id`.
+# Minimum query-to-chunk cosine similarity for the MCP search tool and the
+# auto-search hook. Unset, it follows the index's model (see Search Threshold).
 search_min_similarity = 0.63
 
 # Maximum file size (in bytes) the indexer will process; larger files are skipped
@@ -116,20 +118,49 @@ Setting `model_id` anywhere disables the choice for every index that config appl
 | Field | Default | Constraints | Notes |
 |-------|---------|-------------|-------|
 | `db_path` | `"polaris.db"` | — | Relative to CWD |
-| `embedding_dim` | `512` | `[64, native_dim]` | Matryoshka truncation; upper bound depends on model |
+| `embedding_dim` | model default: 512 nomic, 768 `embeddinggemma-300m`, native otherwise | `[64, native_dim]` | Unset: taken from the index, then the model |
 | `max_chunk_tokens` | `450` | `> 0` | ≈ 1800 chars |
 | `chunk_overlap_chars` | `200` | `< max_chunk_tokens * 4` | Chars of overlap |
-| `model_id` | `"nomic-embed-text-v1.5"` | — | Validated on open; changing requires re-index |
+| `model_id` | chosen from the corpus by the first index | — | See [Model Selection](#model-selection); changing requires re-index |
 | `mmr_lambda` | `0.7` | — | 0 = diversity, 1 = relevance |
 | `mmr_candidate_multiplier` | `3` | — | Candidate pool = top_k × 3 |
 | `heading_boost` | `0.05` | — | Additive; 0.0 disables it |
 | `rrf_k` | `60` | — | RRF rank fusion constant |
 | `max_top_k` | `50` | — | Maximum `top_k` accepted by search commands |
-| `search_min_similarity` | `0.63` | `[0.0, 1.0]` | Auto-search hook confidence gate; retune per `model_id` |
+| `search_min_similarity` | model default: 0.63 nomic, 0.42 `embeddinggemma-300m`, uncalibrated otherwise | `[0.0, 1.0]` | See [Search Threshold](#search-threshold) |
 | `max_file_size` | `10485760` | `> 0` | 10 MiB; larger files are skipped during indexing |
 | `extra_db_paths` | `[]` | — | Additional read-only DBs fused into search (multi-DB) |
 | `eval.sample_size` | `200` | `> 0` | Sentences sampled per `polaris eval` run |
 | `eval.probes` | `[]` | — | Overrides built-in probes; empty means auto by language |
+
+## Search Threshold
+
+`search_min_similarity` gates the MCP `search` tool and the auto-search hook. Unset, it follows the model of the index:
+
+| Model | Default | Evidence |
+|---|---|---|
+| `nomic-embed-text-v1.5` | 0.63 | `polaris eval` midpoint on this repo; also the best threshold on its real-query gold set |
+| `nomic-embed-text-v1.5-quantized` | 0.63 | `polaris eval` suggested 0.63–0.64 |
+| `embeddinggemma-300m` | 0.42 | Midpoint of the best in-sample thresholds on real queries: 0.40 (this repo, English) and 0.44 (a French/English corpus). In-sample on both; the least certain value here |
+| `mxbai-embed-large-v1`, `all-minilm-l6-v2` | uncalibrated | Never measured |
+
+What an uncalibrated model does:
+
+- The MCP `search` tool returns results unfiltered, followed by a note suggesting `polaris eval`.
+- The auto-search hook never injects.
+- `polaris status` and `polaris eval` show `uncalibrated for <model>`.
+
+Setting `search_min_similarity` enables normal gating for any model.
+
+A pinned value that is 0.10 or more away from the index model's default is flagged by `polaris status`, `polaris eval`, `polaris index` and `polaris setup` (never by the hooks):
+
+```
+⚠  search_min_similarity = 0.63 is pinned in polaris.toml; embeddinggemma-300m defaults to 0.42
+```
+
+Older versions of `polaris setup` wrote `search_min_similarity = 0.63` into every `polaris.toml`. On an `embeddinggemma-300m` index, delete that line to use the model's default.
+
+`polaris eval` suggests a value for your corpus. Treat it as a hint, not a setting: on `embeddinggemma-300m` its suggestion undershot the best real-query threshold by about 0.12 (0.32 vs 0.44 on a French/English corpus, 0.28 vs 0.40 on this repo).
 
 ## Config Validation
 

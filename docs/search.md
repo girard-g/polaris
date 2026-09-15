@@ -214,9 +214,12 @@ to 0.604. Index scope moves the gate, not just the threshold.
 
 The floor is well above zero because the model prefixes queries with
 `search_query: `, which gives any two texts a shared baseline. That floor moves
-with the model — `all-minilm-l6-v2` uses no prefix and sits far lower — so
-`search_min_similarity` (default `0.63`) is config, not a constant, and needs
-retuning if you change `model_id`.
+with the model, so the threshold does too. `search_min_similarity` follows the
+model of the index unless you set it: 0.63 for both nomic variants, 0.42 for
+`embeddinggemma-300m`. `mxbai-embed-large-v1` and `all-minilm-l6-v2` were never
+measured and have none; for them `search` returns results unfiltered with a
+note, and the hook never injects. See
+[Configuration → Search Threshold](configuration.md#search-threshold).
 
 Two callers act on it:
 
@@ -254,5 +257,8 @@ the near-misses is the point when you are diagnosing retrieval or retuning the
 threshold.
 
 `polaris eval` measures the positive and probe distributions on the local
-corpus and suggests a `search_min_similarity` for it, replacing the default
-measured on this repo.
+corpus and suggests a `search_min_similarity` for it. Treat that as a hint, not
+a setting: its probes are easier than real plausible-but-absent questions, and
+on `embeddinggemma-300m` the suggestion undershot the best real-query threshold
+by about 0.12 (0.32 vs 0.44 on a French/English corpus, 0.28 vs 0.40 on this
+repo).

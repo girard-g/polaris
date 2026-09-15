@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::error::{PolarisError, Result};
 
@@ -212,6 +212,40 @@ pub fn register_vec_extension() {
                 *const rusqlite::ffi::sqlite3_api_routines,
             ) -> std::ffi::c_int,
         >(sqlite_vec::sqlite3_vec_init as *const ())));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Read-only metadata peek
+// ---------------------------------------------------------------------------
+
+/// Model and dimension recorded in an index.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexMetadata {
+    pub model_id: Option<String>,
+    pub embedding_dim: Option<usize>,
+}
+
+/// Peek at the metadata of the index at `path` without creating or modifying it.
+///
+/// Used to resolve the effective model before anything opens the index for
+/// real. Every failure — no file, not a database, no metadata table — yields
+/// empty metadata, so the caller falls through to its next source and the
+/// subsequent `Database::open` reports any genuine problem.
+pub fn read_index_metadata(path: &Path) -> IndexMetadata {
+    if !path.is_file() {
+        return IndexMetadata::default();
+    }
+    let Ok(conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return IndexMetadata::default();
+    };
+    let value = |key: &str| -> Option<String> {
+        conn.query_row("SELECT value FROM metadata WHERE key = ?1", [key], |r| r.get(0))
+            .ok()
+    };
+    IndexMetadata {
+        model_id: value("model_id"),
+        embedding_dim: value("embedding_dim").and_then(|v| v.parse().ok()),
     }
 }
 
@@ -1611,6 +1645,82 @@ mod tests {
         // Same model → no error.
         let db = Database::open(&db_path, 4, "nomic-embed-text-v1.5").unwrap();
         assert_eq!(db.model_id, "nomic-embed-text-v1.5");
+    }
+
+    // -----------------------------------------------------------------------
+    // read_index_metadata
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn metadata_peek_on_a_missing_file_is_empty_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.db");
+        assert_eq!(read_index_metadata(&path), IndexMetadata::default());
+        assert!(!path.exists(), "the peek must never create a database");
+    }
+
+    #[test]
+    fn metadata_peek_reads_model_and_dim_of_a_closed_index() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("closed.db");
+        { let _db = Database::open(&path, 768, "embeddinggemma-300m").unwrap(); }
+
+        assert_eq!(
+            read_index_metadata(&path),
+            IndexMetadata { model_id: Some("embeddinggemma-300m".into()), embedding_dim: Some(768) }
+        );
+    }
+
+    #[test]
+    fn metadata_peek_reads_an_index_another_connection_holds_open() {
+        // `polaris serve` keeps its connection open in WAL mode while hooks peek.
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("open.db");
+        let _held = Database::open(&path, 512, "nomic-embed-text-v1.5").unwrap();
+
+        assert_eq!(
+            read_index_metadata(&path),
+            IndexMetadata { model_id: Some("nomic-embed-text-v1.5".into()), embedding_dim: Some(512) }
+        );
+    }
+
+    #[test]
+    fn metadata_peek_on_a_database_without_metadata_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
+        }
+        assert_eq!(read_index_metadata(&path), IndexMetadata::default());
+    }
+
+    #[test]
+    fn metadata_peek_on_a_file_that_is_not_a_database_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("garbage.db");
+        std::fs::write(&path, b"this is not an sqlite database, just bytes").unwrap();
+        assert_eq!(read_index_metadata(&path), IndexMetadata::default());
+    }
+
+    #[test]
+    fn metadata_peek_keeps_the_dim_of_an_index_that_records_no_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO metadata (key, value) VALUES ('embedding_dim', '256');",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            read_index_metadata(&path),
+            IndexMetadata { model_id: None, embedding_dim: Some(256) }
+        );
     }
 
     // -----------------------------------------------------------------------

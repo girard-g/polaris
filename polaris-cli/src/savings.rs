@@ -571,6 +571,7 @@ mod tests {
         let err = run(&missing, 512, "nomic-embed-text-v1.5", false, 20, false).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("no index at"));
+        assert!(!missing.exists(), "polaris savings must not create a database");
     }
 
     #[test]

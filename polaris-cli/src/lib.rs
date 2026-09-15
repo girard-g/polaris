@@ -1350,4 +1350,23 @@ mod command_tests {
         assert!(err.contains(&extra.display().to_string()), "{err}");
         assert!(err.contains("embeddinggemma-300m"), "{err}");
     }
+
+    #[tokio::test]
+    async fn read_only_commands_on_a_missing_index_create_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+
+        let err = cmd_search(cfg_at(db.clone()), "anything at all", 5, OutputFormat::Plain, false, 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let err = cmd_window(cfg_at(db.clone()), 1, 1, 2000).await.unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let err = cmd_chunks(cfg_at(db.clone()), &PathBuf::from("docs/a.md")).await.unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        cmd_status(cfg_at(db.clone()), OutputFormat::Plain).await.unwrap();
+        cmd_status(cfg_at(db.clone()), OutputFormat::Json).await.unwrap();
+
+        assert!(!db.exists(), "a read-only command created {}", db.display());
+    }
 }

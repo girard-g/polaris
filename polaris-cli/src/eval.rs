@@ -383,4 +383,14 @@ mod tests {
         assert_eq!(val["recall_3"], 0.89);
         assert_eq!(val["suggested_threshold"], 0.63);
     }
+
+    #[test]
+    fn run_on_a_missing_index_errors_and_creates_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut cfg = PolarisConfig::default();
+        cfg.db_path = dir.path().join("polaris.db");
+        let err = run(&cfg, Some(10), false).unwrap_err().to_string();
+        assert!(err.contains("no index at"), "{err}");
+        assert!(!cfg.db_path.exists(), "polaris eval must not create a database");
+    }
 }

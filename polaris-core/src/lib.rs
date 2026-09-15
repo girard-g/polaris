@@ -10,6 +10,7 @@ pub mod indexer;
 pub mod language;
 pub mod paths;
 pub mod search;
+pub mod selection;
 
 pub use bank::{Bank, BankConfig, BankSet, InMemoryDoc};
 pub use config::{IndexOpts, PolarisConfig, SearchOpts};

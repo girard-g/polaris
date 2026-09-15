@@ -949,6 +949,29 @@ fn discover_markdown_files(root: &Path, recursive: bool) -> Discovery {
     Discovery { files, visited_dirs }
 }
 
+/// True when an on-disk file is too large to index. Used by
+/// `discover_indexable_markdown` (selection's own discovery) so it skips
+/// exactly the files the pipeline's own size guard would reject; the pipeline
+/// keeps its existing inline guard (see `index_files_items`), so this is not
+/// shared code on that path.
+pub(crate) fn exceeds_max_file_size(path: &Path, max_file_size: u64) -> bool {
+    path.metadata().map(|m| m.len()).unwrap_or(0) > max_file_size
+}
+
+/// The Markdown files an index run over `root` reads: discovery minus the files
+/// the size guard skips.
+pub(crate) fn discover_indexable_markdown(
+    root: &Path,
+    recursive: bool,
+    max_file_size: u64,
+) -> Vec<PathBuf> {
+    discover_markdown_files(root, recursive)
+        .files
+        .into_iter()
+        .filter(|path| !exceeds_max_file_size(path, max_file_size))
+        .collect()
+}
+
 /// Returns a configured spinner, or a hidden no-op bar when `silent` is true.
 ///
 /// Used throughout `index_path` to suppress terminal spinners in MCP/callback mode.
@@ -1085,6 +1108,17 @@ fn extract_title(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexable_discovery_skips_files_over_the_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("small.md"), "# Small\n").unwrap();
+        std::fs::write(dir.path().join("big.md"), "x".repeat(200)).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not markdown").unwrap();
+
+        let found = discover_indexable_markdown(dir.path(), true, 100);
+        assert_eq!(found, vec![dir.path().join("small.md")]);
+    }
 
     // -----------------------------------------------------------------------
     // path_under_root

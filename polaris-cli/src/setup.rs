@@ -959,8 +959,10 @@ fn run_initial_index(cfg: &PolarisConfig, setup_path: &Path) -> Result<()> {
     // user's polaris.toml (db_path, embedding_dim, model_id) is respected.
 
     let attempt = || -> Result<()> {
-        let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+        // Load the model first: a failed download must not leave a database
+        // pinned to a model that never loaded.
         let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
+        let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
         let indexer = Indexer::new(
             engine,
             cfg.max_chunk_tokens,
@@ -1021,6 +1023,13 @@ fn write_atomic(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `run_initial_index` changes the process cwd for the duration of the
+    /// indexing call and restores it on return. Three tests exercise that path
+    /// and cannot run concurrently under the default parallel harness; this
+    /// lock serialises them. Recover a poisoned lock rather than propagate the
+    /// panic — one earlier test failing must not hang or fail every later one.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn write_atomic_creates_and_replaces() {
@@ -1945,11 +1954,30 @@ second
     }
 
     #[test]
+    fn initial_index_with_an_unloadable_model_creates_no_database() {
+        // run_initial_index switches the process cwd and restores it; CWD_LOCK
+        // serialises this against the other two setup tests that do the same.
+        let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        register_vec_for_test();
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs").join("a.md"), "# A\n\nSome text.\n").unwrap();
+        let db_path = dir.path().join("polaris.db");
+        let mut cfg = PolarisConfig::default();
+        cfg.db_path = db_path.clone();
+        cfg.apply_overrides(None, None, Some("bad-model".into()));
+
+        run_initial_index(&cfg, dir.path()).expect("the initial index is non-fatal");
+        assert!(!db_path.exists(), "a failed model load must leave no database behind");
+    }
+
+    #[test]
     #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
     fn run_runs_initial_index_when_hooks_installed() {
         use polaris_core::config::PolarisConfig;
         use polaris_core::db::Database;
 
+        let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         register_vec_for_test();
 
         let dir = TempDir::new().unwrap();
@@ -2046,11 +2074,13 @@ second
         // Claude Code's absolute payload using `cwd` and compares against
         // `docs/foo.md` — any other prefix would silently no-op.
         //
-        // NOTE: mutates process CWD via set_current_dir. Don't run in
-        // parallel with other CWD-mutating tests.
+        // Mutates process CWD via set_current_dir; CWD_LOCK (declared above,
+        // in this same `mod tests`) serialises this against the other two
+        // setup tests that do the same.
         use polaris_core::config::PolarisConfig;
         use polaris_core::db::Database;
 
+        let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         register_vec_for_test();
 
         let parent = TempDir::new().unwrap();

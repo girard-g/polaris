@@ -409,6 +409,17 @@ pub fn warn_extra_dbs_ignored(cfg: &PolarisConfig) {
     }
 }
 
+/// Open the database an index run writes to. A dry run against an index that
+/// does not exist yet uses an in-memory database: every file is new either way,
+/// and creating the file would pin a model before any real run chose one.
+fn open_for_index(cfg: &PolarisConfig, dry_run: bool) -> Result<Database> {
+    if dry_run && !cfg.db_path.exists() {
+        Database::open_in_memory(cfg.embedding_dim, &cfg.model_id)
+    } else {
+        Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)
+    }
+}
+
 async fn cmd_index(
     cfg: PolarisConfig,
     path: &std::path::Path,
@@ -435,8 +446,8 @@ async fn cmd_index(
     );
     eprintln!();
 
-    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
-
+    // The model loads before the database opens: a failed download must not
+    // leave a database pinned to a model that never loaded (spec §4.3).
     let indexer = if dry_run {
         Indexer::new_dry_run(cfg.max_chunk_tokens, cfg.chunk_overlap_chars, cfg.max_file_size)
     } else {
@@ -451,6 +462,8 @@ async fn cmd_index(
         );
         Indexer::new(engine, cfg.max_chunk_tokens, cfg.chunk_overlap_chars, cfg.max_file_size)
     };
+
+    let db = open_for_index(&cfg, dry_run)?;
 
     let report = indexer.index_path(&db, path, recursive, force, dry_run, None)?;
 
@@ -1018,8 +1031,6 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
     );
     eprintln!();
 
-    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
-
     let model_spinner = make_spinner("loading model…");
     let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
     model_spinner.finish_and_clear();
@@ -1036,6 +1047,10 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
         cfg.chunk_overlap_chars,
         cfg.max_file_size,
     );
+
+    // Opened after the model loaded: a failed download must not leave a
+    // database pinned to a model that never loaded.
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
 
     // Initial index for every path.
     for path in paths {
@@ -1368,5 +1383,70 @@ mod command_tests {
         cmd_status(cfg_at(db.clone()), OutputFormat::Json).await.unwrap();
 
         assert!(!db.exists(), "a read-only command created {}", db.display());
+    }
+
+    fn docs_with_one_file(dir: &std::path::Path) -> PathBuf {
+        let docs = dir.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), "# A\n\nSome text worth indexing.\n").unwrap();
+        docs
+    }
+
+    /// An unknown model fails inside `EmbeddingEngine::new`, exactly where a
+    /// failed download would, without downloading anything. Set explicitly so
+    /// no resolution or selection replaces it.
+    fn cfg_with_unloadable_model(db_path: PathBuf) -> PolarisConfig {
+        let mut cfg = cfg_at(db_path);
+        cfg.apply_overrides(None, None, Some("bad-model".into()));
+        cfg
+    }
+
+    #[tokio::test]
+    async fn index_with_an_unloadable_model_creates_no_database() {
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let docs = docs_with_one_file(dir.path());
+        let db_path = dir.path().join("polaris.db");
+
+        let result = cmd_index(cfg_with_unloadable_model(db_path.clone()), &docs, true, false, false).await;
+        assert!(result.is_err());
+        assert!(!db_path.exists(), "a failed model load must leave no database behind");
+    }
+
+    #[tokio::test]
+    async fn watch_with_an_unloadable_model_creates_no_database() {
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let docs = docs_with_one_file(dir.path());
+        let db_path = dir.path().join("polaris.db");
+
+        let result = cmd_watch(cfg_with_unloadable_model(db_path.clone()), &[docs], true).await;
+        assert!(result.is_err());
+        assert!(!db_path.exists(), "a failed model load must leave no database behind");
+    }
+
+    #[test]
+    fn dry_run_without_an_index_uses_an_in_memory_database() {
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("polaris.db");
+        let db = open_for_index(&cfg_at(db_path.clone()), true).unwrap();
+        assert!(db.get_all_document_hashes().unwrap().is_empty());
+        assert!(!db_path.exists(), "a dry run must not create (and pin) the index");
+    }
+
+    #[test]
+    fn dry_run_against_an_existing_index_reads_it() {
+        // Added-vs-modified comes from the stored hashes; an empty stand-in
+        // would report every file as new.
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("polaris.db");
+        {
+            let db = Database::open(&db_path, 512, "nomic-embed-text-v1.5").unwrap();
+            db.insert_document("docs/a.md", "old-hash", None, 10).unwrap();
+        }
+        let db = open_for_index(&cfg_at(db_path), true).unwrap();
+        assert_eq!(db.get_all_document_hashes().unwrap().len(), 1);
     }
 }

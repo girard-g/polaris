@@ -10,6 +10,7 @@ use crate::bank::BankConfig;
 use crate::bank::Bank;
 use crate::db::EvalRunRow;
 use crate::error::Result;
+use crate::language::{EN_MARKERS, blank_code_fences, words};
 
 /// One corpus sentence selected as an eval query, with the chunk it came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,45 +35,16 @@ const MAX_SENTENCE_WORDS: usize = 40;
 /// lines of one paragraph. Lines are buffered and flushed into a single paragraph
 /// text before splitting on sentence terminators.
 pub(crate) fn split_sentences(body: &str) -> Vec<String> {
-    // A chunk carries no record of whether it began inside a code fence, and the
-    // chunker splits on a character budget with no fence awareness — so a code
-    // block longer than one chunk routinely starts a chunk mid-fence. Assuming
-    // `in_fence = false` there inverts the state: the *closing* fence opens one,
-    // real prose after it is discarded, and the code before it is emitted as
-    // queries. An odd fence count is exactly the ambiguous case, and nothing in
-    // the chunk can resolve it, so drop the chunk rather than guess.
-    // ponytail: fail closed on ambiguity; the fix is fence-aware chunking, which
-    // belongs in indexer.rs, not here.
-    if body.matches("```").count() % 2 != 0 {
-        return Vec::new();
-    }
-
     let mut out = Vec::new();
-    let mut in_fence = false;
     let mut buffer = String::new();
 
-    for line in body.lines() {
+    // Fenced code arrives as blank lines, which flush the paragraph exactly as
+    // the fence itself used to; an odd fence count arrives as nothing at all.
+    for line in blank_code_fences(body) {
         let trimmed = line.trim();
 
-        // Fence toggle and skip
-        if trimmed.starts_with("```") {
-            if !buffer.is_empty() {
-                flush_paragraph(&mut buffer, &mut out);
-            }
-            in_fence = !in_fence;
-            continue;
-        }
-
-        // Skip tables, headings, and content inside fences
-        if in_fence || trimmed.starts_with('|') || trimmed.starts_with('#') {
-            if !buffer.is_empty() {
-                flush_paragraph(&mut buffer, &mut out);
-            }
-            continue;
-        }
-
-        // Blank line flushes the buffer
-        if trimmed.is_empty() {
+        // Blank lines, tables and headings end the paragraph.
+        if trimmed.is_empty() || trimmed.starts_with('|') || trimmed.starts_with('#') {
             if !buffer.is_empty() {
                 flush_paragraph(&mut buffer, &mut out);
             }
@@ -149,8 +121,6 @@ impl Language {
     }
 }
 
-const EN_MARKERS: &[&str] =
-    &["the", "and", "of", "to", "is", "in", "for", "with", "that", "are"];
 const FR_MARKERS: &[&str] =
     &["le", "la", "les", "de", "des", "et", "une", "dans", "pour", "est"];
 
@@ -165,11 +135,7 @@ const MARKER_MARGIN: usize = 2;
 /// This only has to separate the probe sets that ship, so a word-frequency
 /// count is enough and avoids a dependency.
 pub(crate) fn detect_language(sample_text: &str) -> Language {
-    let words: Vec<String> = sample_text
-        .split(|c: char| !c.is_alphabetic() && c != '\'')
-        .filter(|w| !w.is_empty())
-        .map(|w| w.to_lowercase())
-        .collect();
+    let words = words(sample_text);
 
     let count = |markers: &[&str]| -> usize {
         words.iter().filter(|w| markers.contains(&w.as_str())).count()

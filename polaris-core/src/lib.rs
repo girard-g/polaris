@@ -7,6 +7,7 @@ pub mod embedding;
 pub mod error;
 pub mod eval;
 pub mod indexer;
+pub mod language;
 pub mod paths;
 pub mod search;
 

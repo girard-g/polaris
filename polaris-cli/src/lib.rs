@@ -429,6 +429,12 @@ fn open_for_index(cfg: &PolarisConfig, dry_run: bool) -> Result<Database> {
     }
 }
 
+/// Format the model-selection line for a dry run: same line, marked as
+/// informational since nothing is being recorded.
+fn dry_run_choice_line(line: &str) -> String {
+    format!("(dry run) {line} — nothing recorded")
+}
+
 async fn cmd_index(
     mut cfg: PolarisConfig,
     path: &std::path::Path,
@@ -458,7 +464,7 @@ async fn cmd_index(
     if let Some(line) =
         polaris_core::selection::resolve_for_new_index(&mut cfg, &[path.to_path_buf()], recursive)
     {
-        let line = if dry_run { format!("(dry run) {line} — nothing recorded") } else { line };
+        let line = if dry_run { dry_run_choice_line(&line) } else { line };
         eprintln!("{}  {line}", style("◆").cyan().bold());
     }
     warn_pinned_threshold(&cfg);
@@ -820,7 +826,6 @@ fn status_json(cfg: &PolarisConfig, stats: &polaris_core::db::DbStats) -> String
 
 async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
     warn_extra_dbs_ignored(&cfg);
-    warn_pinned_threshold(&cfg);
 
     if output == OutputFormat::Plain {
         println!();
@@ -854,6 +859,8 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
         }
         return Ok(());
     }
+
+    warn_pinned_threshold(&cfg);
 
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let stats = db.get_stats(&cfg.db_path)?;
@@ -1483,6 +1490,32 @@ mod command_tests {
         std::fs::write(docs.join("english.md"), format!("# Guide\n\n{EN_PROSE}\n")).unwrap();
         cmd_index(cfg_at(db_path.clone()), &docs, true, false, false).await.unwrap();
         assert_eq!(db::read_index_metadata(&db_path).model_id.as_deref(), Some("embeddinggemma-300m"));
+    }
+
+    #[test]
+    fn dry_run_choice_line_formats_without_recording() {
+        assert_eq!(
+            dry_run_choice_line("model: embeddinggemma-300m (100% English prose)"),
+            "(dry run) model: embeddinggemma-300m (100% English prose) — nothing recorded"
+        );
+    }
+
+    #[test]
+    fn dry_run_over_a_french_corpus_would_choose_gemma_without_loading_a_model() {
+        // Not `#[ignore]`d: `resolve_for_new_index` only reads files and picks
+        // a model id, so this exercises the dry-run choice line's model pick
+        // over a French corpus without ever downloading or loading a model.
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("guide.md"), format!("# Guide\n\n{FR_PROSE}\n")).unwrap();
+        let db_path = dir.path().join("polaris.db");
+
+        let mut cfg = cfg_at(db_path.clone());
+        let line = polaris_core::selection::resolve_for_new_index(&mut cfg, &[docs], true).unwrap();
+        assert_eq!(cfg.model_id, "embeddinggemma-300m");
+        assert_eq!(dry_run_choice_line(&line), format!("(dry run) {line} — nothing recorded"));
+        assert!(!db_path.exists(), "selection alone must not create a database");
     }
 
     #[test]

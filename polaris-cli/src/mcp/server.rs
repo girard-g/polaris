@@ -532,15 +532,16 @@ mod tests {
     use super::*;
 
     fn server_for(state: PolarisState) -> PolarisServer {
-        // Update-check does a detached network spawn from `PolarisServer::new`
-        // unless disabled; keep tests hermetic. `std::env::set_var` is unsafe
-        // because a concurrent reader elsewhere in the process could observe a
-        // torn write; wrapping it in `Once` means the write happens at most
-        // once, and happens-before every `PolarisServer::new` reached through
-        // this helper, rather than once per (parallel) test racing the others.
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| unsafe { std::env::set_var("POLARIS_NO_UPDATE_CHECK", "1") });
-        PolarisServer::new(state)
+        // Build the struct directly rather than through `PolarisServer::new`,
+        // which does a detached network spawn for the update check — keep
+        // tests hermetic without mutating a process env var (unsound: std's
+        // env lock doesn't cover C `getenv` callers) across parallel tests.
+        PolarisServer {
+            state,
+            tool_router: PolarisServer::tool_router(),
+            update_note: None,
+            note_shown: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     fn cfg_at(db_path: PathBuf) -> PolarisConfig {

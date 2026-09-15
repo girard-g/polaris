@@ -961,8 +961,9 @@ fn run_initial_index(cfg: &PolarisConfig, setup_path: &Path) -> Result<()> {
     crate::warn_pinned_threshold(&cfg);
     let cfg = &cfg;
     // `register_vec_extension` is called by `main.rs::run` before dispatching,
-    // so we don't re-register here. Use the passed-in cfg directly so the
-    // user's polaris.toml (db_path, embedding_dim, model_id) is respected.
+    // so we don't re-register here. cfg is a clone resolved against the
+    // project dir, with the model chosen from `docs` when this run creates
+    // the index.
 
     let attempt = || -> Result<()> {
         // Load the model first: a failed download must not leave a database

@@ -85,11 +85,10 @@ pub fn serve_state(mut cfg: PolarisConfig) -> Result<PolarisState, PolarisError>
     Ok(PolarisState { config: Arc::new(cfg), bank: Arc::new(bank) })
 }
 
-/// Resolve `base` against the index (or, once Task 13 wires in selection,
-/// against the corpus) and open it: the model loads before the bank, so a
-/// failed load leaves no database behind. Shared by `existing_index` and
-/// `run_index`'s `get_or_try_init` initialisers, so this ordering is written
-/// once rather than duplicated in both.
+/// Resolve `base` against the existing index and open it: the model loads
+/// before the bank, so a failed load leaves no database behind. Used by
+/// `existing_index`; `run_index` instead selects the model from the corpus
+/// when it creates the index, then calls [`open_index`] in the same order.
 async fn open_resolved(base: Arc<PolarisConfig>) -> Result<OpenIndex, String> {
     let mut cfg = (*base).clone();
     tokio::task::spawn_blocking(move || {
@@ -198,11 +197,38 @@ impl PolarisServer {
         }
 
         let base = Arc::clone(&self.state.config);
-        let opened = self.state.bank.get_or_try_init(move || open_resolved(base)).await.cloned();
+        let targets = vec![path.clone()];
+        let choice: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let choice_ref = &choice;
+        let opened = self
+            .state
+            .bank
+            .get_or_try_init(|| async move {
+                let mut cfg = (*base).clone();
+                let (cfg, line) = tokio::task::spawn_blocking(move || {
+                    let line = polaris_core::selection::resolve_for_new_index(
+                        &mut cfg, &targets, recursive,
+                    );
+                    (cfg, line)
+                })
+                .await
+                .map_err(|e| format!("Error: task failed: {e}"))?;
+                if let Some(line) = line {
+                    tracing::info!("{line}");
+                    let _ = choice_ref.set(line);
+                }
+                tokio::task::spawn_blocking(move || open_index(cfg))
+                    .await
+                    .map_err(|e| format!("Error: task failed: {e}"))?
+                    .map_err(|e| format!("Error: {e}"))
+            })
+            .await
+            .cloned();
         let index = match opened {
             Ok(index) => index,
             Err(msg) => return format!("{msg}{banner}"),
         };
+        let choice = choice.get().map(|line| format!("{line}\n\n")).unwrap_or_default();
         let bank = index.bank.clone();
         let opts = polaris_core::IndexOpts { recursive, force, dry_run: false };
 
@@ -242,7 +268,7 @@ impl PolarisServer {
         })
         .await;
 
-        format!("{}{banner}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
+        format!("{choice}{}{banner}", result.unwrap_or_else(|e| format!("Error: task failed: {e}")))
     }
 }
 
@@ -601,6 +627,45 @@ mod tests {
         assert!(response.starts_with("Error:"), "{response}");
         assert!(!db.exists(), "a model that failed to load must leave no database");
         assert!(server.state.bank.get().is_none(), "the cell must stay empty so a retry can succeed");
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads ~1.2 GB EmbeddingGemma ONNX model; run with `cargo test -- --include-ignored`"]
+    async fn index_tool_on_a_new_french_project_selects_gemma_then_searches_it() {
+        const FR_PROSE: &str = include_str!("../../../polaris-core/tests/fixtures/fr_prose.md");
+
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("guide.md"), format!("# Configuration\n\n{FR_PROSE}\n")).unwrap();
+        let db = dir.path().join("polaris.db");
+        let server = server_for(serve_state(cfg_at(db.clone())).unwrap());
+
+        let before = server
+            .search(Parameters(SearchParams { query: "où se trouve le fichier de configuration".into(), top_k: Some(2) }))
+            .await;
+        assert!(before.starts_with("No index yet"), "{before}");
+        assert!(!db.exists());
+
+        let response = server
+            .run_index(
+                IndexParams { path: docs.display().to_string(), recursive: None, force: None },
+                None,
+            )
+            .await;
+        assert!(response.starts_with("model: embeddinggemma-300m"), "{response}");
+        // The summary always carries "Errors: N"; a failure would read "Error: …".
+        assert!(response.contains("Errors: 0") && !response.contains("Error:"), "{response}");
+        assert_eq!(
+            polaris_core::db::read_index_metadata(&db).model_id.as_deref(),
+            Some("embeddinggemma-300m")
+        );
+
+        let after = server
+            .search(Parameters(SearchParams { query: "où se trouve le fichier de configuration".into(), top_k: Some(2) }))
+            .await;
+        assert!(!after.starts_with("No index yet") && !after.starts_with("Error"), "{after}");
     }
 
     #[test]

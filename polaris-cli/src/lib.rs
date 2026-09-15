@@ -421,7 +421,7 @@ fn open_for_index(cfg: &PolarisConfig, dry_run: bool) -> Result<Database> {
 }
 
 async fn cmd_index(
-    cfg: PolarisConfig,
+    mut cfg: PolarisConfig,
     path: &std::path::Path,
     recursive: bool,
     force: bool,
@@ -445,6 +445,13 @@ async fn cmd_index(
         style(format!("index  {}", path.display())).bold(),
     );
     eprintln!();
+
+    if let Some(line) =
+        polaris_core::selection::resolve_for_new_index(&mut cfg, &[path.to_path_buf()], recursive)
+    {
+        let line = if dry_run { format!("(dry run) {line} — nothing recorded") } else { line };
+        eprintln!("{}  {line}", style("◆").cyan().bold());
+    }
 
     // The model loads before the database opens: a failed download must not
     // leave a database pinned to a model that never loaded (spec §4.3).
@@ -984,7 +991,7 @@ async fn cmd_chunks(cfg: PolarisConfig, path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Result<()> {
+async fn cmd_watch(mut cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Result<()> {
     use notify_debouncer_mini::notify::RecursiveMode;
     use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 
@@ -1014,6 +1021,10 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
         style(format!("watch  {paths_display}")).bold(),
     );
     eprintln!();
+
+    if let Some(line) = polaris_core::selection::resolve_for_new_index(&mut cfg, paths, recursive) {
+        eprintln!("{}  {line}", style("◆").cyan().bold());
+    }
 
     let model_spinner = make_spinner("loading model…");
     let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
@@ -1407,6 +1418,31 @@ mod command_tests {
         let result = cmd_watch(cfg_with_unloadable_model(db_path.clone()), &[docs], true).await;
         assert!(result.is_err());
         assert!(!db_path.exists(), "a failed model load must leave no database behind");
+    }
+
+    const FR_PROSE: &str = include_str!("../../polaris-core/tests/fixtures/fr_prose.md");
+    const EN_PROSE: &str = include_str!("../../polaris-core/tests/fixtures/en_prose.md");
+
+    #[tokio::test]
+    #[ignore = "downloads ~1.2 GB EmbeddingGemma ONNX model; run with `cargo test -- --include-ignored`"]
+    async fn indexing_a_new_french_project_creates_a_gemma_index_and_keeps_it() {
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("guide.md"), format!("# Guide\n\n{FR_PROSE}\n")).unwrap();
+        let db_path = dir.path().join("polaris.db");
+
+        cmd_index(cfg_at(db_path.clone()), &docs, true, false, false).await.unwrap();
+        assert_eq!(
+            db::read_index_metadata(&db_path),
+            db::IndexMetadata { model_id: Some("embeddinggemma-300m".into()), embedding_dim: Some(768) }
+        );
+
+        std::fs::remove_file(docs.join("guide.md")).unwrap();
+        std::fs::write(docs.join("english.md"), format!("# Guide\n\n{EN_PROSE}\n")).unwrap();
+        cmd_index(cfg_at(db_path.clone()), &docs, true, false, false).await.unwrap();
+        assert_eq!(db::read_index_metadata(&db_path).model_id.as_deref(), Some("embeddinggemma-300m"));
     }
 
     #[test]

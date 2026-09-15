@@ -57,11 +57,18 @@ Its vectors are not interchangeable with the fp32 model's (quantized queries aga
 index scored worse than either model alone), so it has its own `model_id` and switching
 requires a re-index like any other model change.
 
-## Switching Models
+## Choosing and Switching Models
 
-Changing models requires re-indexing from scratch. The database stores the model ID
-in the `metadata` table; opening a database with a mismatched model produces a clear
-error and suggests deleting the database and re-indexing.
+Unset, `model_id` is chosen once, by the run that creates the index, from the Markdown that run reads. It is `nomic-embed-text-v1.5` when at least 90% of the prose (by bytes, over files with 100+ prose words, code blocks excluded) is English, and `embeddinggemma-300m` otherwise. See [Configuration → Model Selection](configuration.md#model-selection).
+
+Why two models, measured on real queries:
+
+- **English-only corpus.** On this repo's docs (40 queries), nomic keeps the better top-1: Recall@1 75% vs 65%. That matters because the auto-search hook injects top-1 only.
+- **French/English corpus.** On 92 logged queries, EmbeddingGemma separates answerable queries from plausible-but-absent ones far better (AUC 0.959 vs 0.852). It also retrieves at least as well in every query language (same-language Recall@3 72.5% vs 60.0%).
+
+Changing models requires re-indexing from scratch. The database stores the model ID in the `metadata` table. Opening a database with a mismatched model produces a clear error that suggests deleting the database and re-indexing.
+
+The choice sees only the files of the run that creates the index. Indexing an English folder first and a French one later keeps nomic; delete the database and re-index to choose again.
 
 ## Embedding Pipeline
 

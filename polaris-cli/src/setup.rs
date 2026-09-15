@@ -954,6 +954,13 @@ fn run_initial_index(cfg: &PolarisConfig, setup_path: &Path) -> Result<()> {
     let _cwd_guard = CwdGuard(prev_cwd);
 
     let target = Path::new("docs");
+    let mut cfg = cfg.clone();
+    if let Some(line) =
+        polaris_core::selection::resolve_for_new_index(&mut cfg, &[target.to_path_buf()], true)
+    {
+        println!("  {}  {line}", console::style("ℹ").cyan());
+    }
+    let cfg = &cfg;
     // `register_vec_extension` is called by `main.rs::run` before dispatching,
     // so we don't re-register here. Use the passed-in cfg directly so the
     // user's polaris.toml (db_path, embedding_dim, model_id) is respected.
@@ -1025,7 +1032,7 @@ mod tests {
     use super::*;
 
     /// `run_initial_index` changes the process cwd for the duration of the
-    /// indexing call and restores it on return. Three tests exercise that path
+    /// indexing call and restores it on return. Several tests exercise that path
     /// and cannot run concurrently under the default parallel harness; this
     /// lock serialises them. Recover a poisoned lock rather than propagate the
     /// panic — one earlier test failing must not hang or fail every later one.
@@ -1969,6 +1976,26 @@ second
 
         run_initial_index(&cfg, dir.path()).expect("the initial index is non-fatal");
         assert!(!db_path.exists(), "a failed model load must leave no database behind");
+    }
+
+    #[test]
+    #[ignore = "downloads ~1.2 GB EmbeddingGemma ONNX model; run with `cargo test -- --include-ignored`"]
+    fn initial_index_of_french_docs_selects_gemma_under_the_project_dir() {
+        // `db_path` is relative, as in a default polaris.toml: selection must
+        // look for it (and index `docs`) from the project dir, not the caller's cwd.
+        const FR_PROSE: &str = include_str!("../../polaris-core/tests/fixtures/fr_prose.md");
+        let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        register_vec_for_test();
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs").join("guide.md"), format!("# Guide\n\n{FR_PROSE}\n")).unwrap();
+        let cfg = PolarisConfig { db_path: PathBuf::from("polaris.db"), ..PolarisConfig::default() };
+
+        run_initial_index(&cfg, dir.path()).unwrap();
+        assert_eq!(
+            polaris_core::db::read_index_metadata(&dir.path().join("polaris.db")).model_id.as_deref(),
+            Some("embeddinggemma-300m")
+        );
     }
 
     #[test]

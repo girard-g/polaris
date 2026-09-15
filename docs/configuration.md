@@ -80,6 +80,40 @@ Config is resolved in this order (first match wins):
 3. `~/.config/polaris/polaris.toml` — user-global config
 4. Built-in defaults (listed above)
 
+## Model Selection
+
+When `model_id` is not set, the run that creates the index chooses it. That run is `polaris setup` (initial index of `./docs`), `polaris index`, `polaris watch` or the MCP `index` tool, whichever comes first. It reads the Markdown files that run is about to index and measures how much of the prose is English:
+
+- 90% or more English prose, or nothing to measure → `nomic-embed-text-v1.5`
+- otherwise → `embeddinggemma-300m`
+
+The choice is printed once, before any download:
+
+```
+◆  model: embeddinggemma-300m (38% English prose) — set model_id to override
+```
+
+It is then recorded in the database. Every later command, including both Claude Code hooks, reads the model, dimension and search threshold from there, so nothing needs to be written to `polaris.toml`.
+
+`polaris index --dry-run` against a project with no index yet still runs this choice — a dry run has no other way to show which model it would use — but nothing is recorded, since a dry run creates no database. The line is prefixed to say so:
+
+```
+◆  (dry run) model: embeddinggemma-300m (38% English prose) — set model_id to override — nothing recorded
+```
+
+How the share is measured:
+
+- Only files with at least 100 words of prose count.
+- Fenced code blocks are not prose.
+- A file is English when enough of its words are common English function words (*the*, *and*, *of*, …).
+- Each file weighs by its size.
+
+No other language is identified; everything that is not English is treated the same way.
+
+**The choice sees only the files of the run that creates the index.** Indexing `docs/en` first and adding `docs/fr` later keeps nomic. To choose again, delete the database and re-index, optionally with an explicit `model_id`.
+
+Setting `model_id` anywhere disables the choice for every index that config applies to. That includes a project `polaris.toml`, `--model`, and the global `~/.config/polaris/polaris.toml`.
+
 ## Defaults Reference
 
 | Field | Default | Constraints | Notes |

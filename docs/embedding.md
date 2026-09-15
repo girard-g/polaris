@@ -2,20 +2,22 @@
 
 ## Supported Models
 
-| Model ID | Native dim | Default dim | Download |
-|----------|-----------|-------------|---------|
-| `nomic-embed-text-v1.5` (default) | 768 | 512 | ~522 MB |
-| `nomic-embed-text-v1.5-quantized` | 768 | 512 | ~131 MB |
-| `mxbai-embed-large-v1` | 1024 | 1024 | ~670 MB |
-| `all-minilm-l6-v2` | 384 | 384 | ~23 MB |
+| Model ID | Native dim | Default dim | Default threshold | Download |
+|----------|-----------|-------------|-------------------|---------|
+| `nomic-embed-text-v1.5` | 768 | 512 | 0.63 | ~522 MB |
+| `nomic-embed-text-v1.5-quantized` | 768 | 512 | 0.63 | ~131 MB |
+| `embeddinggemma-300m` | 768 | 768 | 0.42 | ~1.2 GB |
+| `mxbai-embed-large-v1` | 1024 | 1024 | uncalibrated | ~670 MB |
+| `all-minilm-l6-v2` | 384 | 384 | uncalibrated | ~23 MB |
 
 All models run via ONNX on CPU. Model files are cached in a user-global directory shared across projects (default `~/.cache/polaris/models/`; overridable via `POLARIS_CACHE_DIR`). See [Configuration → Model Caching](configuration.md#model-caching).
 
 ## Matryoshka Truncation
 
-`nomic-embed-text-v1.5` (and its quantized variant) supports Matryoshka Representation Learning — the first N
-dimensions of the full 768-dim vector are independently meaningful.
-Polaris defaults to 512 dims for nomic (good balance of quality vs. storage).
+`nomic-embed-text-v1.5` (and its quantized variant) and `embeddinggemma-300m` support Matryoshka
+Representation Learning — the first N dimensions of the full 768-dim vector are independently
+meaningful. Polaris defaults to 512 dims for nomic (good balance of quality vs. storage) and 768
+for `embeddinggemma-300m`, the configuration it was measured at.
 `mxbai` and `all-minilm` do not support truncation; their native dim is used.
 
 ## Task Prefixes
@@ -26,6 +28,7 @@ Each model requires specific prefixes to be prepended before encoding:
 |-------|----------------|--------------|
 | `nomic-embed-text-v1.5` | `search_document: ` | `search_query: ` |
 | `nomic-embed-text-v1.5-quantized` | `search_document: ` | `search_query: ` |
+| `embeddinggemma-300m` | `title: none \| text: ` | `task: search result \| query: ` |
 | `mxbai-embed-large-v1` | _(none)_ | `Represent this sentence for searching relevant passages: ` |
 | `all-minilm-l6-v2` | _(none)_ | _(none)_ |
 

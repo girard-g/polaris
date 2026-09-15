@@ -12,9 +12,10 @@ pub const EN_MARKERS: &[&str] =
 pub const MIN_WORDS: usize = 100;
 
 /// Share of a document's prose words that are [`EN_MARKERS`] at or above which
-/// it counts as English. Calibrated from real corpora — spec §4.2 records the
-/// measured distributions and margins.
-pub const ENGLISH_DENSITY: f32 = 0.08;
+/// it counts as English. Separates English prose documentation (lowest measured
+/// 0.0875) from French prose (median 0.0029); spec §4.2 records the measured
+/// distributions and margins.
+pub const ENGLISH_DENSITY: f32 = 0.05;
 
 /// Byte-weighted English share at or above which the English model is kept.
 pub const ENGLISH_SHARE_FOR_ENGLISH_MODEL: f32 = 0.90;

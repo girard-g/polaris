@@ -37,7 +37,7 @@ The first build downloads and compiles all dependencies including fastembed's ON
 
 ## First Run
 
-On first run, the embedding model is downloaded (~522 MB) and cached. Subsequent runs reuse the cache.
+On first run, the embedding model is downloaded and cached: ~522 MB for `nomic-embed-text-v1.5` (the default, chosen for a predominantly English corpus), ~1.2 GB for `embeddinggemma-300m` (chosen for a non-English one). See the full model table at [Embedding → Supported Models](embedding.md#supported-models). Subsequent runs reuse the cache.
 
 | Platform | Model cache location |
 |----------|----------------------|

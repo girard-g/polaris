@@ -1447,6 +1447,7 @@ mod command_tests {
         let err = cmd_chunks(cfg_at(db.clone()), &PathBuf::from("docs/a.md")).await.unwrap_err();
         assert!(err.to_string().contains("no index at"), "{err}");
         cmd_status(cfg_at(db.clone()), OutputFormat::Plain).await.unwrap();
+        cmd_status(cfg_at(db.clone()), OutputFormat::Json).await.unwrap();
 
         let err = crate::eval::run(&cfg_at(db.clone()), Some(10), false).unwrap_err();
         assert!(err.to_string().contains("no index at"), "{err}");

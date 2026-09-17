@@ -277,7 +277,7 @@ impl Database {
         let conn = Connection::open(path)?;
         apply_pragmas(&conn)?;
         let mut db = Self { conn, embedding_dim: config_dim, model_id: config_model_id.to_string() };
-        db.init_schema(config_dim, config_model_id)?;
+        db.init_schema(path, config_dim, config_model_id)?;
         Ok(db)
     }
 
@@ -286,11 +286,11 @@ impl Database {
         let conn = Connection::open_in_memory()?;
         apply_pragmas(&conn)?;
         let mut db = Self { conn, embedding_dim, model_id: model_id.to_string() };
-        db.init_schema(embedding_dim, model_id)?;
+        db.init_schema(Path::new(":memory:"), embedding_dim, model_id)?;
         Ok(db)
     }
 
-    fn init_schema(&mut self, config_dim: usize, config_model_id: &str) -> Result<()> {
+    fn init_schema(&mut self, path: &Path, config_dim: usize, config_model_id: &str) -> Result<()> {
         // Check whether schema already exists.
         let table_count: i64 = self.conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='metadata'",
@@ -329,7 +329,7 @@ impl Database {
                 // run happens to resolve.
                 None => {
                     return Err(PolarisError::IncompleteIndex {
-                        path: self.conn.path().unwrap_or_default().to_string(),
+                        path: path.display().to_string(),
                     });
                 }
             }
@@ -1819,6 +1819,12 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(names.is_empty(), "rollback must leave no schema behind, found {names:?}");
+        drop(conn);
+
+        // The whole point: the retry must be able to create the schema, which a
+        // surviving vec0 shadow table would block with "table already exists".
+        drop(Database::open(&path, 4, "test").expect("a rolled-back file must be re-creatable"));
+        assert!(has_index(&path));
     }
 
     #[test]
@@ -1839,8 +1845,9 @@ mod tests {
             Ok(_) => panic!("an index with no stored model must not open"),
             Err(e) => e.to_string(),
         };
-        assert!(err.contains("interrupted.db"), "{err}");
-        assert!(err.contains("delete"), "{err}");
+        // The path as the caller spelled it, like every sibling message.
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("delete the file and re-index"), "{err}");
     }
 
     // -----------------------------------------------------------------------

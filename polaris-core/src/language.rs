@@ -48,6 +48,16 @@ pub(crate) fn blank_code_fences(body: &str) -> Vec<&str> {
     if body.matches("```").count() % 2 != 0 {
         return Vec::new();
     }
+    blank_code_fences_from_start(body)
+}
+
+/// Same toggling as [`blank_code_fences`], but for a whole file rather than a
+/// chunk: a file always starts outside a fence (unlike a chunk, which may
+/// begin mid-block with no record of it), so there is no ambiguous case to
+/// fail closed on — an odd fence count here just means the file ends inside
+/// an unterminated fence, and everything from that fence on is blanked same
+/// as a closed one. Used by [`english_density`], which measures whole files.
+pub(crate) fn blank_code_fences_from_start(body: &str) -> Vec<&str> {
     let mut in_fence = false;
     body.lines()
         .map(|line| {
@@ -66,7 +76,9 @@ pub(crate) fn blank_code_fences(body: &str) -> Vec<&str> {
 /// Share of `doc`'s prose words that are English markers; `None` when it has
 /// fewer than [`MIN_WORDS`] prose words. Fenced code is not prose.
 pub fn english_density(doc: &str) -> Option<f32> {
-    let prose = blank_code_fences(doc).join("\n");
+    // A whole file, unlike a chunk, always starts outside a fence, so an odd
+    // fence count is never ambiguous — use the never-bails variant.
+    let prose = blank_code_fences_from_start(doc).join("\n");
     let words = words(&prose);
     if words.len() < MIN_WORDS {
         return None;
@@ -202,6 +214,39 @@ mod tests {
     #[test]
     fn blank_code_fences_gives_up_on_an_odd_fence_count() {
         assert!(blank_code_fences("code\n```\nprose").is_empty());
+    }
+
+    #[test]
+    fn a_file_that_only_mentions_a_fence_inline_still_measures_its_prose() {
+        // `matches("```")` counts an inline mention in prose the same as a real
+        // fence line, so a whole file that merely says "wrap code in ``` marks"
+        // has an odd count without ever opening a fence. The chunk-level
+        // fail-closed rule must not apply to a whole file, which always starts
+        // outside a fence.
+        let doc = format!("{FR_PROSE}\n\nUtilisez ``` pour le code.\n");
+        assert!(doc.matches("```").count() % 2 != 0, "the inline mention must be odd");
+        let density = english_density(&doc).expect("prose must still be measured");
+        let baseline = english_density(FR_PROSE).unwrap();
+        // The extra sentence adds a handful of non-English words, so density
+        // shifts slightly — the point is it's measured at all, and still
+        // classifies as non-English same as the baseline.
+        assert!((density - baseline).abs() < 0.01, "density {density}, baseline {baseline}");
+        assert!(density < ENGLISH_DENSITY);
+    }
+
+    #[test]
+    fn a_file_with_a_real_unterminated_fence_measures_only_the_prose_before_it() {
+        // A real unterminated fence must still exclude what follows it — only
+        // the ambiguous "ends inside code or not" chunk case goes away.
+        let fence_body = "the and of to is in for with that are ".repeat(30);
+        let doc = format!("{FR_PROSE}\n\n```\n{fence_body}");
+        assert!(doc.matches("```").count() % 2 != 0);
+        let density = english_density(&doc).expect("prose before the fence must be measured");
+        let baseline = english_density(FR_PROSE).unwrap();
+        assert!((density - baseline).abs() < 1e-6, "density {density}, baseline {baseline}");
+        // Sanity: if the fence content leaked into the measurement it would
+        // swing the density well past the English threshold.
+        assert!(density < ENGLISH_DENSITY, "fence content must not have leaked in");
     }
 
     #[test]

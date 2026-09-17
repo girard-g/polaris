@@ -107,20 +107,48 @@ pub fn english_density(doc: &str) -> Option<f32> {
     Some(hits as f32 / words.len() as f32)
 }
 
+/// Accumulates the byte-weighted English share one document at a time, so a
+/// caller measuring a whole corpus never needs to hold more than one
+/// document's text in memory at once. [`english_share`] is a thin wrapper
+/// over this for callers that already have every document in hand.
+#[derive(Debug, Clone, Default)]
+pub struct ShareAccumulator {
+    english_bytes: usize,
+    counted_bytes: usize,
+}
+
+impl ShareAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one document in. Skipped (not counted) when it has fewer than
+    /// [`MIN_WORDS`] prose words, same as [`english_density`].
+    pub fn add(&mut self, doc: &str) {
+        let Some(density) = english_density(doc) else {
+            return;
+        };
+        self.counted_bytes += doc.len();
+        if density >= ENGLISH_DENSITY {
+            self.english_bytes += doc.len();
+        }
+    }
+
+    /// Byte-weighted English share over every counted document; `None` when
+    /// none cleared the word floor.
+    pub fn finish(self) -> Option<f32> {
+        (self.counted_bytes > 0).then(|| self.english_bytes as f32 / self.counted_bytes as f32)
+    }
+}
+
 /// Byte-weighted share of `docs` that is English, over the documents that clear
 /// the word floor; `None` when none does.
 pub fn english_share(docs: &[&str]) -> Option<f32> {
-    let (mut english, mut counted) = (0usize, 0usize);
+    let mut acc = ShareAccumulator::new();
     for doc in docs {
-        let Some(density) = english_density(doc) else {
-            continue;
-        };
-        counted += doc.len();
-        if density >= ENGLISH_DENSITY {
-            english += doc.len();
-        }
+        acc.add(doc);
     }
-    (counted > 0).then(|| english as f32 / counted as f32)
+    acc.finish()
 }
 
 /// `nomic-embed-text-v1.5` for predominantly English prose — or when there is
@@ -205,6 +233,30 @@ mod tests {
         assert!((share - expected).abs() < 1e-6, "share {share}, expected {expected}");
         assert!(share < ENGLISH_SHARE_FOR_ENGLISH_MODEL, "3 of 4 docs English by count, mostly French by bytes");
         assert_eq!(choose_model(Some(share)), "embeddinggemma-300m");
+    }
+
+    #[test]
+    fn share_accumulator_matches_english_share_fed_one_at_a_time() {
+        let big_french = [FR_PROSE; 4].join("\n\n");
+        let docs = [EN_PROSE, EN_PROSE, EN_PROSE, big_french.as_str()];
+
+        let mut acc = ShareAccumulator::new();
+        for doc in docs {
+            acc.add(doc);
+        }
+
+        assert_eq!(acc.finish(), english_share(&docs));
+    }
+
+    #[test]
+    fn share_accumulator_matches_english_share_on_empty_and_short_inputs() {
+        assert_eq!(ShareAccumulator::new().finish(), english_share(&[]));
+
+        let short = "The index stores the chunks and the headings for each of the files.";
+        let mut acc = ShareAccumulator::new();
+        acc.add(short);
+        assert_eq!(acc.finish(), english_share(&[short]));
+        assert_eq!(english_share(&[short]), None, "a doc under the word floor must not count");
     }
 
     #[test]

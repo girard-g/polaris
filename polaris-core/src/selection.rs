@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::config::{PolarisConfig, apply_resolution, resolve_effective};
 use crate::db::{IndexMetadata, has_index};
 use crate::indexer::discover_indexable_markdown;
-use crate::language::{choose_model, english_share};
+use crate::language::{ShareAccumulator, choose_model};
 
 /// Resolve `cfg` for an indexing run over `targets`, choosing the embedding
 /// model from the corpus when this run will create the index.
@@ -33,15 +33,18 @@ pub fn resolve_for_new_index(
         return None;
     }
 
-    // ponytail: holds every file's text at once; stream per file if a corpus
-    // ever outgrows memory (max_file_size already caps each file).
-    let texts: Vec<String> = targets
-        .iter()
-        .flat_map(|target| discover_indexable_markdown(target, recursive, cfg.max_file_size))
-        .filter_map(|path| std::fs::read_to_string(path).ok())
-        .collect();
-    let docs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let share = english_share(&docs);
+    // One file in memory at a time: `max_file_size` bounds each file, not the
+    // whole corpus, and a large one read all at once would spike memory right
+    // before the (heavier) embedding step.
+    let mut acc = ShareAccumulator::new();
+    for target in targets {
+        for path in discover_indexable_markdown(target, recursive, cfg.max_file_size) {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                acc.add(&text);
+            }
+        }
+    }
+    let share = acc.finish();
     let model = choose_model(share);
 
     apply_resolution(

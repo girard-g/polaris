@@ -54,4 +54,4 @@ thiserror = { workspace = true }
 tempfile = "3"
 # Tests fabricate index files directly (e.g. the incomplete index an older
 # version could leave behind); same version polaris-core links.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { workspace = true }

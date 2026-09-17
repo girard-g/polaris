@@ -60,6 +60,17 @@ gives every model its own calibrated threshold.
   error naming the file and telling you to delete it and re-index, rather
   than being silently treated as absent everywhere, or accepted as a usable
   index with no recorded model.
+- **The write hook went permanently silent on an incomplete index.** Because
+  it gated on the same check as "no index yet", a legacy half-created
+  database stopped all auto-indexing on every file save with no way to learn
+  why. It now prints one line to stderr naming the file and the remedy; the
+  search hook was already silent for this case and stays that way.
+- **A `~~~`-fenced code block was counted as prose.** Corpus language
+  measurement (and `polaris eval`'s sentence sampling) only recognised
+  `` ``` `` fences; a long `~~~` block could inflate a corpus's measured
+  English share enough to select the wrong embedding model. Both fence forms
+  are now recognised, with a matching-delimiter rule — a block opened with
+  one marker closes only on that same marker.
 
 ### Breaking (library API)
 

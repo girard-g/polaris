@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use polaris_core::config::PolarisConfig;
-use polaris_core::db::{Database, has_index};
+use polaris_core::db::{Database, IndexState, has_index, index_state};
 use polaris_core::embedding::EmbeddingEngine;
 use polaris_core::error::{PolarisError, Result};
 use polaris_core::indexer::Indexer;
@@ -328,9 +328,23 @@ pub fn perform_index(
         Some(CwdGuard(prev))
     });
 
-    // Don't create an empty DB if no index exists yet.
-    if !has_index(&cfg.db_path) {
-        return Ok(HookIndexReport { indexed_new_or_modified: 0 });
+    // Don't create an empty DB if no index exists yet. An `Incomplete` index
+    // (a legacy half-created database, schema but no stored model) is not
+    // absent — it needs a different, visible remedy, or hook indexing stops
+    // silently forever with no way for the user to learn why. Never touch the
+    // file here: it can only be repaired by deleting and re-indexing by hand.
+    match index_state(&cfg.db_path) {
+        IndexState::Absent => return Ok(HookIndexReport { indexed_new_or_modified: 0 }),
+        IndexState::Incomplete => {
+            eprintln!(
+                "polaris hook index: {}",
+                polaris_core::error::PolarisError::IncompleteIndex {
+                    path: cfg.db_path.display().to_string()
+                }
+            );
+            return Ok(HookIndexReport { indexed_new_or_modified: 0 });
+        }
+        IndexState::Complete => {}
     }
 
     let cfg = &effective_config(cfg);
@@ -574,6 +588,55 @@ mod tests {
         let report = perform_index(&dir.path().join("docs/new.md"), None, &cfg)
             .expect("the hook must open a Gemma index");
         assert_eq!(report.indexed_new_or_modified, 0, "no indexed root yet");
+    }
+
+    /// The file an interrupted run of a pre-transaction version left behind:
+    /// a schema, but no stored model. Same fixture shape as the CLI's own
+    /// `incomplete_index` test helper in `lib.rs`.
+    fn incomplete_index(path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO metadata (key, value) VALUES ('schema_version', '4'), ('embedding_dim', '512');",
+        )
+        .unwrap();
+    }
+
+    /// Before this behaviour, `perform_index` treated `Incomplete` the same
+    /// as `Absent` (both failed `has_index`) and returned a silent no-op
+    /// forever, with no way for the user to learn a legacy half-created
+    /// database was blocking every hook index. It must now say so on stderr
+    /// (not asserted here — no cheap seam to capture it without threading a
+    /// writer through `perform_index`, which the fix scopes out) while still
+    /// returning `Ok` with nothing indexed, and it must not touch the file:
+    /// an incomplete index can only be deleted by hand, never repaired.
+    #[test]
+    fn perform_index_reports_an_incomplete_index_and_leaves_it_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("polaris.db");
+        incomplete_index(&db_path);
+        let before = std::fs::read(&db_path).unwrap();
+
+        let cfg = cfg_with_db(db_path.clone());
+        let report = perform_index(&dir.path().join("docs/new.md"), None, &cfg)
+            .expect("an incomplete index must not surface as an error");
+        assert_eq!(report.indexed_new_or_modified, 0);
+
+        let after = std::fs::read(&db_path).unwrap();
+        assert_eq!(before, after, "an incomplete index must never be touched, only reported");
+    }
+
+    /// Regression guard: the search hook path must stay exactly as silent for
+    /// `Incomplete` as it already is — `has_index` was always false for it,
+    /// so this behaviour predates the fix and must not change alongside it.
+    #[test]
+    fn perform_search_stays_silent_for_an_incomplete_index() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("polaris.db");
+        incomplete_index(&db_path);
+
+        let result = perform_search("how does the indexer work in polaris?", None, &cfg_with_db(db_path));
+        assert!(matches!(result, Ok(None)), "got {result:?}");
     }
 
     #[test]

@@ -40,7 +40,7 @@ Search indexed documentation using semantic similarity.
 
 Below `search_min_similarity` it returns `No reliable context found (best match …, threshold …)` instead of results. When the index's model has no calibrated threshold, results are returned unfiltered followed by one line suggesting `polaris eval`.
 
-If no index exists yet, `search`, `status` and `eval` answer ``No index yet at <path> — call the `index` tool with your docs path (or run `polaris index <path>`), then try again.``
+If no index exists yet, `search`, `status` and `eval` answer ``No index yet at <path> — call the `index` tool with your docs path (or run `polaris index <path>`), then try again.`` "Exists" means the database records a model, not that the file is there: a file with no schema (`touch polaris.db`, or another SQLite database) is no index, and gets the same answer.
 
 **Example response:**
 

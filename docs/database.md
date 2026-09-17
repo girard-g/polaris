@@ -13,6 +13,19 @@ let db = Database::open(&config)?;
 
 `register_vec_extension()` calls `sqlite3_auto_extension` via the rusqlite FFI.
 
+On the first `open()` the whole schema — every table, the `vec_chunks` virtual
+table, and the `metadata` row holding `schema_version`, `embedding_dim` and
+`model_id` — is created inside a single `IMMEDIATE` transaction. An error or a
+crash part-way through rolls the lot back, so the file is never left with
+tables but no recorded model. The stored `model_id` is therefore what tells a
+caller an index exists; `db::has_index()` is that check, and file existence is
+not it (`Connection::open` creates the file before any schema runs).
+
+Opening a database that has a `metadata` table but no `model_id` is a hard
+error (`Incomplete index at <path>`): only an interrupted run of a pre-2.4
+version can produce one, and it cannot be completed because the model that
+built its `vec_chunks` table is unknown. Delete the file and re-index.
+
 ## Schema (v4)
 
 ### `metadata`
@@ -270,6 +283,7 @@ On `Database::open()`, the stored `embedding_dim` and `model_id` are compared to
 ```
 Dimension mismatch: database has dim=256, config has dim=384
 Model mismatch: database was indexed with model 'nomic-embed-text-v1.5', config has 'mxbai-embed-large-v1' — delete the database and re-index to switch models
+Incomplete index at ./polaris.db: the schema exists but records no model, so an earlier run was interrupted before it finished — delete the file and re-index
 ```
 
 Resolution: delete the database and re-index.

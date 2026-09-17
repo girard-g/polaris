@@ -236,9 +236,16 @@ all-minilm-l6-v2 index ./docs` now fails with `embedding_dim must be in [64,
 384] for model 'all-minilm-l6-v2', got 768` instead of silently clamping to
 384 — delete or lower the pinned `embedding_dim` to switch models with `--model`.
 
-If a crash interrupts index creation, the database file can exist with no
-stored model; the MCP tools report `No index yet` for it and never pick a
-model for it, so delete the file and re-index.
+Index creation is atomic: the tables and the stored model are written in one
+transaction, so an interrupted `polaris index` leaves either a complete index
+or a file with no schema at all. A file with no schema is not an index —
+every command treats it as if it were absent, and the next `polaris index`
+selects a model and creates the index in it as usual.
+
+A database file that *does* carry the schema but records no model can only
+come from an interrupted run of an older version. It can never be completed,
+because the model that built it is unknown, so opening it fails with
+`Incomplete index at <path>` — delete the file and re-index.
 
 ## Supported Models
 

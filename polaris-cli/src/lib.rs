@@ -82,7 +82,10 @@ impl Cli {
             cfg.extra_db_paths = extra_dbs;
         }
 
-        // `--model` without `--dim` now gets that model's default dimension.
+        // Dimension precedence, from `resolve_effective`/`apply_resolution`: an
+        // explicit dim (config file or `--dim`) always wins; otherwise the
+        // stored dim of an existing index at `cfg.db_path`; otherwise the
+        // effective model's default dimension.
         polaris_core::config::resolve_effective(&mut cfg);
 
         cfg.validate()?;

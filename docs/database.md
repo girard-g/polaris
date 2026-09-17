@@ -22,9 +22,11 @@ caller an index exists; `db::has_index()` is that check, and file existence is
 not it (`Connection::open` creates the file before any schema runs).
 
 Opening a database that has a `metadata` table but no `model_id` is a hard
-error (`Incomplete index at <path>`): only an interrupted run of a pre-2.4
-version can produce one, and it cannot be completed because the model that
-built its `vec_chunks` table is unknown. Delete the file and re-index.
+error (`Incomplete index at <path>`): only an interrupted run of a version
+that predates the creation transaction can produce one, and it cannot be
+completed because the model that built its `vec_chunks` table is unknown.
+Every command detects this state before loading a model, and says to delete
+the file and re-index rather than offering to index the path.
 
 ## Schema (v4)
 

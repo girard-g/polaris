@@ -131,7 +131,7 @@ Setting `model_id` anywhere disables the choice for every index that config appl
 | `max_top_k` | `50` | — | Maximum `top_k` accepted by search commands |
 | `search_min_similarity` | model default: 0.63 nomic, 0.42 `embeddinggemma-300m`, uncalibrated otherwise | `[0.0, 1.0]` | See [Search Threshold](#search-threshold) |
 | `max_file_size` | `10485760` | `> 0` | 10 MiB; larger files are skipped during indexing |
-| `extra_db_paths` | `[]` | — | Additional read-only DBs fused into search (multi-DB) |
+| `extra_db_paths` | `[]` | — | Additional read-only DBs fused into search (multi-DB); each must be a **complete index** sharing the primary's model and dimension — a placeholder or empty file is rejected |
 | `eval.sample_size` | `200` | `> 0` | Sentences sampled per `polaris eval` run |
 | `eval.probes` | `[]` | — | Overrides built-in probes; empty means auto by language |
 
@@ -226,6 +226,7 @@ In both cases, resolution is the same: delete (or move) the existing database an
 | `model_id` set in `~/.config/polaris/polaris.toml` | Explicit everywhere: no project chooses its model |
 | An older Polaris binary opening an `embeddinggemma-300m` index | `Unknown model 'embeddinggemma-300m'` — upgrade that binary |
 | `extra_db_paths` pointing at an index built with another model | Error, now naming that database |
+| `extra_db_paths` pointing at an empty or placeholder file | Error: every extra database must be a complete index, not just an existing file. Previously such a path was accepted and failed later, or silently contributed nothing |
 | `polaris serve` in a project with an index | Unchanged: the model loads at startup |
 | `polaris serve` before any index exists | No empty `polaris.db` appears any more; the model loads on the first `index` call |
 
@@ -244,8 +245,10 @@ selects a model and creates the index in it as usual.
 
 A database file that *does* carry the schema but records no model can only
 come from an interrupted run of an older version. It can never be completed,
-because the model that built it is unknown, so opening it fails with
-`Incomplete index at <path>` — delete the file and re-index.
+because the model that built it is unknown, so every command reports
+`Incomplete index at <path>` and tells you to delete the file and re-index.
+`polaris index`, `watch`, `setup` and the MCP `index` tool detect it before
+choosing or downloading a model, so finding out costs nothing.
 
 ## Supported Models
 

@@ -293,14 +293,20 @@ pub fn index_state(path: &Path) -> IndexState {
     if !has_metadata {
         return IndexState::Absent;
     }
-    let model: Option<String> = conn
-        .query_row("SELECT value FROM metadata WHERE key='model_id'", [], |r| r.get(0))
+    match conn
+        .query_row("SELECT value FROM metadata WHERE key='model_id'", [], |r| {
+            r.get::<_, String>(0)
+        })
         .optional()
-        .ok()
-        .flatten();
-    match model {
-        Some(_) => IndexState::Complete,
-        None => IndexState::Incomplete,
+    {
+        Ok(Some(_)) => IndexState::Complete,
+        Ok(None) => IndexState::Incomplete,
+        // A `metadata` table of some other shape — a foreign database, not a
+        // Polaris index we half-wrote. `Database::open` reports it as a plain
+        // `Database` error, so classifying it `Incomplete` would have the two
+        // disagree and would promise a remedy ("delete the file") for someone
+        // else's data.
+        Err(_) => IndexState::Absent,
     }
 }
 
@@ -1920,16 +1926,22 @@ mod tests {
         let empty = dir.path().join("empty.db");
         let garbage = dir.path().join("garbage.db");
         let foreign = dir.path().join("foreign.db");
+        let foreign_metadata = dir.path().join("foreign_metadata.db");
         let partial = dir.path().join("partial.db");
         let real = dir.path().join("real.db");
 
         std::fs::write(&empty, b"").unwrap();
         std::fs::write(&garbage, b"not an sqlite database at all").unwrap();
         Connection::open(&foreign).unwrap().execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
+        // A `metadata` table that is not ours: no `key`/`value` columns.
+        Connection::open(&foreign_metadata)
+            .unwrap()
+            .execute_batch("CREATE TABLE metadata (id INTEGER PRIMARY KEY, note TEXT);")
+            .unwrap();
         incomplete_index(&partial);
         drop(Database::open(&real, 4, "test").unwrap());
 
-        for absent in [&missing, &empty, &garbage, &foreign] {
+        for absent in [&missing, &empty, &garbage, &foreign, &foreign_metadata] {
             assert_eq!(index_state(absent), IndexState::Absent, "{}", absent.display());
         }
         assert_eq!(index_state(&partial), IndexState::Incomplete);

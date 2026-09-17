@@ -1133,6 +1133,29 @@ mod tests {
         }
     }
 
+    /// Both hook gates ask `has_index`, not `exists()`. Reverting either one
+    /// makes this fire: `perform_index` would create a full nomic-pinned schema
+    /// in the touched file, `perform_search` would open (and so create) it too.
+    #[test]
+    fn hooks_do_nothing_for_a_file_that_is_not_an_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        std::fs::write(&db, b"").unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let md = docs.join("a.md");
+        std::fs::write(&md, "# Title\n\nSome indexable prose about the indexer.\n").unwrap();
+        let cfg = cfg_with_db(db.clone());
+
+        let report = perform_index(&md, Some(dir.path()), &cfg).unwrap();
+        assert_eq!(report.indexed_new_or_modified, 0);
+
+        let hit = perform_search("how does the indexer work in polaris?", Some(dir.path()), &cfg).unwrap();
+        assert!(hit.is_none());
+
+        assert_eq!(std::fs::metadata(&db).unwrap().len(), 0, "no schema may be written");
+    }
+
     #[test]
     fn perform_search_skips_when_no_db_exists() {
         let cfg = cfg_with_db(PathBuf::from("/nonexistent/path/polaris.db"));

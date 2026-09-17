@@ -437,7 +437,10 @@ fn incomplete_index_error(db_path: &std::path::Path) -> PolarisError {
 /// Guard for the paths that create or extend an index. An incomplete index can
 /// only be deleted, so fail here — before model selection and before the model
 /// loads, which would otherwise spend a download to say "delete this file".
-pub(crate) fn reject_incomplete_index(db_path: &std::path::Path) -> Result<()> {
+///
+/// `pub` so the `polaris-pro` binary guards its own indexing paths with the
+/// same check and the same message, instead of re-deriving both.
+pub fn reject_incomplete_index(db_path: &std::path::Path) -> Result<()> {
     match db::index_state(db_path) {
         db::IndexState::Incomplete => Err(incomplete_index_error(db_path)),
         _ => Ok(()),
@@ -447,7 +450,10 @@ pub(crate) fn reject_incomplete_index(db_path: &std::path::Path) -> Result<()> {
 /// Guard for the read-only commands. Absent and incomplete need opposite
 /// advice — index this path, versus delete the file — so they never share a
 /// message.
-pub(crate) fn require_complete_index(db_path: &std::path::Path) -> Result<()> {
+///
+/// `pub` so the `polaris-pro` binary answers a missing or broken index with the
+/// identical wording.
+pub fn require_complete_index(db_path: &std::path::Path) -> Result<()> {
     match db::index_state(db_path) {
         db::IndexState::Complete => Ok(()),
         db::IndexState::Incomplete => Err(incomplete_index_error(db_path)),

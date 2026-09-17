@@ -3,16 +3,17 @@
 use std::path::PathBuf;
 
 use crate::config::{PolarisConfig, apply_resolution, resolve_effective};
-use crate::db::IndexMetadata;
+use crate::db::{IndexMetadata, has_index};
 use crate::indexer::discover_indexable_markdown;
 use crate::language::{choose_model, english_share};
 
 /// Resolve `cfg` for an indexing run over `targets`, choosing the embedding
 /// model from the corpus when this run will create the index.
 ///
-/// Selection runs only when no database exists at `db_path` and `model_id` is
-/// not explicit; otherwise this is [`resolve_effective`] and returns `None`, so
-/// an existing index always keeps its model. When it runs, it reads the
+/// Selection runs only when no index exists at `db_path` ([`has_index`], not
+/// mere file existence) and `model_id` is not explicit; otherwise this is
+/// [`resolve_effective`] and returns `None`, so an existing index always keeps
+/// its model. When it runs, it reads the
 /// Markdown files the run would index (the indexer's own discovery and
 /// `max_file_size` guard), picks the model from their English-prose share,
 /// takes dimension and threshold from that model unless set, and returns the
@@ -27,7 +28,7 @@ pub fn resolve_for_new_index(
     targets: &[PathBuf],
     recursive: bool,
 ) -> Option<String> {
-    if cfg.explicit.model_id.is_some() || cfg.db_path.exists() {
+    if cfg.explicit.model_id.is_some() || has_index(&cfg.db_path) {
         resolve_effective(cfg);
         return None;
     }
@@ -122,6 +123,21 @@ mod tests {
         assert_eq!(resolve_for_new_index(&mut cfg, &[docs], true), None);
         assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("embeddinggemma-300m", 768));
         assert_eq!(cfg.search_min_similarity, Some(0.42));
+    }
+
+    /// `touch polaris.db`, or a file left behind by a run that never got to
+    /// write its model, is not an index: selection must still run, or a French
+    /// corpus silently gets the English default.
+    #[test]
+    fn a_file_that_is_not_an_index_does_not_disable_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = corpus(dir.path(), &[("a.md", FR_PROSE)]);
+        let mut cfg = cfg_at(dir.path());
+        std::fs::write(&cfg.db_path, b"").unwrap();
+
+        let line = resolve_for_new_index(&mut cfg, &[docs], true).expect("selection ran");
+        assert!(line.starts_with("model: embeddinggemma-300m"), "{line}");
+        assert_eq!(cfg.model_id, "embeddinggemma-300m");
     }
 
     #[test]

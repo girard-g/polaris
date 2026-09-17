@@ -16,6 +16,7 @@ use rmcp::{
 };
 
 use polaris_core::config::PolarisConfig;
+use polaris_core::db::has_index;
 use polaris_core::error::PolarisError;
 use polaris_core::search::SearchEngine;
 
@@ -98,14 +99,6 @@ async fn open_resolved(base: Arc<PolarisConfig>) -> Result<OpenIndex, String> {
     .await
     .map_err(|e| format!("Error: task failed: {e}"))?
     .map_err(|e| format!("Error: {e}"))
-}
-
-/// Whether an index is ready to open at `db_path`. Not `exists()`: `polaris
-/// index` creates the file, then the schema, and writes the stored model last.
-/// Opening inside that gap would resolve the default model and keep that bank
-/// for the whole session, so a file without a stored model is no index yet.
-pub(crate) fn has_index(db_path: &Path) -> bool {
-    polaris_core::db::read_index_metadata(db_path).model_id.is_some()
 }
 
 fn no_index_message(db_path: &Path) -> String {

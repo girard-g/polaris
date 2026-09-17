@@ -425,7 +425,7 @@ pub fn warn_pinned_threshold(cfg: &PolarisConfig) {
 /// does not exist yet uses an in-memory database: every file is new either way,
 /// and creating the file would pin a model before any real run chose one.
 fn open_for_index(cfg: &PolarisConfig, dry_run: bool) -> Result<Database> {
-    if dry_run && !cfg.db_path.exists() {
+    if dry_run && !db::has_index(&cfg.db_path) {
         Database::open_in_memory(cfg.embedding_dim, &cfg.model_id)
     } else {
         Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)
@@ -609,7 +609,7 @@ async fn cmd_search(
         .collect();
 
     for db_path in &all_db_paths {
-        if !db_path.exists() {
+        if !db::has_index(db_path) {
             return Err(PolarisError::Indexing(format!(
                 "no index at {}  —  run `polaris index <path>` first",
                 db_path.display()
@@ -759,7 +759,7 @@ async fn cmd_window(
     // Single-DB command: chunk ids resolve against the primary index only.
     warn_extra_dbs_ignored(&cfg);
 
-    if !cfg.db_path.exists() {
+    if !db::has_index(&cfg.db_path) {
         return Err(PolarisError::Indexing(format!(
             "no index at {}  —  run `polaris index <path>` first",
             cfg.db_path.display()
@@ -787,7 +787,7 @@ async fn cmd_window(
 async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     tracing::info!("Starting Polaris MCP server (stdio transport)");
     tracing::info!("Database: {}", cfg.db_path.display());
-    if mcp::server::has_index(&cfg.db_path) {
+    if db::has_index(&cfg.db_path) {
         tracing::info!("Loading embedding model {} (dim {})…", cfg.model_id, cfg.embedding_dim);
     } else {
         // Spec §4.1.1: only indexing creates a database, so the model and the
@@ -843,7 +843,7 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
     // Label column width (pad before styling to avoid ANSI-offset issues).
     let w = 10usize;
 
-    if !cfg.db_path.exists() {
+    if !db::has_index(&cfg.db_path) {
         if output == OutputFormat::Json {
             println!("{{\"error\": \"not initialized\"}}");
         } else {
@@ -951,7 +951,7 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
 async fn cmd_chunks(cfg: PolarisConfig, path: &PathBuf) -> Result<()> {
     warn_extra_dbs_ignored(&cfg);
 
-    if !cfg.db_path.exists() {
+    if !db::has_index(&cfg.db_path) {
         return Err(PolarisError::Indexing(format!(
             "no index at {}  —  run `polaris index <path>` first",
             cfg.db_path.display()
@@ -1428,6 +1428,32 @@ mod command_tests {
         cmd_status(cfg_at(db.clone()), OutputFormat::Json).await.unwrap();
 
         assert!(!db.exists(), "a read-only command created {}", db.display());
+    }
+
+    /// A bare file is not an index: the read-only commands must give the same
+    /// "no index at" message as a missing one, not a confusing failure deeper in.
+    #[tokio::test]
+    async fn read_only_commands_on_a_file_that_is_not_an_index_say_no_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        std::fs::write(&db, b"").unwrap();
+
+        let err = cmd_search(cfg_at(db.clone()), "anything at all", 5, OutputFormat::Plain, false, 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let err = cmd_window(cfg_at(db.clone()), 1, 1, 2000).await.unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let err = cmd_chunks(cfg_at(db.clone()), &PathBuf::from("docs/a.md")).await.unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        cmd_status(cfg_at(db.clone()), OutputFormat::Plain).await.unwrap();
+
+        let err = crate::eval::run(&cfg_at(db.clone()), Some(10), false).unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let err = crate::savings::run(&db, 512, "nomic-embed-text-v1.5", false, 20, false).unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+
+        assert_eq!(std::fs::metadata(&db).unwrap().len(), 0, "no schema may be written");
     }
 
     fn docs_with_one_file(dir: &std::path::Path) -> PathBuf {

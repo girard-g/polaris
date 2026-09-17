@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use polaris_core::config::PolarisConfig;
-use polaris_core::db::Database;
+use polaris_core::db::{Database, has_index};
 use polaris_core::embedding::EmbeddingEngine;
 use polaris_core::error::{PolarisError, Result};
 use polaris_core::indexer::Indexer;
@@ -329,7 +329,7 @@ pub fn perform_index(
     });
 
     // Don't create an empty DB if no index exists yet.
-    if !cfg.db_path.exists() {
+    if !has_index(&cfg.db_path) {
         return Ok(HookIndexReport { indexed_new_or_modified: 0 });
     }
 
@@ -432,7 +432,7 @@ pub fn perform_search(
     });
 
     // Don't create an empty DB or load the model if no index exists yet.
-    if !cfg.db_path.exists() {
+    if !has_index(&cfg.db_path) {
         return Ok(None);
     }
 

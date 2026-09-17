@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use console::style;
 use polaris_core::Bank;
-use polaris_core::db::{Database, LogSource, SavingsAggregate, SearchLogRow, SearchResult};
+use polaris_core::db::{Database, LogSource, SavingsAggregate, SearchLogRow, SearchResult, has_index};
 use polaris_core::error::{PolarisError, Result};
 use tokio::task::JoinHandle;
 
@@ -220,7 +220,7 @@ pub fn run(
     limit: usize,
     json: bool,
 ) -> Result<()> {
-    if !db_path.exists() {
+    if !has_index(db_path) {
         return Err(PolarisError::Indexing(format!(
             "no index at {}  —  run `polaris index <path>` first",
             db_path.display()

@@ -398,20 +398,31 @@ pub(crate) fn apply_resolution(cfg: &mut PolarisConfig, source: crate::db::Index
     }
 }
 
-/// One line when a pinned `search_min_similarity` sits 0.10 or more from the
-/// effective model's calibrated default (spec §5.4) — typically a 0.63 written
-/// by an older `polaris setup`, now on an `embeddinggemma-300m` index. `None`
-/// when nothing is pinned or the model has no default. Hooks never print it.
+/// One line when a pinned `search_min_similarity` needs a second look (spec
+/// §5.4): either it sits 0.10 or more from the effective model's calibrated
+/// default — typically a 0.63 written by an older `polaris setup`, now on an
+/// `embeddinggemma-300m` index — or the effective model (e.g. `all-minilm-l6-v2`,
+/// `mxbai-embed-large-v1`) has no calibrated default at all, so the ≥0.10 check
+/// can never fire for it and the pin goes unquestioned otherwise. `None` when
+/// nothing is pinned or the model is unknown. Hooks never print it.
 pub fn pinned_threshold_warning(cfg: &PolarisConfig) -> Option<String> {
     let pinned = cfg.explicit.search_min_similarity?;
-    let default = crate::embedding::default_threshold_for(&cfg.model_id).ok()??;
-    // Epsilon: in f32, 0.52 - 0.42 is 0.09999999.
-    ((pinned - default).abs() >= 0.10 - 1e-6).then(|| {
-        format!(
-            "search_min_similarity = {pinned:.2} is pinned in polaris.toml; {} defaults to {default:.2}",
+    let default = crate::embedding::default_threshold_for(&cfg.model_id).ok()?;
+    match default {
+        Some(default) => {
+            // Epsilon: in f32, 0.52 - 0.42 is 0.09999999.
+            ((pinned - default).abs() >= 0.10 - 1e-6).then(|| {
+                format!(
+                    "search_min_similarity = {pinned:.2} is pinned in polaris.toml; {} defaults to {default:.2}",
+                    cfg.model_id
+                )
+            })
+        }
+        None => Some(format!(
+            "search_min_similarity = {pinned:.2} is pinned in polaris.toml; {} has no calibrated default — check it with `polaris eval` on your corpus",
             cfg.model_id
-        )
-    })
+        )),
+    }
 }
 
 /// Options for `Bank::index_path` and `Bank::index_diff`.
@@ -856,17 +867,29 @@ mod tests {
     }
 
     #[test]
-    fn no_warning_without_a_pin_or_without_a_model_default() {
+    fn no_warning_without_a_pin() {
         let mut unpinned = PolarisConfig::default();
         unpinned.apply_overrides(None, None, Some("embeddinggemma-300m".into()));
         apply_resolution(&mut unpinned, IndexMetadata::default());
         assert!(pinned_threshold_warning(&unpinned).is_none());
+    }
 
-        let mut minilm = PolarisConfig::default();
-        minilm.apply_overrides(None, None, Some("all-minilm-l6-v2".into()));
-        minilm.explicit.search_min_similarity = Some(0.9);
-        apply_resolution(&mut minilm, IndexMetadata::default());
-        assert!(pinned_threshold_warning(&minilm).is_none());
+    #[test]
+    fn a_pin_on_an_uncalibrated_model_warns_by_name() {
+        // all-minilm-l6-v2 and mxbai-embed-large-v1 have no calibrated default
+        // (`default_threshold_for` returns `Ok(None)`), so the ≥0.10-from-default
+        // check can never fire for them — they need their own warning instead.
+        for model in ["all-minilm-l6-v2", "mxbai-embed-large-v1"] {
+            let mut cfg = PolarisConfig::default();
+            cfg.apply_overrides(None, None, Some(model.to_string()));
+            cfg.explicit.search_min_similarity = Some(0.9);
+            apply_resolution(&mut cfg, IndexMetadata::default());
+            let msg = pinned_threshold_warning(&cfg)
+                .unwrap_or_else(|| panic!("{model} with a pinned threshold should warn"));
+            assert!(msg.contains(model), "{msg}");
+            assert!(msg.contains("0.90"), "{msg}");
+            assert!(msg.contains("polaris eval"), "{msg}");
+        }
     }
 }
 

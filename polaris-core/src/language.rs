@@ -352,6 +352,22 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_only_mentions_a_tilde_fence_inline_still_measures_the_prose_after_it() {
+        // Tilde twin of the backtick test above, with the mention placed
+        // FIRST: if an inline "~~~" mid-sentence were mistaken for a fence
+        // opener, everything after it — here, all of FR_PROSE — would be
+        // blanked and the word floor would never be reached. It must not be:
+        // only a line that STARTS WITH the marker (after trimming) toggles a
+        // fence, same rule the backtick version always used.
+        let doc = format!("Utilisez ~~~ pour le code.\n\n{FR_PROSE}\n");
+        assert!(doc.matches("~~~").count() % 2 != 0, "the inline mention must be odd");
+        let density = english_density(&doc).expect("prose after the inline mention must be measured");
+        let baseline = english_density(FR_PROSE).unwrap();
+        assert!((density - baseline).abs() < 0.01, "density {density}, baseline {baseline}");
+        assert!(density < ENGLISH_DENSITY);
+    }
+
+    #[test]
     fn a_file_with_a_real_unterminated_fence_measures_only_the_prose_before_it() {
         // A real unterminated fence must still exclude what follows it — only
         // the ambiguous "ends inside code or not" chunk case goes away.

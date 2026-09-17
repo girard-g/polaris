@@ -147,6 +147,7 @@ Score is the query-chunk cosine similarity — absolute, so it is comparable acr
 | Situation | Message |
 |-----------|---------|
 | DB file doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| Schema present, no stored model (interrupted run of an older version) | `Incomplete index at <path>: the schema exists but records no model, so an earlier run was interrupted before it finished — delete the file and re-index` |
 | DB exists but empty | `index is empty  —  run polaris index <path> to add documents` (stdout, exit 0) |
 | DB has docs, no match | `no matches found` plus a `tip:` line (stdout, exit 0) |
 
@@ -179,6 +180,7 @@ Chunk ids are unique only within a single index, so `window` operates on the pri
 | Situation | Message |
 |-----------|---------|
 | DB file doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| Schema present, no stored model (interrupted run of an older version) | `Incomplete index at <path>: the schema exists but records no model, so an earlier run was interrupted before it finished — delete the file and re-index` |
 | Unknown chunk id | `no chunk with id <id> in <path>  —  get ids from \`polaris search <query> --output json\`` |
 
 ---
@@ -333,6 +335,7 @@ polaris savings --output json
 | Situation | Message |
 |-----------|---------|
 | `polaris.db` doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| Schema present, no stored model (interrupted run of an older version) | `Incomplete index at <path>: the schema exists but records no model, so an earlier run was interrupted before it finished — delete the file and re-index` |
 
 ---
 
@@ -377,6 +380,7 @@ See `docs/configuration.md` under "Defaults Reference" for the `eval.sample_size
 | Situation | Message |
 |-----------|---------|
 | `polaris.db` doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| Schema present, no stored model (interrupted run of an older version) | `Incomplete index at <path>: the schema exists but records no model, so an earlier run was interrupted before it finished — delete the file and re-index` |
 | Index has no documents | `index is empty  —  run \`polaris index <path>\` to add documents` |
 
 ---

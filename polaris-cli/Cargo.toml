@@ -52,3 +52,6 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Tests fabricate index files directly (e.g. the incomplete index an older
+# version could leave behind); same version polaris-core links.
+rusqlite = { workspace = true }

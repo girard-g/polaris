@@ -7,7 +7,13 @@ use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
-const EMBED_BATCH_SIZE: usize = 32; // mirrors EmbeddingEngine's internal BATCH_SIZE
+// fastembed pads each batch to its longest chunk, and ONNX already spreads a
+// single sequence across every core, so on CPU a batch buys no parallelism —
+// only padding. Measured on 995 chunks: 32 → 4.2 chunks/s at 6.5 GB peak RSS,
+// 1 → 9.4 chunks/s at 1.0 GB, identical `polaris eval` metrics.
+// ponytail: tuned for the CPU execution provider (the only one we configure);
+// revisit if a GPU provider is added, where batching does pay.
+const EMBED_BATCH_SIZE: usize = 1;
 use pulldown_cmark::{Event, HeadingLevel, Options as CmarkOptions, Parser, Tag, TagEnd};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -17,6 +23,18 @@ use crate::embedding::EmbeddingEngine;
 use crate::error::Result;
 
 const MIN_CHUNK_CHARS: usize = 50;
+
+/// Whether an `on_progress` callback should fire after `done` of `total`
+/// chunks are embedded, given `prev_done` were done before this step.
+/// Decouples notification granularity from `EMBED_BATCH_SIZE`: at most one
+/// emission per whole percent crossed, plus always on the last chunk so a
+/// caller sees completion even when `total` is under 100.
+fn should_emit_progress(prev_done: usize, done: usize, total: usize) -> bool {
+    if total == 0 || done == 0 {
+        return false;
+    }
+    done == total || (prev_done * 100) / total != (done * 100) / total
+}
 
 pub struct IndexReport {
     pub added: Vec<PathBuf>,
@@ -331,7 +349,6 @@ impl Indexer {
         }
 
         let total_chunks = all_texts.len();
-        let total_batches = total_chunks.div_ceil(EMBED_BATCH_SIZE);
 
         // Chunks-level progress bar — this is the slow phase.
         let embed_pb = if on_progress.is_some() || total_chunks == 0 {
@@ -350,7 +367,8 @@ impl Indexer {
         };
 
         let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(total_chunks);
-        for (batch_idx, batch_start) in (0..total_chunks).step_by(EMBED_BATCH_SIZE).enumerate() {
+        let mut prev_done = 0usize;
+        for batch_start in (0..total_chunks).step_by(EMBED_BATCH_SIZE) {
             let batch_end = (batch_start + EMBED_BATCH_SIZE).min(total_chunks);
             let batch_emb = self
                 .embedding_engine
@@ -360,13 +378,21 @@ impl Indexer {
                 ))?
                 .embed_documents(&all_texts[batch_start..batch_end])?;
             all_embeddings.extend(batch_emb);
-            embed_pb.set_position(all_embeddings.len() as u64);
+            let done = all_embeddings.len();
+            embed_pb.set_position(done as u64);
             if let Some(ref cb) = on_progress {
-                cb(
-                    0.2 + 0.6 * (all_embeddings.len() as f32 / total_chunks.max(1) as f32),
-                    &format!("Embedding batch {}/{}", batch_idx + 1, total_batches),
-                );
+                // At most one callback per whole percent of chunks embedded
+                // (plus always the final one) — independent of
+                // EMBED_BATCH_SIZE, which a 10k-chunk index would otherwise
+                // turn into 10k MCP progress notifications.
+                if should_emit_progress(prev_done, done, total_chunks) {
+                    cb(
+                        0.2 + 0.6 * (done as f32 / total_chunks.max(1) as f32),
+                        &format!("Embedding {done}/{total_chunks} chunks"),
+                    );
+                }
             }
+            prev_done = done;
         }
         embed_pb.finish_and_clear();
 
@@ -943,6 +969,29 @@ fn discover_markdown_files(root: &Path, recursive: bool) -> Discovery {
     Discovery { files, visited_dirs }
 }
 
+/// True when an on-disk file is too large to index. Used by
+/// `discover_indexable_markdown` (selection's own discovery) so it skips
+/// exactly the files the pipeline's own size guard would reject; the pipeline
+/// keeps its existing inline guard (see `index_files_items`), so this is not
+/// shared code on that path.
+pub(crate) fn exceeds_max_file_size(path: &Path, max_file_size: u64) -> bool {
+    path.metadata().map(|m| m.len()).unwrap_or(0) > max_file_size
+}
+
+/// The Markdown files an index run over `root` reads: discovery minus the files
+/// the size guard skips.
+pub(crate) fn discover_indexable_markdown(
+    root: &Path,
+    recursive: bool,
+    max_file_size: u64,
+) -> Vec<PathBuf> {
+    discover_markdown_files(root, recursive)
+        .files
+        .into_iter()
+        .filter(|path| !exceeds_max_file_size(path, max_file_size))
+        .collect()
+}
+
 /// Returns a configured spinner, or a hidden no-op bar when `silent` is true.
 ///
 /// Used throughout `index_path` to suppress terminal spinners in MCP/callback mode.
@@ -1079,6 +1128,60 @@ fn extract_title(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // should_emit_progress
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn should_emit_progress_caps_calls_near_one_per_percent_and_ends_at_the_final_chunk() {
+        let total = 3333usize;
+        let mut prev = 0usize;
+        let mut emits = 0usize;
+        let mut last_emit_done = None;
+        for done in 1..=total {
+            if should_emit_progress(prev, done, total) {
+                emits += 1;
+                last_emit_done = Some(done);
+            }
+            prev = done;
+        }
+        assert!(emits <= 101, "emits: {emits}");
+        assert_eq!(last_emit_done, Some(total), "the final chunk must always emit");
+    }
+
+    #[test]
+    fn should_emit_progress_always_fires_for_the_only_chunk() {
+        assert!(should_emit_progress(0, 1, 1));
+    }
+
+    #[test]
+    fn should_emit_progress_skips_a_step_that_stays_within_the_same_percent() {
+        // 10_000 total chunks: chunk 2 is still inside the 0% bucket.
+        assert!(!should_emit_progress(1, 2, 10_000));
+    }
+
+    #[test]
+    fn should_emit_progress_fires_on_crossing_a_percent_boundary() {
+        // 100 total chunks: chunk 10 is exactly the first step into the 10% bucket.
+        assert!(should_emit_progress(9, 10, 100));
+    }
+
+    #[test]
+    fn should_emit_progress_is_false_for_zero_total() {
+        assert!(!should_emit_progress(0, 0, 0));
+    }
+
+    #[test]
+    fn indexable_discovery_skips_files_over_the_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("small.md"), "# Small\n").unwrap();
+        std::fs::write(dir.path().join("big.md"), "x".repeat(200)).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not markdown").unwrap();
+
+        let found = discover_indexable_markdown(dir.path(), true, 100);
+        assert_eq!(found, vec![dir.path().join("small.md")]);
+    }
 
     // -----------------------------------------------------------------------
     // path_under_root

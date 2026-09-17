@@ -118,7 +118,7 @@ polaris index ./docs
 polaris search "your first query"
 ```
 
-The first search downloads the embedding model (~137 MB) to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux, `%LOCALAPPDATA%\polaris\models\` on Windows). See [Configuration → Model Caching](docs/configuration.md#model-caching) for the full resolution order and the `POLARIS_CACHE_DIR` override.
+The first index downloads its embedding model: `nomic-embed-text-v1.5` (~522 MB) when your docs are English, `embeddinggemma-300m` (~1.2 GB) otherwise — see [Configuration → Model Selection](docs/configuration.md#model-selection). Models go to a user-global cache shared across projects (default `~/.cache/polaris/models/` on Linux, `%LOCALAPPDATA%\polaris\models\` on Windows). See [Configuration → Model Caching](docs/configuration.md#model-caching) for the full resolution order and the `POLARIS_CACHE_DIR` override.
 
 ## Usage
 
@@ -262,14 +262,16 @@ Create `polaris.toml` in the working directory (all fields optional):
 
 ```toml
 db_path = "polaris.db"
-embedding_dim = 512          # 64–768, Matryoshka truncation
 max_chunk_tokens = 450
 chunk_overlap_chars = 200
-model_id = "nomic-embed-text-v1.5"
 mmr_lambda = 0.7             # 0 = diversity, 1 = relevance
 mmr_candidate_multiplier = 3
 heading_boost = 0.05
 rrf_k = 60
+# Unset, these follow the index; the first index picks the model from your docs.
+# model_id = "nomic-embed-text-v1.5"
+# embedding_dim = 512        # 64 up to the model's native size
+# search_min_similarity = 0.63
 ```
 
 Config is resolved in order: `--config <path>` → `./polaris.toml` → `~/.config/polaris/polaris.toml` → defaults.

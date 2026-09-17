@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 fastembed = "5"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { workspace = true }
 sqlite-vec = "0.1"
 zerocopy = { version = "0.7", features = ["derive"] }
 serde = { workspace = true }

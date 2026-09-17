@@ -18,53 +18,58 @@ const GITIGNORE_ENTRIES: &[&str] = &[
 
 /// Render the starter `polaris.toml`.
 ///
-/// Exactly one key is live: `search_min_similarity`, the value that has to be
-/// tuned per corpus. Everything else ships commented out as a reference, which
-/// documents the full surface without pinning any of it — a commented key is
-/// inert, so it keeps tracking its built-in default across upgrades, whereas a
-/// key written out freezes this project on today's value forever.
-///
-/// The live key is deliberately first. TOML requires every top-level key to
-/// precede any table, so a user who uncomments the `[eval]` block at the bottom
-/// would otherwise find `search_min_similarity` swallowed into it.
-pub fn polaris_toml_content(search_min_similarity: f32) -> String {
-    format!(
-        "\
+/// Every key ships commented out as a reference. A commented key is inert, so
+/// it keeps tracking its built-in default across upgrades — which matters most
+/// for `model_id`, `embedding_dim` and `search_min_similarity`: unset, the
+/// first index chooses the model from the corpus and the other two follow it.
+/// The file is written before that first index, when the model is not known
+/// yet, so the threshold block lists every model's default instead of one value.
+pub fn polaris_toml_content() -> String {
+    "\
 # Polaris configuration.
 #
-# Only the key below is active. Everything after it is commented out and serves
-# as a reference: uncomment a line to override that default. Leaving a key
-# commented is not the same as copying its current value — an omitted key keeps
-# following the built-in default through upgrades, a written one does not.
-
-# Minimum query-to-chunk cosine similarity for a result to be used. Below it the
-# MCP `search` tool answers \"No reliable context found\" and the auto-search hook
-# stays silent, rather than handing over a chunk that does not answer the query.
-#
-# Calibrated for the default model (nomic-embed-text-v1.5). Run `polaris eval`
-# to measure the right one for YOUR corpus — it prints a suggestion next to
-# whatever is configured here.
-#
-# Retune it if you change `model_id`: all-minilm-l6-v2 embeds without a query
-# prefix and scores in a far lower band, where this value would refuse
-# everything and the hook would go silently dead.
-search_min_similarity = {search_min_similarity}
-
+# Every key below is commented out and serves as a reference: uncomment a line
+# to override that default. Leaving a key commented is not the same as copying
+# its current value — an omitted key keeps following the built-in default
+# through upgrades, a written one does not.
 
 # ---------------------------------------------------------------------------
 # Reference — defaults shown, all commented out
 # ---------------------------------------------------------------------------
 
+# Minimum query-to-chunk cosine similarity for a result to be used. Below it the
+# MCP `search` tool answers \"No reliable context found\" and the auto-search hook
+# stays silent, rather than handing over a chunk that does not answer the query.
+#
+# Unset, it follows the embedding model of the index:
+#
+#   nomic-embed-text-v1.5            0.63
+#   nomic-embed-text-v1.5-quantized  0.63
+#   embeddinggemma-300m              0.42
+#   mxbai-embed-large-v1             uncalibrated
+#   all-minilm-l6-v2                 uncalibrated
+#
+# Uncalibrated: `search` returns results unfiltered and the hook never injects.
+# `polaris eval` suggests a value for YOUR corpus — a hint, not a setting: on
+# real queries it has undershot by about 0.1. Setting one pins it for any model.
+# search_min_similarity = 0.63
+
 # SQLite database file, relative to the working directory or absolute.
 # db_path = \"polaris.db\"
 
-# Embedding model. Changing it requires a full re-index.
-# Options: nomic-embed-text-v1.5, mxbai-embed-large-v1, all-minilm-l6-v2
+# Embedding model. Unset, the first index chooses it from the Markdown it reads:
+# English prose (90% or more) gets nomic-embed-text-v1.5, anything else gets
+# embeddinggemma-300m. Setting it disables that choice. Changing it later
+# requires deleting the database and re-indexing.
+# Options: nomic-embed-text-v1.5, nomic-embed-text-v1.5-quantized (faster,
+# slightly lower recall), embeddinggemma-300m (multilingual),
+# mxbai-embed-large-v1, all-minilm-l6-v2
 # model_id = \"nomic-embed-text-v1.5\"
 
-# Embedding vector dimension (matryoshka truncation). Must match what is already
-# stored in the database, which is checked on open. Valid from 64 up to the
-# model's native dimension.
+# Embedding vector dimension (matryoshka truncation). Unset, it follows the
+# index, then the model: 512 for nomic, 768 for embeddinggemma-300m, the native
+# size otherwise. Must match what is already stored in the database, which is
+# checked on open. Valid from 64 up to the model's native dimension.
 # embedding_dim = 512
 
 # Chunking. Tokens are approximated as chars / 4, so 450 is roughly 1800 chars.
@@ -91,7 +96,8 @@ search_min_similarity = {search_min_similarity}
 # Upper bound on the top_k a search request may ask for.
 # max_top_k = 50
 
-# Additional read-only databases fused into search results.
+# Additional read-only databases fused into search results. They must share
+# the index's model and dimension.
 # extra_db_paths = []
 
 # `polaris eval` settings. This is a TOML table, so it must stay below every
@@ -100,7 +106,7 @@ search_min_similarity = {search_min_similarity}
 # sample_size = 200
 # probes = []
 "
-    )
+    .to_string()
 }
 
 /// Filenames in the project root that receive the Polaris instruction block,
@@ -721,12 +727,8 @@ pub fn run(cfg: &PolarisConfig, path: &Path, no_agents: bool, no_hooks: bool, se
             style("✓").green(),
         );
     } else {
-        write_atomic(&toml_path, &polaris_toml_content(cfg.search_min_similarity))?;
-        println!(
-            "  {}  Created polaris.toml (search_min_similarity = {})",
-            style("✓").green(),
-            cfg.search_min_similarity,
-        );
+        write_atomic(&toml_path, &polaris_toml_content())?;
+        println!("  {}  Created polaris.toml (reference, all keys commented)", style("✓").green());
     }
 
     // .gitignore
@@ -950,13 +952,33 @@ fn run_initial_index(cfg: &PolarisConfig, setup_path: &Path) -> Result<()> {
     let _cwd_guard = CwdGuard(prev_cwd);
 
     let target = Path::new("docs");
+    let mut cfg = cfg.clone();
+    // Before selection and the model load: an incomplete index can only be
+    // deleted, and saying so must not cost a download. Non-fatal like every
+    // other failure here — setup's own files are already written — and
+    // deliberately without the "retry with: polaris index docs" line the
+    // `attempt()` failures print: indexing can never finish this file.
+    if let Err(e) = crate::reject_incomplete_index(&cfg.db_path) {
+        eprintln!("  {}  initial index skipped: {e}", console::style("⚠").yellow());
+        return Ok(());
+    }
+    if let Some(line) =
+        polaris_core::selection::resolve_for_new_index(&mut cfg, &[target.to_path_buf()], true)
+    {
+        println!("  {}  {line}", console::style("ℹ").cyan());
+    }
+    crate::warn_pinned_threshold(&cfg);
+    let cfg = &cfg;
     // `register_vec_extension` is called by `main.rs::run` before dispatching,
-    // so we don't re-register here. Use the passed-in cfg directly so the
-    // user's polaris.toml (db_path, embedding_dim, model_id) is respected.
+    // so we don't re-register here. cfg is a clone resolved against the
+    // project dir, with the model chosen from `docs` when this run creates
+    // the index.
 
     let attempt = || -> Result<()> {
-        let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+        // Load the model first: a failed download must not leave a database
+        // pinned to a model that never loaded.
         let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
+        let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
         let indexer = Indexer::new(
             engine,
             cfg.max_chunk_tokens,
@@ -1017,6 +1039,13 @@ fn write_atomic(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `run_initial_index` changes the process cwd for the duration of the
+    /// indexing call and restores it on return. Several tests exercise that path
+    /// and cannot run concurrently under the default parallel harness; this
+    /// lock serialises them. Recover a poisoned lock rather than propagate the
+    /// panic — one earlier test failing must not hang or fail every later one.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn write_atomic_creates_and_replaces() {
@@ -1334,16 +1363,47 @@ second
     fn polaris_toml_round_trips_into_the_real_config() {
         // A template that does not parse would only surface the next time the
         // user ran any polaris command, as a startup error on a file they did
-        // not write.
-        // Loaded through PolarisConfig::load rather than a bare parser, so the
-        // test covers the path a user's next polaris command actually takes.
+        // not write. Loaded through PolarisConfig::load, the path a user's next
+        // polaris command actually takes.
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("polaris.toml");
-        std::fs::write(&file, polaris_toml_content(0.63)).unwrap();
+        std::fs::write(&file, polaris_toml_content()).unwrap();
 
-        let parsed = PolarisConfig::load(Some(&file)).expect("template must load");
-        assert!((parsed.search_min_similarity - 0.63).abs() < f32::EPSILON);
+        let mut parsed = PolarisConfig::load(Some(&file)).expect("template must load");
+        assert_eq!(
+            parsed.explicit,
+            polaris_core::config::Explicit::default(),
+            "the template must pin nothing"
+        );
+        parsed.db_path = dir.path().join("polaris.db");
+        polaris_core::config::resolve_effective(&mut parsed);
+        assert_eq!(parsed.search_min_similarity, Some(0.63), "unset follows the default model");
         parsed.validate().expect("template must pass config validation");
+    }
+
+    #[test]
+    fn polaris_toml_has_no_live_threshold() {
+        let rendered = polaris_toml_content();
+        assert!(
+            !rendered.lines().any(|l| l.trim_start().starts_with("search_min_similarity")),
+            "a live key would pin the threshold for whatever model the index gets"
+        );
+    }
+
+    #[test]
+    fn polaris_toml_lists_every_models_threshold_default() {
+        let rendered = polaris_toml_content();
+        for model in polaris_core::embedding::SUPPORTED_MODELS {
+            let line = rendered
+                .lines()
+                .find(|l| l.split_whitespace().nth(1) == Some(*model))
+                .unwrap_or_else(|| panic!("no threshold line for {model}"));
+            let expected = match polaris_core::embedding::default_threshold_for(model).unwrap() {
+                Some(t) => format!("{t:.2}"),
+                None => "uncalibrated".to_string(),
+            };
+            assert_eq!(line.split_whitespace().nth(2), Some(expected.as_str()), "{line}");
+        }
     }
 
     /// Uncomment every reference line in the template. Prose comments are left
@@ -1375,9 +1435,7 @@ second
         // ships a file quietly documenting a value the code no longer uses —
         // and the user would only find out by trusting it.
         let defaults = PolarisConfig::default();
-        let revived = uncomment_reference_lines(&polaris_toml_content(
-            defaults.search_min_similarity,
-        ));
+        let revived = uncomment_reference_lines(&polaris_toml_content());
 
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("polaris.toml");
@@ -1402,27 +1460,6 @@ second
         assert!((loaded.heading_boost - defaults.heading_boost).abs() < f32::EPSILON);
 
         loaded.validate().expect("the documented defaults must be a valid config");
-    }
-
-    #[test]
-    fn live_key_precedes_the_commented_eval_table() {
-        // TOML puts every top-level key before any table. If the live key drifted
-        // below the commented [eval] block, uncommenting that block would pull
-        // search_min_similarity into the table and break the file.
-        let rendered = polaris_toml_content(0.63);
-        let live = rendered.find("\nsearch_min_similarity = ").expect("live key");
-        let table = rendered.find("# [eval]").expect("eval reference");
-        assert!(live < table, "the live key must stay above the [eval] table");
-    }
-
-    #[test]
-    fn polaris_toml_reflects_the_configured_value_not_a_literal() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("polaris.toml");
-        std::fs::write(&file, polaris_toml_content(0.42)).unwrap();
-
-        let parsed = PolarisConfig::load(Some(&file)).unwrap();
-        assert!((parsed.search_min_similarity - 0.42).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1941,11 +1978,88 @@ second
     }
 
     #[test]
+    fn initial_index_with_an_unloadable_model_creates_no_database() {
+        // run_initial_index switches the process cwd and restores it; CWD_LOCK
+        // serialises this against the other two setup tests that do the same.
+        let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        register_vec_for_test();
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs").join("a.md"), "# A\n\nSome text.\n").unwrap();
+        let db_path = dir.path().join("polaris.db");
+        let mut cfg = PolarisConfig::default();
+        cfg.db_path = db_path.clone();
+        cfg.apply_overrides(None, None, Some("bad-model".into()));
+
+        run_initial_index(&cfg, dir.path()).expect("the initial index is non-fatal");
+        assert!(!db_path.exists(), "a failed model load must leave no database behind");
+    }
+
+    /// `run_initial_index` is documented non-fatal: setup must finish and write
+    /// its files even when the project's polaris.db cannot be indexed into.
+    #[test]
+    fn setup_over_an_incomplete_index_still_completes() {
+        let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        register_vec_for_test();
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs").join("a.md"), "# A\n\nSome text.\n").unwrap();
+        let db_path = dir.path().join("polaris.db");
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO metadata (key, value) VALUES ('schema_version', '4'), ('embedding_dim', '512');",
+            )
+            .unwrap();
+
+        run(&PolarisConfig::default(), dir.path(), false, false, false)
+            .expect("the initial index is non-fatal");
+
+        assert!(dir.path().join(".mcp.json").exists());
+        assert!(dir.path().join(".gitignore").exists());
+        assert!(dir.path().join(".claude/settings.json").exists());
+
+        // The gate fires before the model loads, so nothing was written to the
+        // file either — it still holds only the metadata table it came with.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(tables, vec!["metadata".to_string(), "sqlite_autoindex_metadata_1".to_string()]);
+    }
+
+    #[test]
+    #[ignore = "downloads ~1.2 GB EmbeddingGemma ONNX model; run with `cargo test -- --include-ignored`"]
+    fn initial_index_of_french_docs_selects_gemma_under_the_project_dir() {
+        // `db_path` is relative, as in a default polaris.toml: selection must
+        // look for it (and index `docs`) from the project dir, not the caller's cwd.
+        const FR_PROSE: &str = include_str!("../../polaris-core/tests/fixtures/fr_prose.md");
+        let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        register_vec_for_test();
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs").join("guide.md"), format!("# Guide\n\n{FR_PROSE}\n")).unwrap();
+        let cfg = PolarisConfig { db_path: PathBuf::from("polaris.db"), ..PolarisConfig::default() };
+
+        run_initial_index(&cfg, dir.path()).unwrap();
+        assert_eq!(
+            polaris_core::db::read_index_metadata(&dir.path().join("polaris.db")).model_id.as_deref(),
+            Some("embeddinggemma-300m")
+        );
+    }
+
+    #[test]
     #[ignore = "downloads ~137 MB ONNX model; run with `cargo test -- --include-ignored`"]
     fn run_runs_initial_index_when_hooks_installed() {
         use polaris_core::config::PolarisConfig;
         use polaris_core::db::Database;
 
+        let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         register_vec_for_test();
 
         let dir = TempDir::new().unwrap();
@@ -2042,11 +2156,13 @@ second
         // Claude Code's absolute payload using `cwd` and compares against
         // `docs/foo.md` — any other prefix would silently no-op.
         //
-        // NOTE: mutates process CWD via set_current_dir. Don't run in
-        // parallel with other CWD-mutating tests.
+        // Mutates process CWD via set_current_dir; CWD_LOCK (declared above,
+        // in this same `mod tests`) serialises this against the other two
+        // setup tests that do the same.
         use polaris_core::config::PolarisConfig;
         use polaris_core::db::Database;
 
+        let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         register_vec_for_test();
 
         let parent = TempDir::new().unwrap();

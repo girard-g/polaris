@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 use crate::error::{PolarisError, Result};
 
@@ -216,6 +216,107 @@ pub fn register_vec_extension() {
 }
 
 // ---------------------------------------------------------------------------
+// Read-only metadata peek
+// ---------------------------------------------------------------------------
+
+/// Model and dimension recorded in an index.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexMetadata {
+    pub model_id: Option<String>,
+    pub embedding_dim: Option<usize>,
+}
+
+/// Peek at the metadata of the index at `path` without creating or modifying it.
+///
+/// Used to resolve the effective model before anything opens the index for
+/// real. Every failure — no file, not a database, no metadata table — yields
+/// empty metadata, so the caller falls through to its next source and the
+/// subsequent `Database::open` reports any genuine problem.
+pub fn read_index_metadata(path: &Path) -> IndexMetadata {
+    if !path.is_file() {
+        return IndexMetadata::default();
+    }
+    let Ok(conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return IndexMetadata::default();
+    };
+    let value = |key: &str| -> Option<String> {
+        conn.query_row("SELECT value FROM metadata WHERE key = ?1", [key], |r| r.get(0))
+            .ok()
+    };
+    IndexMetadata {
+        model_id: value("model_id"),
+        embedding_dim: value("embedding_dim").and_then(|v| v.parse().ok()),
+    }
+}
+
+/// What is at an index path. The one definition of "does an index exist", for
+/// every caller that must not act on a database that is not there yet.
+///
+/// Not `path.exists()`: `Connection::open` creates the file before any schema,
+/// so `touch polaris.db` and a stray non-Polaris database both pass `exists()`
+/// while holding no index. Taking those for an index skips model selection (an
+/// English default on a French corpus) and turns a clear "no index" message
+/// into a confusing failure further down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexState {
+    /// Nothing usable here — no file, not a database, or no `metadata` table.
+    /// Indexing this path creates the index, exactly as for a missing file.
+    Absent,
+    /// A schema, but no stored model: an interrupted run of a version that
+    /// created the schema outside a transaction. It cannot be completed (the
+    /// model that built its `vec_chunks` table is unknown) and must not be
+    /// mistaken for an absent index, whose remedy is the opposite — indexing.
+    Incomplete,
+    /// A complete index, model and all.
+    Complete,
+}
+
+/// Classify the index at `path` without creating or modifying anything.
+///
+/// The stored `model_id` is written by the same transaction that creates the
+/// schema, so it is present exactly when the index is complete.
+pub fn index_state(path: &Path) -> IndexState {
+    if !path.is_file() {
+        return IndexState::Absent;
+    }
+    let Ok(conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return IndexState::Absent;
+    };
+    let has_metadata = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .is_ok_and(|row| row.is_some());
+    if !has_metadata {
+        return IndexState::Absent;
+    }
+    match conn
+        .query_row("SELECT value FROM metadata WHERE key='model_id'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()
+    {
+        Ok(Some(_)) => IndexState::Complete,
+        Ok(None) => IndexState::Incomplete,
+        // A `metadata` table of some other shape — a foreign database, not a
+        // Polaris index we half-wrote. `Database::open` reports it as a plain
+        // `Database` error, so classifying it `Incomplete` would have the two
+        // disagree and would promise a remedy ("delete the file") for someone
+        // else's data.
+        Err(_) => IndexState::Absent,
+    }
+}
+
+/// Whether a complete index exists at `path`. Shorthand for [`index_state`]
+/// where the caller has nothing different to say about an incomplete one.
+pub fn has_index(path: &Path) -> bool {
+    index_state(path) == IndexState::Complete
+}
+
+// ---------------------------------------------------------------------------
 // Database
 // ---------------------------------------------------------------------------
 
@@ -228,7 +329,7 @@ impl Database {
         let conn = Connection::open(path)?;
         apply_pragmas(&conn)?;
         let mut db = Self { conn, embedding_dim: config_dim, model_id: config_model_id.to_string() };
-        db.init_schema(config_dim, config_model_id)?;
+        db.init_schema(path, config_dim, config_model_id)?;
         Ok(db)
     }
 
@@ -237,11 +338,11 @@ impl Database {
         let conn = Connection::open_in_memory()?;
         apply_pragmas(&conn)?;
         let mut db = Self { conn, embedding_dim, model_id: model_id.to_string() };
-        db.init_schema(embedding_dim, model_id)?;
+        db.init_schema(Path::new(":memory:"), embedding_dim, model_id)?;
         Ok(db)
     }
 
-    fn init_schema(&mut self, config_dim: usize, config_model_id: &str) -> Result<()> {
+    fn init_schema(&mut self, path: &Path, config_dim: usize, config_model_id: &str) -> Result<()> {
         // Check whether schema already exists.
         let table_count: i64 = self.conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='metadata'",
@@ -253,6 +354,38 @@ impl Database {
             // Fresh database — create everything.
             self.create_schema(config_dim, config_model_id)?;
         } else {
+            // Validate model ID first: when both differ, the model is the
+            // actionable cause and the dimension only its consequence.
+            let stored_model: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='model_id'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+
+            match stored_model {
+                Some(db_model) if db_model != config_model_id => {
+                    return Err(PolarisError::ModelMismatch {
+                        db_model,
+                        config_model: config_model_id.to_string(),
+                    });
+                }
+                Some(_) => {}
+                // Tables but no stored model: an interrupted run of a version
+                // that created the schema outside a transaction. Creation is
+                // atomic now, so this can only be an old leftover — and it can
+                // never be completed, since the model that built those tables
+                // is unknown. Say so instead of adopting whatever model this
+                // run happens to resolve.
+                None => {
+                    return Err(PolarisError::IncompleteIndex {
+                        path: path.display().to_string(),
+                    });
+                }
+            }
+
             // Existing database — validate dimension.
             let stored_dim: Option<String> = self
                 .conn
@@ -274,25 +407,6 @@ impl Database {
                     });
                 }
                 self.embedding_dim = db_dim;
-            }
-
-            // Validate model ID.
-            let stored_model: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT value FROM metadata WHERE key='model_id'",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()?;
-
-            if let Some(db_model) = stored_model {
-                if db_model != config_model_id {
-                    return Err(PolarisError::ModelMismatch {
-                        db_model,
-                        config_model: config_model_id.to_string(),
-                    });
-                }
             }
 
             // Apply any pending schema migrations.
@@ -410,8 +524,17 @@ impl Database {
         Ok(())
     }
 
-    fn create_schema(&self, dim: usize, model_id: &str) -> Result<()> {
-        self.conn.execute_batch("
+    /// Create the whole schema, metadata row included, in one transaction.
+    ///
+    /// All of it or none of it: a crash or an error part-way through must not
+    /// leave a file that looks like an index (tables present) but has no stored
+    /// model — [`has_index`] would call that file an index forever, and nothing
+    /// would ever finish creating it. Dropping the guard without committing
+    /// rolls back, so the error paths need no cleanup of their own.
+    fn create_schema(&mut self, dim: usize, model_id: &str) -> Result<()> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        tx.execute_batch("
             CREATE TABLE metadata (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -473,15 +596,16 @@ impl Database {
         ")?;
 
         // The vec0 table dimension is baked in, so we create it dynamically.
-        self.conn.execute_batch(&format!(
+        tx.execute_batch(&format!(
             "CREATE VIRTUAL TABLE vec_chunks USING vec0(
                 chunk_id  INTEGER PRIMARY KEY,
                 embedding float[{dim}] distance_metric=cosine
             );"
         ))?;
 
-        // Store metadata.
-        self.conn.execute(
+        // Store metadata. Written inside the same transaction as the tables:
+        // its presence is what tells every later caller the index is complete.
+        tx.execute(
             "INSERT INTO metadata (key, value) VALUES
                 ('schema_version', ?1),
                 ('embedding_dim',  ?2),
@@ -489,6 +613,7 @@ impl Database {
             params![SCHEMA_VERSION, dim.to_string(), model_id],
         )?;
 
+        tx.commit()?;
         Ok(())
     }
 
@@ -1601,6 +1726,20 @@ mod tests {
     }
 
     #[test]
+    fn model_mismatch_is_reported_before_dimension_mismatch() {
+        // Both differ: the model is the actionable cause, the dim a consequence.
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("both.db");
+        { let _db = Database::open(&db_path, 1024, "mxbai-embed-large-v1").unwrap(); }
+
+        assert!(matches!(
+            Database::open(&db_path, 512, "nomic-embed-text-v1.5"),
+            Err(PolarisError::ModelMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn same_model_id_opens_successfully() {
         INIT.call_once(register_vec_extension);
         let dir = tempfile::tempdir().unwrap();
@@ -1611,6 +1750,225 @@ mod tests {
         // Same model → no error.
         let db = Database::open(&db_path, 4, "nomic-embed-text-v1.5").unwrap();
         assert_eq!(db.model_id, "nomic-embed-text-v1.5");
+    }
+
+    // -----------------------------------------------------------------------
+    // read_index_metadata
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn metadata_peek_on_a_missing_file_is_empty_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.db");
+        assert_eq!(read_index_metadata(&path), IndexMetadata::default());
+        assert!(!path.exists(), "the peek must never create a database");
+    }
+
+    #[test]
+    fn metadata_peek_reads_model_and_dim_of_a_closed_index() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("closed.db");
+        { let _db = Database::open(&path, 768, "embeddinggemma-300m").unwrap(); }
+
+        assert_eq!(
+            read_index_metadata(&path),
+            IndexMetadata { model_id: Some("embeddinggemma-300m".into()), embedding_dim: Some(768) }
+        );
+    }
+
+    #[test]
+    fn metadata_peek_reads_an_index_another_connection_holds_open() {
+        // `polaris serve` keeps its connection open in WAL mode while hooks peek.
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("open.db");
+        let _held = Database::open(&path, 512, "nomic-embed-text-v1.5").unwrap();
+
+        assert_eq!(
+            read_index_metadata(&path),
+            IndexMetadata { model_id: Some("nomic-embed-text-v1.5".into()), embedding_dim: Some(512) }
+        );
+    }
+
+    #[test]
+    fn metadata_peek_on_a_database_without_metadata_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
+        }
+        assert_eq!(read_index_metadata(&path), IndexMetadata::default());
+    }
+
+    #[test]
+    fn metadata_peek_on_a_file_that_is_not_a_database_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("garbage.db");
+        std::fs::write(&path, b"this is not an sqlite database, just bytes").unwrap();
+        assert_eq!(read_index_metadata(&path), IndexMetadata::default());
+    }
+
+    #[test]
+    fn metadata_peek_keeps_the_dim_of_an_index_that_records_no_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO metadata (key, value) VALUES ('embedding_dim', '256');",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            read_index_metadata(&path),
+            IndexMetadata { model_id: None, embedding_dim: Some(256) }
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Atomic schema creation
+    // -----------------------------------------------------------------------
+
+    /// vec0 builds shadow tables; this proves it can do so inside the schema
+    /// transaction and that the resulting table stores and returns vectors.
+    #[test]
+    fn the_vec_table_created_in_the_schema_transaction_is_usable() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vec.db");
+        let db = Database::open(&path, 4, "test").unwrap();
+
+        let emb: Vec<u8> = [1.0f32, 0.0, 0.0, 0.0].iter().flat_map(|f| f.to_le_bytes()).collect();
+        db.conn
+            .execute("INSERT INTO vec_chunks (chunk_id, embedding) VALUES (7, ?1)", params![emb])
+            .unwrap();
+        let got: i64 = db
+            .conn
+            .query_row("SELECT chunk_id FROM vec_chunks WHERE chunk_id = 7", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(got, 7);
+    }
+
+    #[test]
+    fn a_failed_schema_creation_leaves_no_tables_behind() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.db");
+
+        // dim 0 is rejected by vec0, i.e. after the plain tables were created.
+        assert!(Database::open(&path, 0, "test").is_err());
+
+        // The file itself survives (`Connection::open` made it); no schema may.
+        let conn = Connection::open(&path).unwrap();
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(names.is_empty(), "rollback must leave no schema behind, found {names:?}");
+        drop(conn);
+
+        // The whole point: the retry must be able to create the schema, which a
+        // surviving vec0 shadow table would block with "table already exists".
+        drop(Database::open(&path, 4, "test").expect("a rolled-back file must be re-creatable"));
+        assert!(has_index(&path));
+    }
+
+    #[test]
+    fn opening_an_index_without_a_stored_model_fails_loudly() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("interrupted.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO metadata (key, value) VALUES ('embedding_dim', '4');",
+            )
+            .unwrap();
+        }
+
+        let err = match Database::open(&path, 4, "test") {
+            Ok(_) => panic!("an index with no stored model must not open"),
+            Err(e) => e.to_string(),
+        };
+        // The path as the caller spelled it, like every sibling message.
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("delete the file and re-index"), "{err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // has_index
+    // -----------------------------------------------------------------------
+
+    /// Build the file an interrupted run of a pre-transaction version left:
+    /// a schema that records a dimension but no model.
+    fn incomplete_index(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO metadata (key, value) VALUES ('schema_version', '4'), ('embedding_dim', '4');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn index_state_tells_absent_from_incomplete_from_complete() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+
+        let missing = dir.path().join("missing.db");
+        let empty = dir.path().join("empty.db");
+        let garbage = dir.path().join("garbage.db");
+        let foreign = dir.path().join("foreign.db");
+        let foreign_metadata = dir.path().join("foreign_metadata.db");
+        let partial = dir.path().join("partial.db");
+        let real = dir.path().join("real.db");
+
+        std::fs::write(&empty, b"").unwrap();
+        std::fs::write(&garbage, b"not an sqlite database at all").unwrap();
+        Connection::open(&foreign).unwrap().execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
+        // A `metadata` table that is not ours: no `key`/`value` columns.
+        Connection::open(&foreign_metadata)
+            .unwrap()
+            .execute_batch("CREATE TABLE metadata (id INTEGER PRIMARY KEY, note TEXT);")
+            .unwrap();
+        incomplete_index(&partial);
+        drop(Database::open(&real, 4, "test").unwrap());
+
+        for absent in [&missing, &empty, &garbage, &foreign, &foreign_metadata] {
+            assert_eq!(index_state(absent), IndexState::Absent, "{}", absent.display());
+        }
+        assert_eq!(index_state(&partial), IndexState::Incomplete);
+        assert_eq!(index_state(&real), IndexState::Complete);
+        assert!(!missing.exists(), "the check must never create a database");
+    }
+
+    #[test]
+    fn has_index_is_false_for_a_missing_or_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.db");
+        let empty = dir.path().join("empty.db");
+        std::fs::write(&empty, b"").unwrap();
+
+        assert!(!has_index(&missing));
+        assert!(!has_index(&empty));
+        assert!(!missing.exists(), "the check must never create a database");
+    }
+
+    #[test]
+    fn has_index_is_true_for_a_created_index() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("real.db");
+        { let _db = Database::open(&path, 4, "test").unwrap(); }
+
+        assert!(has_index(&path));
     }
 
     // -----------------------------------------------------------------------

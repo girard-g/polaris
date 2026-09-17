@@ -2,6 +2,92 @@
 
 All notable changes to Polaris are documented in this file.
 
+## [2.4.0] - 2026-09-17
+
+Indexing spent more memory and time than the corpus needed, one model served
+every language equally badly, and a threshold tuned for one model silently
+followed you onto the next. This release cuts indexing memory and speeds it
+up, picks the embedding model from the corpus instead of a fixed default, and
+gives every model its own calibrated threshold.
+
+### Added
+
+- **Corpus-aware model selection.** The run that creates an index measures the
+  Markdown it reads and picks `nomic-embed-text-v1.5` when at least 90% of the
+  prose (by bytes, over files with 100+ prose words, code blocks excluded) is
+  English, or there is nothing to measure — `embeddinggemma-300m` otherwise.
+  The choice is recorded in the database. Only the creating run's own files
+  are ever measured: indexing an English folder first and a French one later
+  keeps nomic, and re-selection requires deleting the database and
+  re-indexing. An explicit `model_id`, from `polaris.toml` or `--model`,
+  always wins over selection.
+- **`nomic-embed-text-v1.5-quantized`**, an opt-in int8-quantized nomic
+  variant — faster indexing and search start-up for a small recall cost. See
+  [Embedding → Quantized nomic](docs/embedding.md#quantized-nomic).
+- **A default `search_min_similarity` per model.** `nomic-embed-text-v1.5` and
+  its quantized variant default to 0.63, `embeddinggemma-300m` to 0.42;
+  `all-minilm-l6-v2` and `mxbai-embed-large-v1` have no calibrated default, so
+  search stays ungated and the auto-search hook stays silent on them.
+  `polaris status` and `polaris eval --output json` now report
+  `threshold_source` (`explicit`, `model_default`, or `uncalibrated`)
+  alongside the threshold itself. A `search_min_similarity` pinned in
+  `polaris.toml` that drifts from its model's default — or is pinned on a
+  model with no default at all — now prints a warning naming the gap.
+
+### Changed
+
+- **Indexing is ~2.2× faster at ~6× less peak memory.** Chunks are now
+  embedded one at a time instead of batched 32 at a time: on a 995-chunk
+  corpus, 4.2 → 9.4 chunks/s and 6.5 GB → 1.0 GB peak RSS, with identical eval
+  metrics. See [Embedding → Batch Size](docs/embedding.md#batch-size).
+- **`polaris setup` no longer pins `search_min_similarity`** in the starter
+  `polaris.toml`. The key now tracks its resolved model's built-in default
+  across upgrades instead of freezing today's value.
+- **Index creation is atomic.** The schema and the stored model are written in
+  one transaction, so an interrupted `polaris index` leaves either a complete
+  index or a file with no schema at all — never a half-written one that could
+  be mistaken for either. `db::index_state` is now the one definition of what
+  is at an index path (`Absent` / `Incomplete` / `Complete`), used everywhere
+  that used to ask only `has_index`.
+- **`polaris serve` no longer creates an empty index.** Before any index
+  exists, the embedding model now loads on the first `index` call instead of
+  at server startup.
+
+### Fixed
+
+- **A half-created database from an interrupted run was indistinguishable
+  from "no index".** It now reports a distinct `Incomplete index at <path>`
+  error naming the file and telling you to delete it and re-index, rather
+  than being silently treated as absent everywhere, or accepted as a usable
+  index with no recorded model.
+- **The write hook went permanently silent on an incomplete index.** Because
+  it gated on the same check as "no index yet", a legacy half-created
+  database stopped all auto-indexing on every file save with no way to learn
+  why. It now prints one line to stderr naming the file and the remedy; the
+  search hook was already silent for this case and stays that way.
+- **A `~~~`-fenced code block was counted as prose.** Corpus language
+  measurement (and `polaris eval`'s sentence sampling) only recognised
+  `` ``` `` fences; a long `~~~` block could inflate a corpus's measured
+  English share enough to select the wrong embedding model. Both fence forms
+  are now recognised, with a matching-delimiter rule — a block opened with
+  one marker closes only on that same marker.
+
+### Breaking (library API)
+
+- `PolarisConfig.search_min_similarity` is now `Option<f32>` (was `f32`), and
+  `PolarisConfig` gained an `explicit` field recording which model-dependent
+  settings the caller actually set rather than defaulted.
+- `PolarisState.bank` is now a lazily initialised `OnceCell`, not an eagerly
+  opened value.
+- `eval::format_report` and `eval::report_json` now take an additional
+  `&PolarisConfig` parameter.
+- `setup::polaris_toml_content()` now takes no argument.
+- `polaris status --output json` and `polaris eval --output json` gained a
+  `threshold_source` field, and their threshold field is now nullable.
+
+See [Upgrading from 2.3](docs/configuration.md#upgrading-from-23) for what to
+expect on each upgrade path.
+
 ## [2.3.0] - 2026-09-08
 
 Search reported a number that could not mean anything outside its own result

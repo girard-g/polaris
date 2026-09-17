@@ -2,19 +2,22 @@
 
 ## Supported Models
 
-| Model ID | Native dim | Default dim | Download |
-|----------|-----------|-------------|---------|
-| `nomic-embed-text-v1.5` (default) | 768 | 512 | ~137 MB |
-| `mxbai-embed-large-v1` | 1024 | 1024 | ~670 MB |
-| `all-minilm-l6-v2` | 384 | 384 | ~23 MB |
+| Model ID | Native dim | Default dim | Default threshold | Download |
+|----------|-----------|-------------|-------------------|---------|
+| `nomic-embed-text-v1.5` | 768 | 512 | 0.63 | ~522 MB |
+| `nomic-embed-text-v1.5-quantized` | 768 | 512 | 0.63 | ~131 MB |
+| `embeddinggemma-300m` | 768 | 768 | 0.42 | ~1.2 GB |
+| `mxbai-embed-large-v1` | 1024 | 1024 | uncalibrated | ~670 MB |
+| `all-minilm-l6-v2` | 384 | 384 | uncalibrated | ~23 MB |
 
 All models run via ONNX on CPU. Model files are cached in a user-global directory shared across projects (default `~/.cache/polaris/models/`; overridable via `POLARIS_CACHE_DIR`). See [Configuration → Model Caching](configuration.md#model-caching).
 
 ## Matryoshka Truncation
 
-`nomic-embed-text-v1.5` supports Matryoshka Representation Learning — the first N
-dimensions of the full 768-dim vector are independently meaningful.
-Polaris defaults to 512 dims for nomic (good balance of quality vs. storage).
+`nomic-embed-text-v1.5` (and its quantized variant) and `embeddinggemma-300m` support Matryoshka
+Representation Learning — the first N dimensions of the full 768-dim vector are independently
+meaningful. Polaris defaults to 512 dims for nomic (good balance of quality vs. storage) and 768
+for `embeddinggemma-300m`, the configuration it was measured at.
 `mxbai` and `all-minilm` do not support truncation; their native dim is used.
 
 ## Task Prefixes
@@ -24,16 +27,48 @@ Each model requires specific prefixes to be prepended before encoding:
 | Model | Document prefix | Query prefix |
 |-------|----------------|--------------|
 | `nomic-embed-text-v1.5` | `search_document: ` | `search_query: ` |
+| `nomic-embed-text-v1.5-quantized` | `search_document: ` | `search_query: ` |
+| `embeddinggemma-300m` | `title: none \| text: ` | `task: search result \| query: ` |
 | `mxbai-embed-large-v1` | _(none)_ | `Represent this sentence for searching relevant passages: ` |
 | `all-minilm-l6-v2` | _(none)_ | _(none)_ |
 
 Polaris applies prefixes automatically — no user action required.
 
-## Switching Models
+## Quantized nomic
 
-Changing models requires re-indexing from scratch. The database stores the model ID
-in the `metadata` table; opening a database with a mismatched model produces a clear
-error and suggests deleting the database and re-indexing.
+`nomic-embed-text-v1.5-quantized` is the same model with int8 weights. Measured against
+the default on a Ryzen 7 8840HS (CPU, batch size 1):
+
+| | `nomic-embed-text-v1.5` | `-quantized` |
+|---|---|---|
+| Indexing, English docs (862 chunks) | 9.5 chunks/s, 1.0 GB peak RSS | 21.0 chunks/s, 431 MB |
+| Indexing, French docs (1,128 chunks) | 11.7 chunks/s, 1.1 GB | 26.2 chunks/s, 448 MB |
+| Cold `polaris search` (process start → result) | 728 ms | 318 ms |
+| English, 40 real queries: Recall@1 / @3 / MRR@5 | 75.0% / 87.5% / 0.805 | 72.5% / 80.0% / 0.771 |
+| French, `polaris eval`: recall@1 / MRR | 0.85 / 0.88 | 0.87 / 0.89 |
+
+Pick it when indexing time, memory, or the search hook's cold-start latency matter more than
+the last few points of recall. The English real-query gap is 3 queries out of 40 — inside the
+noise at that sample size, but it is the one test where the quantized model lost. Run
+`polaris eval` on your own corpus after switching; the suggested `search_min_similarity`
+stayed at 0.63–0.64 in the measurements above.
+
+Its vectors are not interchangeable with the fp32 model's (quantized queries against an fp32
+index scored worse than either model alone), so it has its own `model_id` and switching
+requires a re-index like any other model change.
+
+## Choosing and Switching Models
+
+Unset, `model_id` is chosen once, by the run that creates the index, from the Markdown that run reads. It is `nomic-embed-text-v1.5` when at least 90% of the prose (by bytes, over files with 100+ prose words, code blocks excluded) is English, and `embeddinggemma-300m` otherwise. See [Configuration → Model Selection](configuration.md#model-selection).
+
+Why two models, measured on real queries:
+
+- **English-only corpus.** On this repo's docs (40 queries), nomic keeps the better top-1: Recall@1 75% vs 65%. That matters because the auto-search hook injects top-1 only.
+- **French/English corpus.** On 92 logged queries, EmbeddingGemma separates answerable queries from plausible-but-absent ones far better (AUC 0.959 vs 0.852). It also retrieves at least as well in every query language (same-language Recall@3 72.5% vs 60.0%).
+
+Changing models requires re-indexing from scratch. The database stores the model ID in the `metadata` table. Opening a database with a mismatched model produces a clear error that suggests deleting the database and re-indexing.
+
+The choice sees only the files of the run that creates the index. Indexing an English folder first and a French one later keeps nomic; delete the database and re-index to choose again.
 
 ## Embedding Pipeline
 
@@ -89,4 +124,4 @@ The lock is acquired only for the duration of the `embed()` call and released im
 
 ## Batch Size
 
-During indexing, chunks are embedded in batches of **32** (`EMBED_BATCH_SIZE = 32`). This is a memory-efficiency trade-off: larger batches are faster but require more RAM.
+During indexing, chunks are embedded one at a time (`EMBED_BATCH_SIZE = 1`). fastembed pads each batch to its longest sequence and ONNX Runtime already uses every core for a single sequence, so on CPU larger batches are both slower and far heavier on RAM (batch 32: 4.2 chunks/s at 6.5 GB; batch 1: 9.4 chunks/s at 1.0 GB). See [indexing.md](indexing.md#why-batch-size-1).

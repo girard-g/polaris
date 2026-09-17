@@ -38,6 +38,10 @@ Search indexed documentation using semantic similarity.
 
 **Returns:** Markdown-formatted string with scored results.
 
+Below `search_min_similarity` it returns `No reliable context found (best match …, threshold …)` instead of results. When the index's model has no calibrated threshold, results are returned unfiltered followed by one line suggesting `polaris eval`.
+
+If no index exists yet, `search`, `status` and `eval` answer ``No index yet at <path> — call the `index` tool with your docs path (or run `polaris index <path>`), then try again.`` "Exists" means the database records a model, not that the file is there: a file with no schema (`touch polaris.db`, or another SQLite database) is no index, and gets the same answer. A file that carries a schema but no stored model instead answers ``Incomplete index at <path> — an earlier run was interrupted before it recorded its model, so it cannot be completed. Delete the file and index again.`` — including from `index`, which checks before it selects or downloads a model.
+
 **Example response:**
 
 ```markdown
@@ -78,6 +82,8 @@ Unchanged: 8 files
 ```
 
 If the path does not exist, returns: `Error: path not found: <path>`
+
+When no index exists yet, `index` creates it. The server itself never creates a database: started before any index exists, it loads no model and opens no bank until the first `index` call, or until a database created by a CLI `polaris index` appears.
 
 ---
 
@@ -135,14 +141,20 @@ All four tools share a single `PolarisState`:
 
 ```rust
 PolarisState {
-    config: Arc<PolarisConfig>,
-    bank:   polaris_core::Bank,  // Arc<BankInner> with Mutex<Database> inside
+    config: Arc<PolarisConfig>,             // as resolved at startup
+    bank:   Arc<OnceCell<OpenIndex>>,       // opened at startup or on first use
+}
+OpenIndex {
+    config: Arc<PolarisConfig>,             // model, dim, threshold resolved from the index
+    bank:   polaris_core::Bank,             // Arc<BankInner> with Mutex<Database> inside
 }
 ```
 
+When a database exists at startup, `polaris serve` loads the model and opens the bank immediately, so the first search is warm. When none exists, it creates nothing: the first `index` call opens (and creates) it, and the first `search`/`status`/`eval` call opens a database that has appeared since — for example one built by `polaris index` in a terminal. Indexing through the MCP `index` tool therefore pays the ~1 s model load on that call itself; only an index built with the CLI defers the load to the next `search`/`status`/`eval` call.
+
 `Bank` is cheaply cloneable (`Arc<BankInner>` internally) and serialises concurrent access through its own `Mutex<Database>`. MCP tool calls are typically serial, so this single-connection model is acceptable. The underlying SQLite connection runs in WAL mode.
 
-Each tool clones the `config` / `bank` handle and offloads all blocking work to `tokio::task::spawn_blocking`. The DB mutex is acquired inside the blocking closure — never across an `.await` point.
+Each tool clones the `OpenIndex` handles and offloads all blocking work to `tokio::task::spawn_blocking`. The DB mutex is acquired inside the blocking closure — never across an `.await` point.
 
 ## Error Handling in Tools
 
@@ -182,7 +194,7 @@ The hooks are a Claude Code feature; Codex, Cursor, and Gemini CLI users keep us
 
 ### Search hook performance
 
-The search hook loads the ONNX embedding model (~140 MB) on every qualifying prompt, adding ~1 second of latency before Claude starts responding. This is a deliberate trade-off: guaranteed doc grounding vs. speed.
+The search hook loads the ONNX embedding model on every qualifying prompt, adding ~1 second of latency before Claude starts responding. This is a deliberate trade-off: guaranteed doc grounding vs. speed. `model_id = "nomic-embed-text-v1.5-quantized"` roughly halves the cold-search time (728 → 318 ms measured) at a small recall cost — see [Embedding → Quantized nomic](embedding.md#quantized-nomic).
 
 | Scenario | Latency | What runs |
 |---|---|---|

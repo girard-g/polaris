@@ -4,14 +4,13 @@
 
 Polaris reads a TOML config file. All fields are optional; unset fields use their defaults.
 
-`polaris setup` writes a starter `polaris.toml` and gitignores it — it carries
-per-corpus tuning rather than anything a team shares. One key is live,
-`search_min_similarity`; every other setting follows commented out as a
-reference you can uncomment as needed. Prefer leaving keys commented: an unset
-key keeps tracking its built-in default through upgrades, whereas one written
-out is pinned to whatever it said the day you wrote it. Note that a
-project-local `polaris.toml` replaces the global one at
-`~/.config/polaris/polaris.toml` rather than merging with it.
+`polaris setup` writes a starter `polaris.toml` and gitignores it: it carries per-corpus tuning rather than anything a team shares. Every setting in it is commented out as a reference you can uncomment as needed, including a table of each model's default `search_min_similarity`.
+
+Prefer leaving keys commented. An unset key keeps tracking its built-in default through upgrades, whereas one written out is pinned to whatever it said the day you wrote it. This matters most for `model_id`, `embedding_dim` and `search_min_similarity`: unset, the first index chooses the model from your docs and the other two follow it (see [Model Selection](#model-selection)).
+
+A project-local `polaris.toml` replaces the global one at `~/.config/polaris/polaris.toml` rather than merging with it.
+
+The example below shows every key with its default value; `model_id`, `embedding_dim` and `search_min_similarity` stay commented for the reason above. Uncomment a line only to override it.
 
 ```toml
 # SQLite database file path (relative to CWD or absolute)
@@ -20,7 +19,8 @@ db_path = "polaris.db"
 # Embedding vector dimension
 # Must match the dimension already stored in the DB (checked on open)
 # Valid range: 64 to the model's native dimension (see "Supported Models" below)
-embedding_dim = 512
+# Unset, it follows the index, then the model default (512 for nomic).
+# embedding_dim = 512
 
 # Maximum chunk size in approximate tokens (1 token ≈ 4 chars)
 # Chunks that exceed this are split at paragraph/sentence/word boundaries
@@ -33,7 +33,8 @@ chunk_overlap_chars = 200
 # fastembed model identifier
 # Validated against the DB on every open — changing this requires deleting
 # the database and re-indexing all documents
-model_id = "nomic-embed-text-v1.5"
+# Unset, the first index that creates the database chooses it from your docs.
+# model_id = "nomic-embed-text-v1.5"
 
 # MMR lambda: 0.0 = pure diversity, 1.0 = pure relevance
 mmr_lambda = 0.7
@@ -52,9 +53,9 @@ rrf_k = 60
 # Cap on the `top_k` value accepted by search commands (prevents runaway queries)
 max_top_k = 50
 
-# Minimum query-to-chunk cosine similarity for the auto-search hook to inject
-# a result. Model-dependent: retune it if you change `model_id`.
-search_min_similarity = 0.63
+# Minimum query-to-chunk cosine similarity for the MCP search tool and the
+# auto-search hook. Unset, it follows the index's model (see Search Threshold).
+# search_min_similarity = 0.63
 
 # Maximum file size (in bytes) the indexer will process; larger files are skipped
 max_file_size = 10485760  # 10 MiB
@@ -80,25 +81,98 @@ Config is resolved in this order (first match wins):
 3. `~/.config/polaris/polaris.toml` — user-global config
 4. Built-in defaults (listed above)
 
+## Model Selection
+
+When `model_id` is not set, the run that creates the index chooses it. That run is `polaris setup` (initial index of `./docs`), `polaris index`, `polaris watch` or the MCP `index` tool, whichever comes first. It reads the Markdown files that run is about to index and measures how much of the prose is English:
+
+- 90% or more English prose, or nothing to measure → `nomic-embed-text-v1.5`
+- otherwise → `embeddinggemma-300m`
+
+The choice is printed once, before any download:
+
+```
+◆  model: embeddinggemma-300m (38% English prose) — set model_id to override
+```
+
+The model and dimension are then recorded in the database. Every later command, including both Claude Code hooks, reads them from there and derives the search threshold from that model's default (see [Search Threshold](#search-threshold)), so nothing needs to be written to `polaris.toml`.
+
+`polaris index --dry-run` against a project with no index yet still runs this choice — a dry run has no other way to show which model it would use — but nothing is recorded, since a dry run creates no database. The line is prefixed to say so:
+
+```
+◆  (dry run) model: embeddinggemma-300m (38% English prose) — set model_id to override — nothing recorded
+```
+
+How the share is measured:
+
+- Only files with at least 100 words of prose count.
+- Fenced code blocks are not prose.
+- A file is English when enough of its words are common English function words (*the*, *and*, *of*, …).
+- Each file weighs by its size.
+
+No other language is identified; everything that is not English is treated the same way.
+
+**The choice sees only the files of the run that creates the index.** Indexing `docs/en` first and adding `docs/fr` later keeps nomic. To choose again, delete the database and re-index, optionally with an explicit `model_id`.
+
+Setting `model_id` anywhere disables the choice for every index that config applies to. That includes a project `polaris.toml`, `--model`, and the global `~/.config/polaris/polaris.toml`.
+
 ## Defaults Reference
 
 | Field | Default | Constraints | Notes |
 |-------|---------|-------------|-------|
 | `db_path` | `"polaris.db"` | — | Relative to CWD |
-| `embedding_dim` | `512` | `[64, native_dim]` | Matryoshka truncation; upper bound depends on model |
+| `embedding_dim` | model default: 512 nomic, 768 `embeddinggemma-300m`, native otherwise | `[64, native_dim]` | Unset: taken from the index, then the model |
 | `max_chunk_tokens` | `450` | `> 0` | ≈ 1800 chars |
 | `chunk_overlap_chars` | `200` | `< max_chunk_tokens * 4` | Chars of overlap |
-| `model_id` | `"nomic-embed-text-v1.5"` | — | Validated on open; changing requires re-index |
+| `model_id` | chosen from the corpus by the first index | — | See [Model Selection](#model-selection); changing requires re-index |
 | `mmr_lambda` | `0.7` | — | 0 = diversity, 1 = relevance |
 | `mmr_candidate_multiplier` | `3` | — | Candidate pool = top_k × 3 |
 | `heading_boost` | `0.05` | — | Additive; 0.0 disables it |
 | `rrf_k` | `60` | — | RRF rank fusion constant |
 | `max_top_k` | `50` | — | Maximum `top_k` accepted by search commands |
-| `search_min_similarity` | `0.63` | `[0.0, 1.0]` | Auto-search hook confidence gate; retune per `model_id` |
+| `search_min_similarity` | model default: 0.63 nomic, 0.42 `embeddinggemma-300m`, uncalibrated otherwise | `[0.0, 1.0]` | See [Search Threshold](#search-threshold) |
 | `max_file_size` | `10485760` | `> 0` | 10 MiB; larger files are skipped during indexing |
-| `extra_db_paths` | `[]` | — | Additional read-only DBs fused into search (multi-DB) |
+| `extra_db_paths` | `[]` | — | Additional read-only DBs fused into search (multi-DB); each must be a **complete index** sharing the primary's model and dimension — a placeholder or empty file is rejected |
 | `eval.sample_size` | `200` | `> 0` | Sentences sampled per `polaris eval` run |
 | `eval.probes` | `[]` | — | Overrides built-in probes; empty means auto by language |
+
+## Search Threshold
+
+`search_min_similarity` gates the MCP `search` tool and the auto-search hook. Unset, it follows the model of the index:
+
+| Model | Default | Evidence |
+|---|---|---|
+| `nomic-embed-text-v1.5` | 0.63 | `polaris eval` midpoint on this repo; also the best threshold on its real-query gold set |
+| `nomic-embed-text-v1.5-quantized` | 0.63 | `polaris eval` suggested 0.63–0.64 |
+| `embeddinggemma-300m` | 0.42 | Midpoint of the best in-sample thresholds on real queries: 0.40 (this repo, English) and 0.44 (a French/English corpus). In-sample on both; the least certain value here |
+| `mxbai-embed-large-v1`, `all-minilm-l6-v2` | uncalibrated | Never measured |
+
+What an uncalibrated model does:
+
+- The MCP `search` tool returns results unfiltered, followed by a note suggesting `polaris eval`.
+- The auto-search hook never injects.
+- `polaris status` and `polaris eval` show `uncalibrated for <model>`.
+
+Setting `search_min_similarity` enables normal gating for any model. Pinning one
+on a model with no calibrated default is flagged too, on every run, because
+nothing else can tell you the value fits.
+
+`polaris status`, `polaris eval`, `polaris index` and `polaris setup` flag a
+pinned value (never the hooks) when it is 0.10 or more away from the index
+model's default:
+
+```
+⚠  search_min_similarity = 0.63 is pinned in polaris.toml; embeddinggemma-300m defaults to 0.42
+```
+
+or when the index model has no calibrated default at all:
+
+```
+⚠  search_min_similarity = 0.63 is pinned in polaris.toml; all-minilm-l6-v2 has no calibrated default — check it with `polaris eval` on your corpus
+```
+
+Older versions of `polaris setup` wrote `search_min_similarity = 0.63` into every `polaris.toml`. On an `embeddinggemma-300m` index, delete that line to use the model's default.
+
+`polaris eval` suggests a value for your corpus. Treat it as a hint, not a setting: on `embeddinggemma-300m` its suggestion undershot the best real-query threshold by about 0.12 (0.32 vs 0.44 on a French/English corpus, 0.28 vs 0.40 on this repo).
 
 ## Config Validation
 
@@ -141,15 +215,52 @@ config has 'bge-small-en' — delete the database and re-index to switch models
 
 In both cases, resolution is the same: delete (or move) the existing database and re-index.
 
+## Upgrading from 2.3
+
+| Your setup | After upgrading |
+|---|---|
+| An index, and a `polaris.toml` with `search_min_similarity = 0.63` (written by older `polaris setup`) | Unchanged: model and dimension come from the index, the threshold stays 0.63 |
+| An index, no `polaris.toml` | Unchanged: model and dimension come from the index, the threshold is that model's default (0.63 for nomic) |
+| Database deleted, then re-indexed on mostly non-English docs | `embeddinggemma-300m` is chosen; an old pinned `search_min_similarity = 0.63` now prints a warning — delete the line to use 0.42 |
+| `model_id` set and different from the index | `Model mismatch` error, as before |
+| `model_id` set in `~/.config/polaris/polaris.toml` | Explicit everywhere: no project chooses its model |
+| An older Polaris binary opening an `embeddinggemma-300m` index | `Unknown model 'embeddinggemma-300m'` — upgrade that binary |
+| `extra_db_paths` pointing at an index built with another model | Error, now naming that database |
+| `extra_db_paths` pointing at an empty or placeholder file | Error: every extra database must be a complete index, not just an existing file. Previously such a path was accepted and failed later, or silently contributed nothing |
+| `polaris serve` in a project with an index | Unchanged: the model loads at startup |
+| `polaris serve` before any index exists | No empty `polaris.db` appears any more; the model loads on the first `index` call |
+
+A config file that pins `embedding_dim` now wins over `--model`: an explicit
+dimension is no longer clamped to the model's native size, it is validated
+against it. `embedding_dim = 768` in `polaris.toml` plus `polaris --model
+all-minilm-l6-v2 index ./docs` now fails with `embedding_dim must be in [64,
+384] for model 'all-minilm-l6-v2', got 768` instead of silently clamping to
+384 — delete or lower the pinned `embedding_dim` to switch models with `--model`.
+
+Index creation is atomic: the tables and the stored model are written in one
+transaction, so an interrupted `polaris index` leaves either a complete index
+or a file with no schema at all. A file with no schema is not an index —
+every command treats it as if it were absent, and the next `polaris index`
+selects a model and creates the index in it as usual.
+
+A database file that *does* carry the schema but records no model can only
+come from an interrupted run of an older version. It can never be completed,
+because the model that built it is unknown, so every command reports
+`Incomplete index at <path>` and tells you to delete the file and re-index.
+`polaris index`, `watch`, `setup` and the MCP `index` tool detect it before
+choosing or downloading a model, so finding out costs nothing.
+
 ## Supported Models
 
-| `model_id` | Native dim | Recommended `embedding_dim` | Download size |
-|---|---|---|---|
-| `nomic-embed-text-v1.5` (default) | 768 | 512 | ~137 MB |
-| `mxbai-embed-large-v1` | 1024 | 1024 | ~670 MB |
-| `all-minilm-l6-v2` | 384 | 384 | ~23 MB |
+| `model_id` | Native dim | Default `embedding_dim` | Default `search_min_similarity` | Download size |
+|---|---|---|---|---|
+| `nomic-embed-text-v1.5` | 768 | 512 | 0.63 | ~522 MB |
+| `nomic-embed-text-v1.5-quantized` | 768 | 512 | 0.63 | ~131 MB |
+| `embeddinggemma-300m` | 768 | 768 | 0.42 | ~1.2 GB |
+| `mxbai-embed-large-v1` | 1024 | 1024 | uncalibrated | ~670 MB |
+| `all-minilm-l6-v2` | 384 | 384 | uncalibrated | ~23 MB |
 
-`embedding_dim` may be set to any value in `[64, native_dim]`. Matryoshka truncation is applied automatically — lower dimensions trade recall for speed and storage. For `mxbai-embed-large-v1` and `all-minilm-l6-v2`, which do not have Matryoshka training, truncation is still applied but quality may degrade more steeply with smaller dimensions.
+`embedding_dim` may be set to any value in `[64, native_dim]`. Matryoshka truncation is applied automatically — lower dimensions trade recall for speed and storage. The quantized nomic variant trades a little recall for ~2× faster indexing and search start-up — see [Embedding → Quantized nomic](embedding.md#quantized-nomic). `embeddinggemma-300m` is Matryoshka-trained like nomic. For `mxbai-embed-large-v1` and `all-minilm-l6-v2`, which do not have Matryoshka training, truncation is still applied but quality may degrade more steeply with smaller dimensions.
 
 Changing `model_id` requires deleting the database and re-indexing.
 

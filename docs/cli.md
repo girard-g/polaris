@@ -35,7 +35,7 @@ polaris setup ./my-proj  # configure a specific directory
 1. Validates the target path exists and is a directory
 2. Resolves the running binary via `std::env::current_exe()` and writes its absolute path to `.mcp.json` under `mcpServers.polaris`
 3. If `.mcp.json` already exists, parses it and upserts the polaris entry, preserving any other servers
-4. Writes a starter `polaris.toml`. Exactly one key is live — `search_min_similarity`, the value that needs tuning per corpus — followed by every other setting commented out as an inline reference. Commenting is what makes the reference safe: a commented key is inert and keeps tracking its built-in default across upgrades, whereas a key written out pins this project to today's value. Only written when absent; an existing file is your configuration and is never rewritten or merged into.
+4. Writes a starter `polaris.toml` with every setting commented out as an inline reference, including a table of each model's default `search_min_similarity`. Commenting is what makes the reference safe: a commented key is inert and keeps tracking its built-in default across upgrades, whereas a key written out pins this project to today's value. For `model_id`, writing it would also stop the first index from choosing the model from your docs. Only written when absent; an existing file is your configuration and is never rewritten or merged into.
 5. Appends missing entries to `.gitignore` under a `# polaris` comment header (`polaris.db`, `polaris.db-shm`, `polaris.db-wal`, `.fastembed_cache/`, `.mcp.json`, `polaris.toml`)
 6. Writes a Polaris MCP instruction block into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` at the project root, marker-delimited (`<!-- polaris:begin --> … <!-- polaris:end -->`). Preserves existing user content; refreshes only the block on re-run. Skipped if `--no-agents` is passed.
 7. Idempotent: re-running prints "already configured" / "already up to date" without rewriting files
@@ -147,6 +147,7 @@ Score is the query-chunk cosine similarity — absolute, so it is comparable acr
 | Situation | Message |
 |-----------|---------|
 | DB file doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| Schema present, no stored model (interrupted run of an older version) | `Incomplete index at <path>: the schema exists but records no model, so an earlier run was interrupted before it finished — delete the file and re-index` |
 | DB exists but empty | `index is empty  —  run polaris index <path> to add documents` (stdout, exit 0) |
 | DB has docs, no match | `no matches found` plus a `tip:` line (stdout, exit 0) |
 
@@ -179,6 +180,7 @@ Chunk ids are unique only within a single index, so `window` operates on the pri
 | Situation | Message |
 |-----------|---------|
 | DB file doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| Schema present, no stored model (interrupted run of an older version) | `Incomplete index at <path>: the schema exists but records no model, so an earlier run was interrupted before it finished — delete the file and re-index` |
 | Unknown chunk id | `no chunk with id <id> in <path>  —  get ids from \`polaris search <query> --output json\`` |
 
 ---
@@ -267,12 +269,23 @@ polaris status --output json
 **Output:**
 
 ```
-Documents: 24
-Chunks:    312
-Database size: 1.4 MB
-Embedding dim: 512
-Last indexed: 2025-02-26T14:23:45Z
+polaris  · status
+
+  database    polaris.db
+  model       embeddinggemma-300m  ·  768 dim
+  threshold   0.42 (embeddinggemma-300m default)
+
+  documents   24
+  source      1.4 MB
+
+  chunks      312
+  avg/doc     13.0
+
+  db size     6.2 MB
+  indexed     2026-09-15T14:23:45Z
 ```
+
+`threshold` shows where the value comes from: `(pinned in polaris.toml)`, `(<model> default)`, or `uncalibrated for <model>`. When a pinned value is 0.10 or more from the model's default, a `⚠` line on stderr says so.
 
 ### `polaris savings`
 
@@ -322,6 +335,7 @@ polaris savings --output json
 | Situation | Message |
 |-----------|---------|
 | `polaris.db` doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| Schema present, no stored model (interrupted run of an older version) | `Incomplete index at <path>: the schema exists but records no model, so an earlier run was interrupted before it finished — delete the file and re-index` |
 
 ---
 
@@ -349,6 +363,7 @@ polaris eval --output json
 3. Runs a set of off-topic probe queries (built-in per detected corpus language, or the `eval.probes` override in `polaris.toml`) to measure the score ceiling of queries that have no correct answer.
 4. When the probe scores and the weakest correct-answer scores are cleanly separated, suggests `search_min_similarity` as their midpoint. No suggestion is printed when they overlap, or when no probe set applies — see **No threshold suggested** below.
 5. Compares against the previous run stored in `polaris.db`, when one exists for the same corpus fingerprint, printing a `since last run` delta line.
+6. Prints the current `search_min_similarity` with its source (pinned, model default, or uncalibrated), and warns on stderr when a pinned value is 0.10 or more from the model's default. The suggestion is a hint: on `embeddinggemma-300m` it undershot the real-query threshold by about 0.12.
 
 **What the numbers are not.** Ground-truth sentences come from the corpus, so they share its vocabulary and framing — they are easier than real user questions. `recall@3 = 0.94` is *not* a claim that Polaris answers 94% of real queries correctly; the numbers are for comparing runs of the same corpus over time (e.g. "did raising `max_chunk_tokens` help or hurt retrieval?") and for locating a similarity threshold, not for measuring answer quality.
 
@@ -365,6 +380,7 @@ See `docs/configuration.md` under "Defaults Reference" for the `eval.sample_size
 | Situation | Message |
 |-----------|---------|
 | `polaris.db` doesn't exist | `no index at <path>  —  run \`polaris index <path>\` first` |
+| Schema present, no stored model (interrupted run of an older version) | `Incomplete index at <path>: the schema exists but records no model, so an earlier run was interrupted before it finished — delete the file and re-index` |
 | Index has no documents | `index is empty  —  run \`polaris index <path>\` to add documents` |
 
 ---

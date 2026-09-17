@@ -220,12 +220,7 @@ pub fn run(
     limit: usize,
     json: bool,
 ) -> Result<()> {
-    if !db_path.exists() {
-        return Err(PolarisError::Indexing(format!(
-            "no index at {}  —  run `polaris index <path>` first",
-            db_path.display()
-        )));
-    }
+    crate::require_complete_index(db_path)?;
 
     let db = Database::open(db_path, embedding_dim, model_id)?;
 
@@ -571,6 +566,7 @@ mod tests {
         let err = run(&missing, 512, "nomic-embed-text-v1.5", false, 20, false).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("no index at"));
+        assert!(!missing.exists(), "polaris savings must not create a database");
     }
 
     #[test]

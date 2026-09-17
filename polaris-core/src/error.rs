@@ -31,6 +31,9 @@ pub enum PolarisError {
 
     #[error("Model mismatch: database was indexed with model '{db_model}', config has '{config_model}' — delete the database and re-index to switch models")]
     ModelMismatch { db_model: String, config_model: String },
+
+    #[error("Incomplete index at {path}: the schema exists but records no model, so an earlier run was interrupted before it finished — delete the file and re-index")]
+    IncompleteIndex { path: String },
 }
 
 pub type Result<T> = std::result::Result<T, PolarisError>;

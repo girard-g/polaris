@@ -19,7 +19,7 @@ use polaris_core::db::{self, Database};
 use polaris_core::embedding::EmbeddingEngine;
 use polaris_core::error::{PolarisError, Result};
 use polaris_core::indexer::{IndexReport, Indexer, normalise_path};
-use mcp::{PolarisServer, PolarisState};
+use mcp::PolarisServer;
 use tui::{format_results_terminal, make_spinner};
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
@@ -51,7 +51,7 @@ pub struct Cli {
     #[arg(long, global = true, action = ArgAction::Append)]
     db: Vec<PathBuf>,
 
-    /// Embedding model to use [nomic-embed-text-v1.5 (default), mxbai-embed-large-v1, all-minilm-l6-v2]
+    /// Embedding model [nomic-embed-text-v1.5, nomic-embed-text-v1.5-quantized, embeddinggemma-300m, mxbai-embed-large-v1, all-minilm-l6-v2]; unset, an existing index's model is used
     #[arg(long, global = true)]
     model: Option<String>,
 
@@ -67,9 +67,10 @@ impl Cli {
     }
 
     /// Resolve the effective [`PolarisConfig`] from the base config file plus
-    /// CLI overrides (`--config`, `--db`, `--dim`, `--model`), applying the same
-    /// model/dim clamp and validation the dispatcher uses. Shared with the Pro
-    /// binary so `polaris index` selects the same database in both builds.
+    /// CLI overrides (`--config`, `--db`, `--dim`, `--model`), then fill model,
+    /// dimension and threshold the user did not set from the index at `db_path`
+    /// and the model table, and validate. Shared with the Pro binary so
+    /// `polaris index` selects the same database in both builds.
     pub fn resolve_config(&self) -> Result<PolarisConfig> {
         let mut cfg = PolarisConfig::load(self.config.as_deref())?;
 
@@ -81,16 +82,11 @@ impl Cli {
             cfg.extra_db_paths = extra_dbs;
         }
 
-        // If --model was given without --dim and the current dim exceeds the
-        // model's native maximum, clamp to the native dim so the user doesn't
-        // have to always pair --model with --dim manually.
-        if self.model.is_some() && self.dim.is_none() {
-            if let Ok(native) = polaris_core::embedding::native_dim_for(&cfg.model_id) {
-                if cfg.embedding_dim > native {
-                    cfg.embedding_dim = native;
-                }
-            }
-        }
+        // Dimension precedence, from `resolve_effective`/`apply_resolution`: an
+        // explicit dim (config file or `--dim`) always wins; otherwise the
+        // stored dim of an existing index at `cfg.db_path`; otherwise the
+        // effective model's default dimension.
+        polaris_core::config::resolve_effective(&mut cfg);
 
         cfg.validate()?;
         Ok(cfg)
@@ -416,8 +412,74 @@ pub fn warn_extra_dbs_ignored(cfg: &PolarisConfig) {
     }
 }
 
+/// Print [`polaris_core::config::pinned_threshold_warning`] to stderr, if any.
+///
+/// `pub` so the `polaris-pro` binary can print the identical line.
+pub fn warn_pinned_threshold(cfg: &PolarisConfig) {
+    if let Some(msg) = polaris_core::config::pinned_threshold_warning(cfg) {
+        eprintln!("  {}  {msg}", style("⚠").yellow());
+    }
+}
+
+/// The "no index" error an absent index gets. Byte-identical across every
+/// read-only command, which is what users and tests match on.
+fn absent_index_error(db_path: &std::path::Path) -> PolarisError {
+    PolarisError::Indexing(format!(
+        "no index at {}  —  run `polaris index <path>` first",
+        db_path.display()
+    ))
+}
+
+fn incomplete_index_error(db_path: &std::path::Path) -> PolarisError {
+    PolarisError::IncompleteIndex { path: db_path.display().to_string() }
+}
+
+/// Guard for the paths that create or extend an index. An incomplete index can
+/// only be deleted, so fail here — before model selection and before the model
+/// loads, which would otherwise spend a download to say "delete this file".
+///
+/// `pub` so the `polaris-pro` binary guards its own indexing paths with the
+/// same check and the same message, instead of re-deriving both.
+pub fn reject_incomplete_index(db_path: &std::path::Path) -> Result<()> {
+    match db::index_state(db_path) {
+        db::IndexState::Incomplete => Err(incomplete_index_error(db_path)),
+        _ => Ok(()),
+    }
+}
+
+/// Guard for the read-only commands. Absent and incomplete need opposite
+/// advice — index this path, versus delete the file — so they never share a
+/// message.
+///
+/// `pub` so the `polaris-pro` binary answers a missing or broken index with the
+/// identical wording.
+pub fn require_complete_index(db_path: &std::path::Path) -> Result<()> {
+    match db::index_state(db_path) {
+        db::IndexState::Complete => Ok(()),
+        db::IndexState::Incomplete => Err(incomplete_index_error(db_path)),
+        db::IndexState::Absent => Err(absent_index_error(db_path)),
+    }
+}
+
+/// Open the database an index run writes to. A dry run against an index that
+/// does not exist yet uses an in-memory database: every file is new either way,
+/// and creating the file would pin a model before any real run chose one.
+fn open_for_index(cfg: &PolarisConfig, dry_run: bool) -> Result<Database> {
+    if dry_run && !db::has_index(&cfg.db_path) {
+        Database::open_in_memory(cfg.embedding_dim, &cfg.model_id)
+    } else {
+        Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)
+    }
+}
+
+/// Format the model-selection line for a dry run: same line, marked as
+/// informational since nothing is being recorded.
+fn dry_run_choice_line(line: &str) -> String {
+    format!("(dry run) {line} — nothing recorded")
+}
+
 async fn cmd_index(
-    cfg: PolarisConfig,
+    mut cfg: PolarisConfig,
     path: &std::path::Path,
     recursive: bool,
     force: bool,
@@ -431,6 +493,7 @@ async fn cmd_index(
             path.display()
         )));
     }
+    reject_incomplete_index(&cfg.db_path)?;
 
     // Header — always first, printed immediately.
     eprintln!();
@@ -442,8 +505,16 @@ async fn cmd_index(
     );
     eprintln!();
 
-    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+    if let Some(line) =
+        polaris_core::selection::resolve_for_new_index(&mut cfg, &[path.to_path_buf()], recursive)
+    {
+        let line = if dry_run { dry_run_choice_line(&line) } else { line };
+        eprintln!("{}  {line}", style("◆").cyan().bold());
+    }
+    warn_pinned_threshold(&cfg);
 
+    // The model loads before the database opens: a failed download must not
+    // leave a database pinned to a model that never loaded (spec §4.3).
     let indexer = if dry_run {
         Indexer::new_dry_run(cfg.max_chunk_tokens, cfg.chunk_overlap_chars, cfg.max_file_size)
     } else {
@@ -458,6 +529,8 @@ async fn cmd_index(
         );
         Indexer::new(engine, cfg.max_chunk_tokens, cfg.chunk_overlap_chars, cfg.max_file_size)
     };
+
+    let db = open_for_index(&cfg, dry_run)?;
 
     let report = indexer.index_path(&db, path, recursive, force, dry_run, None)?;
 
@@ -577,10 +650,25 @@ async fn cmd_search(
         .collect();
 
     for db_path in &all_db_paths {
-        if !db_path.exists() {
-            return Err(PolarisError::Indexing(format!(
-                "no index at {}  —  run `polaris index <path>` first",
-                db_path.display()
+        require_complete_index(db_path)?;
+    }
+
+    // Every database searched together must share the primary's model and
+    // dimension. Check before loading the model, and name the offending file:
+    // the open error alone does not say which of several databases it was.
+    for extra in &cfg.extra_db_paths {
+        let meta = db::read_index_metadata(extra);
+        let model_differs = meta.model_id.as_deref().is_some_and(|m| m != cfg.model_id);
+        let dim_differs = meta.embedding_dim.is_some_and(|d| d != cfg.embedding_dim);
+        if model_differs || dim_differs {
+            return Err(PolarisError::Config(format!(
+                "{} was indexed with model '{}' at dim {}, but {} uses '{}' at dim {} — databases searched together must share one model and dimension",
+                extra.display(),
+                meta.model_id.as_deref().unwrap_or("?"),
+                meta.embedding_dim.map_or_else(|| "?".to_string(), |d| d.to_string()),
+                cfg.db_path.display(),
+                cfg.model_id,
+                cfg.embedding_dim,
             )));
         }
     }
@@ -707,12 +795,7 @@ async fn cmd_window(
     // Single-DB command: chunk ids resolve against the primary index only.
     warn_extra_dbs_ignored(&cfg);
 
-    if !cfg.db_path.exists() {
-        return Err(PolarisError::Indexing(format!(
-            "no index at {}  —  run `polaris index <path>` first",
-            cfg.db_path.display()
-        )));
-    }
+    require_complete_index(&cfg.db_path)?;
 
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
 
@@ -735,35 +818,44 @@ async fn cmd_window(
 async fn cmd_serve(cfg: PolarisConfig) -> Result<()> {
     tracing::info!("Starting Polaris MCP server (stdio transport)");
     tracing::info!("Database: {}", cfg.db_path.display());
-    tracing::info!("Embedding dim: {}", cfg.embedding_dim);
+    if db::has_index(&cfg.db_path) {
+        tracing::info!("Loading embedding model {} (dim {})…", cfg.model_id, cfg.embedding_dim);
+    } else {
+        // Spec §4.1.1: only indexing creates a database, so the model and the
+        // bank wait for the first `index` call or for an index to appear.
+        tracing::info!("No index yet; the model loads when one is created or opened");
+    }
 
-    tracing::info!("Loading embedding model…");
-    let embed = polaris_core::SharedEmbedding::load(&cfg.model_id, cfg.embedding_dim)?;
-
-    let bank_cfg = polaris_core::BankConfig {
-        repo_root: corpus_root(),
-        index_path: cfg.db_path.clone(),
-        embedding_dim: cfg.embedding_dim,
-        model_id: cfg.model_id.clone(),
-        max_chunk_tokens: cfg.max_chunk_tokens,
-        chunk_overlap_chars: cfg.chunk_overlap_chars,
-        max_file_size: cfg.max_file_size,
-        mmr_lambda: cfg.mmr_lambda,
-        mmr_candidate_multiplier: cfg.mmr_candidate_multiplier,
-        heading_boost: cfg.heading_boost,
-        rrf_k: cfg.rrf_k,
-    };
-    let bank = polaris_core::Bank::open(bank_cfg, embed.clone())?;
-
-    let state = PolarisState {
-        config: Arc::new(cfg),
-        bank,
-    };
-
+    let state = mcp::serve_state(cfg)?;
     let server = PolarisServer::new(state);
     server.serve_stdio().await?;
 
     Ok(())
+}
+
+/// The `polaris status --output json` payload. A free function, not inlined in
+/// `cmd_status`, so its shape is unit-testable without capturing stdout.
+fn status_json(cfg: &PolarisConfig, stats: &polaris_core::db::DbStats) -> String {
+    #[derive(serde::Serialize)]
+    struct StatusJson {
+        documents: usize,
+        chunks: usize,
+        db_bytes: u64,
+        embedding_dim: usize,
+        last_indexed: Option<String>,
+        search_min_similarity: Option<f64>,
+        threshold_source: &'static str,
+    }
+    let json = StatusJson {
+        documents: stats.doc_count,
+        chunks: stats.chunk_count,
+        db_bytes: stats.db_size_bytes,
+        embedding_dim: stats.embedding_dim,
+        last_indexed: stats.last_indexed.clone(),
+        search_min_similarity: cfg.search_min_similarity.map(crate::eval::json_f32),
+        threshold_source: cfg.threshold_source().as_str(),
+    };
+    serde_json::to_string_pretty(&json).unwrap()
 }
 
 async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
@@ -782,9 +874,12 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
     // Label column width (pad before styling to avoid ANSI-offset issues).
     let w = 10usize;
 
-    if !cfg.db_path.exists() {
+    let state = db::index_state(&cfg.db_path);
+    if state != db::IndexState::Complete {
+        let incomplete = state == db::IndexState::Incomplete;
         if output == OutputFormat::Json {
-            println!("{{\"error\": \"not initialized\"}}");
+            let err = if incomplete { "incomplete index" } else { "not initialized" };
+            println!("{{\"error\": \"{err}\"}}");
         } else {
             println!(
                 "  {}  {}",
@@ -792,36 +887,32 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
                 cfg.db_path.display(),
             );
             println!();
-            println!(
-                "  {}  not initialized  —  run {} to get started",
-                style("⚠").yellow(),
-                style("polaris index <path>").cyan(),
-            );
+            if incomplete {
+                // Not "run polaris index": that would never finish this file.
+                println!(
+                    "  {}  incomplete index  —  an earlier run was interrupted; {} and re-index",
+                    style("⚠").yellow(),
+                    style("delete the file").cyan(),
+                );
+            } else {
+                println!(
+                    "  {}  not initialized  —  run {} to get started",
+                    style("⚠").yellow(),
+                    style("polaris index <path>").cyan(),
+                );
+            }
             println!();
         }
         return Ok(());
     }
 
+    warn_pinned_threshold(&cfg);
+
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
     let stats = db.get_stats(&cfg.db_path)?;
 
     if output == OutputFormat::Json {
-        #[derive(serde::Serialize)]
-        struct StatusJson {
-            documents: usize,
-            chunks: usize,
-            db_bytes: u64,
-            embedding_dim: usize,
-            last_indexed: Option<String>,
-        }
-        let json = StatusJson {
-            documents: stats.doc_count,
-            chunks: stats.chunk_count,
-            db_bytes: stats.db_size_bytes,
-            embedding_dim: stats.embedding_dim,
-            last_indexed: stats.last_indexed.clone(),
-        };
-        println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        println!("{}", status_json(&cfg, &stats));
         return Ok(());
     }
 
@@ -843,6 +934,11 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
         cfg.model_id,
         style("·").dim(),
         stats.embedding_dim,
+    );
+    println!(
+        "  {}  {}",
+        style(format!("{:<w$}", "threshold")).dim(),
+        eval::threshold_label(&cfg),
     );
     println!();
 
@@ -898,12 +994,7 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
 async fn cmd_chunks(cfg: PolarisConfig, path: &PathBuf) -> Result<()> {
     warn_extra_dbs_ignored(&cfg);
 
-    if !cfg.db_path.exists() {
-        return Err(PolarisError::Indexing(format!(
-            "no index at {}  —  run `polaris index <path>` first",
-            cfg.db_path.display()
-        )));
-    }
+    require_complete_index(&cfg.db_path)?;
 
     let norm = normalise_path(path).ok_or_else(|| {
         PolarisError::Indexing(format!("invalid path: {}", path.display()))
@@ -969,7 +1060,7 @@ async fn cmd_chunks(cfg: PolarisConfig, path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Result<()> {
+async fn cmd_watch(mut cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Result<()> {
     use notify_debouncer_mini::notify::RecursiveMode;
     use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 
@@ -984,6 +1075,8 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
             )));
         }
     }
+
+    reject_incomplete_index(&cfg.db_path)?;
 
     let paths_display = paths
         .iter()
@@ -1000,7 +1093,9 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
     );
     eprintln!();
 
-    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
+    if let Some(line) = polaris_core::selection::resolve_for_new_index(&mut cfg, paths, recursive) {
+        eprintln!("{}  {line}", style("◆").cyan().bold());
+    }
 
     let model_spinner = make_spinner("loading model…");
     let engine = Arc::new(EmbeddingEngine::new(cfg.embedding_dim, &cfg.model_id)?);
@@ -1018,6 +1113,10 @@ async fn cmd_watch(cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -> Re
         cfg.chunk_overlap_chars,
         cfg.max_file_size,
     );
+
+    // Opened after the model loaded: a failed download must not leave a
+    // database pinned to a model that never loaded.
+    let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
 
     // Initial index for every path.
     for path in paths {
@@ -1223,5 +1322,353 @@ mod cli_tests {
             }
             _ => panic!("expected Search"),
         }
+    }
+
+    /// An empty config file, so a developer's global
+    /// `~/.config/polaris/polaris.toml` cannot leak into the test.
+    fn empty_config(dir: &std::path::Path) -> std::path::PathBuf {
+        let p = dir.join("empty.toml");
+        std::fs::write(&p, "").unwrap();
+        p
+    }
+
+    #[test]
+    fn model_without_dim_gets_that_models_default_dim() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = empty_config(dir.path());
+        let db = dir.path().join("none.db");
+        for (model, dim) in [
+            ("nomic-embed-text-v1.5", 512),
+            ("embeddinggemma-300m", 768),
+            ("mxbai-embed-large-v1", 1024),
+            ("all-minilm-l6-v2", 384),
+        ] {
+            let cli = Cli::try_parse_from([
+                "polaris", "--config", conf.to_str().unwrap(), "--db", db.to_str().unwrap(),
+                "--model", model, "status",
+            ])
+            .unwrap();
+            let cfg = cli.resolve_config().unwrap();
+            assert_eq!(cfg.embedding_dim, dim, "{model}");
+        }
+        assert!(!db.exists(), "resolving config must not create the database");
+    }
+
+    #[test]
+    fn explicit_dim_beats_the_models_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = empty_config(dir.path());
+        let db = dir.path().join("none.db");
+        let cli = Cli::try_parse_from([
+            "polaris", "--config", conf.to_str().unwrap(), "--db", db.to_str().unwrap(),
+            "--model", "embeddinggemma-300m", "--dim", "256", "status",
+        ])
+        .unwrap();
+        assert_eq!(cli.resolve_config().unwrap().embedding_dim, 256);
+    }
+
+    #[test]
+    fn resolve_config_on_a_gemma_index_without_polaris_toml() {
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let conf = empty_config(dir.path());
+        let db = dir.path().join("polaris.db");
+        drop(polaris_core::db::Database::open(&db, 768, "embeddinggemma-300m").unwrap());
+
+        let cli = Cli::try_parse_from([
+            "polaris", "--config", conf.to_str().unwrap(), "--db", db.to_str().unwrap(), "status",
+        ])
+        .unwrap();
+        let cfg = cli.resolve_config().unwrap();
+        assert_eq!(cfg.model_id, "embeddinggemma-300m");
+        assert_eq!(cfg.embedding_dim, 768);
+        assert_eq!(cfg.search_min_similarity, Some(0.42));
+    }
+
+    #[test]
+    fn resolve_config_keeps_a_pinned_threshold_on_a_nomic_index() {
+        // Spec §6 row 1: nomic DB + polaris.toml pinning 0.63 — identical.
+        polaris_core::db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("polaris.toml");
+        std::fs::write(&conf, "search_min_similarity = 0.63\n").unwrap();
+        let db = dir.path().join("polaris.db");
+        drop(polaris_core::db::Database::open(&db, 512, "nomic-embed-text-v1.5").unwrap());
+
+        let cli = Cli::try_parse_from([
+            "polaris", "--config", conf.to_str().unwrap(), "--db", db.to_str().unwrap(), "status",
+        ])
+        .unwrap();
+        let cfg = cli.resolve_config().unwrap();
+        assert_eq!((cfg.model_id.as_str(), cfg.embedding_dim), ("nomic-embed-text-v1.5", 512));
+        assert_eq!(cfg.search_min_similarity, Some(0.63));
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    fn cfg_at(db_path: PathBuf) -> PolarisConfig {
+        PolarisConfig { db_path, ..PolarisConfig::default() }
+    }
+
+    #[test]
+    fn status_json_reports_the_threshold_and_its_source() {
+        let mut cfg = PolarisConfig::default();
+        cfg.apply_overrides(None, None, Some("embeddinggemma-300m".into()));
+        polaris_core::config::resolve_effective(&mut cfg);
+        let stats = db::DbStats {
+            doc_count: 1,
+            chunk_count: 2,
+            empty_doc_count: 0,
+            total_source_bytes: 10,
+            last_indexed: None,
+            db_size_bytes: 100,
+            embedding_dim: cfg.embedding_dim,
+        };
+        let v: serde_json::Value = serde_json::from_str(&status_json(&cfg, &stats)).unwrap();
+        assert_eq!(v["search_min_similarity"], 0.42);
+        assert_eq!(v["threshold_source"], "model_default");
+    }
+
+    #[tokio::test]
+    async fn search_names_the_extra_database_built_with_another_model() {
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary.db");
+        let extra = dir.path().join("extra.db");
+        drop(Database::open(&primary, 512, "nomic-embed-text-v1.5").unwrap());
+        drop(Database::open(&extra, 768, "embeddinggemma-300m").unwrap());
+
+        let mut cfg = cfg_at(primary);
+        cfg.extra_db_paths = vec![extra.clone()];
+        let err = cmd_search(cfg, "anything at all", 5, OutputFormat::Plain, false, 1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&extra.display().to_string()), "{err}");
+        assert!(err.contains("embeddinggemma-300m"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_only_commands_on_a_missing_index_create_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+
+        let err = cmd_search(cfg_at(db.clone()), "anything at all", 5, OutputFormat::Plain, false, 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let err = cmd_window(cfg_at(db.clone()), 1, 1, 2000).await.unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let err = cmd_chunks(cfg_at(db.clone()), &PathBuf::from("docs/a.md")).await.unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        cmd_status(cfg_at(db.clone()), OutputFormat::Plain).await.unwrap();
+        cmd_status(cfg_at(db.clone()), OutputFormat::Json).await.unwrap();
+
+        assert!(!db.exists(), "a read-only command created {}", db.display());
+    }
+
+    /// A bare file is not an index: the read-only commands must give the same
+    /// "no index at" message as a missing one, not a confusing failure deeper in.
+    #[tokio::test]
+    async fn read_only_commands_on_a_file_that_is_not_an_index_say_no_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        std::fs::write(&db, b"").unwrap();
+
+        let err = cmd_search(cfg_at(db.clone()), "anything at all", 5, OutputFormat::Plain, false, 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let err = cmd_window(cfg_at(db.clone()), 1, 1, 2000).await.unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let err = cmd_chunks(cfg_at(db.clone()), &PathBuf::from("docs/a.md")).await.unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        cmd_status(cfg_at(db.clone()), OutputFormat::Plain).await.unwrap();
+        cmd_status(cfg_at(db.clone()), OutputFormat::Json).await.unwrap();
+
+        let err = crate::eval::run(&cfg_at(db.clone()), Some(10), false).unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let err = crate::savings::run(&db, 512, "nomic-embed-text-v1.5", false, 20, false).unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+
+        assert_eq!(std::fs::metadata(&db).unwrap().len(), 0, "no schema may be written");
+    }
+
+    /// The file an interrupted run of a pre-transaction version left behind.
+    fn incomplete_index(path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO metadata (key, value) VALUES ('schema_version', '4'), ('embedding_dim', '512');",
+        )
+        .unwrap();
+    }
+
+    /// An incomplete index can only be deleted, so say so before spending a
+    /// model download on it — and before selection picks a model for nothing.
+    #[tokio::test]
+    async fn indexing_an_incomplete_index_fails_before_the_model_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = docs_with_one_file(dir.path());
+        let db = dir.path().join("polaris.db");
+        incomplete_index(&db);
+
+        // An unloadable model: reaching the load at all would say `bad-model`.
+        let err = cmd_index(cfg_with_unloadable_model(db.clone()), &docs, true, false, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("Incomplete index at"), "{err}");
+        assert!(err.contains(&db.display().to_string()), "{err}");
+
+        let err = cmd_watch(cfg_with_unloadable_model(db.clone()), &[docs], true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("Incomplete index at"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_only_commands_on_an_incomplete_index_say_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        incomplete_index(&db);
+
+        let err = cmd_search(cfg_at(db.clone()), "anything at all", 5, OutputFormat::Plain, false, 1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("Incomplete index at"), "{err}");
+        assert!(err.contains("delete the file and re-index"), "{err}");
+        for err in [
+            cmd_window(cfg_at(db.clone()), 1, 1, 2000).await.unwrap_err().to_string(),
+            cmd_chunks(cfg_at(db.clone()), &PathBuf::from("docs/a.md")).await.unwrap_err().to_string(),
+            crate::eval::run(&cfg_at(db.clone()), Some(10), false).unwrap_err().to_string(),
+            crate::savings::run(&db, 512, "nomic-embed-text-v1.5", false, 20, false).unwrap_err().to_string(),
+        ] {
+            assert!(err.starts_with("Incomplete index at"), "{err}");
+        }
+        // status reports rather than errors, as it does for an absent index.
+        cmd_status(cfg_at(db.clone()), OutputFormat::Plain).await.unwrap();
+        cmd_status(cfg_at(db.clone()), OutputFormat::Json).await.unwrap();
+    }
+
+    fn docs_with_one_file(dir: &std::path::Path) -> PathBuf {
+        let docs = dir.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), "# A\n\nSome text worth indexing.\n").unwrap();
+        docs
+    }
+
+    /// An unknown model fails inside `EmbeddingEngine::new`, exactly where a
+    /// failed download would, without downloading anything. Set explicitly so
+    /// no resolution or selection replaces it.
+    fn cfg_with_unloadable_model(db_path: PathBuf) -> PolarisConfig {
+        let mut cfg = cfg_at(db_path);
+        cfg.apply_overrides(None, None, Some("bad-model".into()));
+        cfg
+    }
+
+    #[tokio::test]
+    async fn index_with_an_unloadable_model_creates_no_database() {
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let docs = docs_with_one_file(dir.path());
+        let db_path = dir.path().join("polaris.db");
+
+        let result = cmd_index(cfg_with_unloadable_model(db_path.clone()), &docs, true, false, false).await;
+        assert!(result.is_err());
+        assert!(!db_path.exists(), "a failed model load must leave no database behind");
+    }
+
+    #[tokio::test]
+    async fn watch_with_an_unloadable_model_creates_no_database() {
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let docs = docs_with_one_file(dir.path());
+        let db_path = dir.path().join("polaris.db");
+
+        let result = cmd_watch(cfg_with_unloadable_model(db_path.clone()), &[docs], true).await;
+        assert!(result.is_err());
+        assert!(!db_path.exists(), "a failed model load must leave no database behind");
+    }
+
+    const FR_PROSE: &str = include_str!("../../polaris-core/tests/fixtures/fr_prose.md");
+    const EN_PROSE: &str = include_str!("../../polaris-core/tests/fixtures/en_prose.md");
+
+    #[tokio::test]
+    #[ignore = "downloads ~1.2 GB EmbeddingGemma ONNX model; run with `cargo test -- --include-ignored`"]
+    async fn indexing_a_new_french_project_creates_a_gemma_index_and_keeps_it() {
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("guide.md"), format!("# Guide\n\n{FR_PROSE}\n")).unwrap();
+        let db_path = dir.path().join("polaris.db");
+
+        cmd_index(cfg_at(db_path.clone()), &docs, true, false, false).await.unwrap();
+        assert_eq!(
+            db::read_index_metadata(&db_path),
+            db::IndexMetadata { model_id: Some("embeddinggemma-300m".into()), embedding_dim: Some(768) }
+        );
+
+        std::fs::remove_file(docs.join("guide.md")).unwrap();
+        std::fs::write(docs.join("english.md"), format!("# Guide\n\n{EN_PROSE}\n")).unwrap();
+        cmd_index(cfg_at(db_path.clone()), &docs, true, false, false).await.unwrap();
+        assert_eq!(db::read_index_metadata(&db_path).model_id.as_deref(), Some("embeddinggemma-300m"));
+    }
+
+    #[test]
+    fn dry_run_choice_line_formats_without_recording() {
+        assert_eq!(
+            dry_run_choice_line("model: embeddinggemma-300m (100% English prose)"),
+            "(dry run) model: embeddinggemma-300m (100% English prose) — nothing recorded"
+        );
+    }
+
+    #[test]
+    fn dry_run_over_a_french_corpus_would_choose_gemma_without_loading_a_model() {
+        // Not `#[ignore]`d: `resolve_for_new_index` only reads files and picks
+        // a model id, so this exercises the dry-run choice line's model pick
+        // over a French corpus without ever downloading or loading a model.
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("guide.md"), format!("# Guide\n\n{FR_PROSE}\n")).unwrap();
+        let db_path = dir.path().join("polaris.db");
+
+        let mut cfg = cfg_at(db_path.clone());
+        let line = polaris_core::selection::resolve_for_new_index(&mut cfg, &[docs], true).unwrap();
+        assert_eq!(cfg.model_id, "embeddinggemma-300m");
+        assert_eq!(dry_run_choice_line(&line), format!("(dry run) {line} — nothing recorded"));
+        assert!(!db_path.exists(), "selection alone must not create a database");
+    }
+
+    #[test]
+    fn dry_run_without_an_index_uses_an_in_memory_database() {
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("polaris.db");
+        let db = open_for_index(&cfg_at(db_path.clone()), true).unwrap();
+        assert!(db.get_all_document_hashes().unwrap().is_empty());
+        assert!(!db_path.exists(), "a dry run must not create (and pin) the index");
+    }
+
+    #[test]
+    fn dry_run_against_an_existing_index_reads_it() {
+        // Added-vs-modified comes from the stored hashes; an empty stand-in
+        // would report every file as new.
+        db::register_vec_extension();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("polaris.db");
+        {
+            let db = Database::open(&db_path, 512, "nomic-embed-text-v1.5").unwrap();
+            db.insert_document("docs/a.md", "old-hash", None, 10).unwrap();
+        }
+        let db = open_for_index(&cfg_at(db_path), true).unwrap();
+        assert_eq!(db.get_all_document_hashes().unwrap().len(), 1);
     }
 }

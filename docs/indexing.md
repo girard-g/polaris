@@ -4,7 +4,7 @@
 
 The indexing pipeline takes a file system path and produces semantic vector chunks in the database. It is incremental by default — unchanged files are skipped.
 
-For large corpora (5k+ documents), the pipeline uses a **three-phase design** that eliminates double file reads, maximises embedding batch sizes, and writes all files in a single transaction.
+For large corpora (5k+ documents), the pipeline uses a **three-phase design** that eliminates double file reads, embeds all pending chunks in one stream, and writes all files in a single transaction.
 
 ## Pipeline Stages
 
@@ -27,8 +27,8 @@ For large corpora (5k+ documents), the pipeline uses a **three-phase design** th
 
 ── Phase B: Cross-file Embedding ───────────────────────────────────────
 5. Flatten all chunks from all pending files into one Vec
-   Embed in batches of 32 across the entire corpus
-   (batches are always full except the last)
+   Embed one chunk per ONNX call across the entire corpus
+   (no padding; see "Why batch size 1" below)
 
 ── Phase C: Single-Transaction Write ───────────────────────────────────
 6. BEGIN
@@ -79,7 +79,19 @@ Files that exceed `max_file_size` (default 10 MB) are skipped with an error reco
 
 ## Phase B — Cross-file Embedding
 
-All chunks from all `FileData` structs are flattened into a single `Vec<String>`, then embedded in a stream of `EMBED_BATCH_SIZE` (32) batches. Because chunks come from many files, batches are almost always exactly 32 — compared to the per-file approach where a 5-chunk file wastes 27 batch slots.
+All chunks from all `FileData` structs are flattened into a single `Vec<String>`, then embedded in a stream of `EMBED_BATCH_SIZE` (1) batches.
+
+### Why batch size 1
+
+fastembed pads every sequence in a batch to the batch's longest one, and chunk lengths vary widely (on this repo's docs: median ~440 chars, max 1800). ONNX Runtime already parallelises a single sequence across all cores, so on CPU a larger batch adds padding without adding parallelism. Measured on 995 chunks (Ryzen 7 8840HS, nomic-embed-text-v1.5):
+
+| Batch | chunks/s | peak RSS |
+|---|---|---|
+| 32 | 4.2 | 6.5 GB |
+| 8 | 5.9 | 2.5 GB |
+| 1 | 9.4 | 1.0 GB |
+
+`polaris eval` metrics were identical across all three. Revisit if a GPU execution provider is ever configured, where batching does pay.
 
 Per-file chunk boundaries are tracked with `(start_idx, chunk_count)` offsets so the flat embedding `Vec` can be sliced back per file during Phase C.
 

@@ -152,12 +152,22 @@ What an uncalibrated model does:
 - The auto-search hook never injects.
 - `polaris status` and `polaris eval` show `uncalibrated for <model>`.
 
-Setting `search_min_similarity` enables normal gating for any model.
+Setting `search_min_similarity` enables normal gating for any model. Pinning one
+on a model with no calibrated default is flagged too, on every run, because
+nothing else can tell you the value fits.
 
-A pinned value that is 0.10 or more away from the index model's default is flagged by `polaris status`, `polaris eval`, `polaris index` and `polaris setup` (never by the hooks):
+`polaris status`, `polaris eval`, `polaris index` and `polaris setup` flag a
+pinned value (never the hooks) when it is 0.10 or more away from the index
+model's default:
 
 ```
 ⚠  search_min_similarity = 0.63 is pinned in polaris.toml; embeddinggemma-300m defaults to 0.42
+```
+
+or when the index model has no calibrated default at all:
+
+```
+⚠  search_min_similarity = 0.63 is pinned in polaris.toml; all-minilm-l6-v2 has no calibrated default — check it with `polaris eval` on your corpus
 ```
 
 Older versions of `polaris setup` wrote `search_min_similarity = 0.63` into every `polaris.toml`. On an `embeddinggemma-300m` index, delete that line to use the model's default.

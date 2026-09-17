@@ -32,6 +32,10 @@ pub(crate) fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Markdown's two fence delimiters. A block opened with one closes only on a
+/// matching line with the same marker — the other marker inside is content.
+const FENCE_MARKERS: [&str; 2] = ["```", "~~~"];
+
 /// The lines of `body` with fenced code — fence lines included — replaced by
 /// empty lines, so prose around a block stays separated by a blank line.
 ///
@@ -40,12 +44,17 @@ pub(crate) fn words(text: &str) -> Vec<String> {
 /// block longer than one chunk routinely starts a chunk mid-fence. Assuming
 /// `in_fence = false` there inverts the state: the *closing* fence opens one,
 /// real prose after it is discarded, and the code before it is kept. An odd
-/// fence count is exactly the ambiguous case, and nothing in the text can
-/// resolve it, so return nothing rather than guess.
+/// count of either marker is exactly the ambiguous case for that marker, and
+/// nothing in the text can resolve it, so return nothing rather than guess.
+/// Each marker is checked independently — same naive "count occurrences
+/// anywhere in the text" rule the backtick-only version always used, now
+/// applied to both: a lone, unmatched mention of either marker (even inside
+/// the other's fenced block, or in prose) trips it. That is more
+/// conservative than necessary in some cases, but conservative is the point.
 // ponytail: fail closed on ambiguity; the fix is fence-aware chunking, which
 // belongs in indexer.rs, not here.
 pub(crate) fn blank_code_fences(body: &str) -> Vec<&str> {
-    if body.matches("```").count() % 2 != 0 {
+    if FENCE_MARKERS.iter().any(|m| body.matches(m).count() % 2 != 0) {
         return Vec::new();
     }
     blank_code_fences_from_start(body)
@@ -58,16 +67,27 @@ pub(crate) fn blank_code_fences(body: &str) -> Vec<&str> {
 /// an unterminated fence, and everything from that fence on is blanked same
 /// as a closed one. Used by [`english_density`], which measures whole files.
 pub(crate) fn blank_code_fences_from_start(body: &str) -> Vec<&str> {
-    let mut in_fence = false;
+    // `Some(marker)` while inside a fence, holding whichever marker opened it
+    // — only a line starting with that same marker closes it.
+    let mut open: Option<&str> = None;
     body.lines()
         .map(|line| {
-            if line.trim().starts_with("```") {
-                in_fence = !in_fence;
-                ""
-            } else if in_fence {
-                ""
-            } else {
-                line
+            let trimmed = line.trim();
+            match open {
+                None => {
+                    if let Some(m) = FENCE_MARKERS.iter().find(|m| trimmed.starts_with(*m)) {
+                        open = Some(m);
+                        ""
+                    } else {
+                        line
+                    }
+                }
+                Some(m) => {
+                    if trimmed.starts_with(m) {
+                        open = None;
+                    }
+                    ""
+                }
             }
         })
         .collect()
@@ -214,6 +234,51 @@ mod tests {
     #[test]
     fn blank_code_fences_gives_up_on_an_odd_fence_count() {
         assert!(blank_code_fences("code\n```\nprose").is_empty());
+    }
+
+    #[test]
+    fn blank_code_fences_blanks_tilde_fences_too() {
+        let body = "prose one\n~~~\ncode\n~~~\nprose two";
+        assert_eq!(blank_code_fences(body), vec!["prose one", "", "", "", "prose two"]);
+    }
+
+    #[test]
+    fn blank_code_fences_gives_up_on_an_odd_tilde_fence_count() {
+        assert!(blank_code_fences("code\n~~~\nprose").is_empty());
+    }
+
+    #[test]
+    fn a_backtick_line_inside_a_tilde_fence_is_content_not_a_toggle() {
+        // Only the matching `~~~` may close a block opened with `~~~`; a ```
+        // line inside it is code content, still blanked, and must not flip the
+        // state back to "outside a fence". Asserted on the whole-file variant
+        // (no fail-closed) since the chunk-level counter fails closed on the
+        // odd inner backtick before the toggle ever runs.
+        let body = "prose one\n~~~\n```\ncode\n~~~\nprose two";
+        assert_eq!(
+            blank_code_fences_from_start(body),
+            vec!["prose one", "", "", "", "", "prose two"]
+        );
+    }
+
+    #[test]
+    fn a_tilde_line_inside_a_backtick_fence_is_content_not_a_toggle() {
+        let body = "prose one\n```\n~~~\ncode\n```\nprose two";
+        assert_eq!(
+            blank_code_fences_from_start(body),
+            vec!["prose one", "", "", "", "", "prose two"]
+        );
+    }
+
+    #[test]
+    fn tilde_fenced_code_is_excluded_from_prose_density() {
+        let code = format!(
+            "# Example\n\n~~~rust\n{}~~~\n",
+            "let value = compute_the_thing(alpha, beta);\n".repeat(40)
+        );
+        assert!(words(&code).len() >= MIN_WORDS, "long enough to count if code counted");
+        assert_eq!(english_density(&code), None);
+        assert_eq!(english_share(&[code.as_str()]), None);
     }
 
     #[test]

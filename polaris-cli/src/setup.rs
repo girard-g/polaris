@@ -954,8 +954,14 @@ fn run_initial_index(cfg: &PolarisConfig, setup_path: &Path) -> Result<()> {
     let target = Path::new("docs");
     let mut cfg = cfg.clone();
     // Before selection and the model load: an incomplete index can only be
-    // deleted, and saying so must not cost a download.
-    crate::reject_incomplete_index(&cfg.db_path)?;
+    // deleted, and saying so must not cost a download. Non-fatal like every
+    // other failure here — setup's own files are already written — and
+    // deliberately without the "retry with: polaris index docs" line the
+    // `attempt()` failures print: indexing can never finish this file.
+    if let Err(e) = crate::reject_incomplete_index(&cfg.db_path) {
+        eprintln!("  {}  initial index skipped: {e}", console::style("⚠").yellow());
+        return Ok(());
+    }
     if let Some(line) =
         polaris_core::selection::resolve_for_new_index(&mut cfg, &[target.to_path_buf()], true)
     {
@@ -1987,6 +1993,44 @@ second
 
         run_initial_index(&cfg, dir.path()).expect("the initial index is non-fatal");
         assert!(!db_path.exists(), "a failed model load must leave no database behind");
+    }
+
+    /// `run_initial_index` is documented non-fatal: setup must finish and write
+    /// its files even when the project's polaris.db cannot be indexed into.
+    #[test]
+    fn setup_over_an_incomplete_index_still_completes() {
+        let _cwd = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        register_vec_for_test();
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs").join("a.md"), "# A\n\nSome text.\n").unwrap();
+        let db_path = dir.path().join("polaris.db");
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO metadata (key, value) VALUES ('schema_version', '4'), ('embedding_dim', '512');",
+            )
+            .unwrap();
+
+        run(&PolarisConfig::default(), dir.path(), false, false, false)
+            .expect("the initial index is non-fatal");
+
+        assert!(dir.path().join(".mcp.json").exists());
+        assert!(dir.path().join(".gitignore").exists());
+        assert!(dir.path().join(".claude/settings.json").exists());
+
+        // The gate fires before the model loads, so nothing was written to the
+        // file either — it still holds only the metadata table it came with.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(tables, vec!["metadata".to_string(), "sqlite_autoindex_metadata_1".to_string()]);
     }
 
     #[test]

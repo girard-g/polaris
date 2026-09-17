@@ -421,6 +421,40 @@ pub fn warn_pinned_threshold(cfg: &PolarisConfig) {
     }
 }
 
+/// The "no index" error an absent index gets. Byte-identical across every
+/// read-only command, which is what users and tests match on.
+fn absent_index_error(db_path: &std::path::Path) -> PolarisError {
+    PolarisError::Indexing(format!(
+        "no index at {}  —  run `polaris index <path>` first",
+        db_path.display()
+    ))
+}
+
+fn incomplete_index_error(db_path: &std::path::Path) -> PolarisError {
+    PolarisError::IncompleteIndex { path: db_path.display().to_string() }
+}
+
+/// Guard for the paths that create or extend an index. An incomplete index can
+/// only be deleted, so fail here — before model selection and before the model
+/// loads, which would otherwise spend a download to say "delete this file".
+pub(crate) fn reject_incomplete_index(db_path: &std::path::Path) -> Result<()> {
+    match db::index_state(db_path) {
+        db::IndexState::Incomplete => Err(incomplete_index_error(db_path)),
+        _ => Ok(()),
+    }
+}
+
+/// Guard for the read-only commands. Absent and incomplete need opposite
+/// advice — index this path, versus delete the file — so they never share a
+/// message.
+pub(crate) fn require_complete_index(db_path: &std::path::Path) -> Result<()> {
+    match db::index_state(db_path) {
+        db::IndexState::Complete => Ok(()),
+        db::IndexState::Incomplete => Err(incomplete_index_error(db_path)),
+        db::IndexState::Absent => Err(absent_index_error(db_path)),
+    }
+}
+
 /// Open the database an index run writes to. A dry run against an index that
 /// does not exist yet uses an in-memory database: every file is new either way,
 /// and creating the file would pin a model before any real run chose one.
@@ -453,6 +487,7 @@ async fn cmd_index(
             path.display()
         )));
     }
+    reject_incomplete_index(&cfg.db_path)?;
 
     // Header — always first, printed immediately.
     eprintln!();
@@ -609,12 +644,7 @@ async fn cmd_search(
         .collect();
 
     for db_path in &all_db_paths {
-        if !db::has_index(db_path) {
-            return Err(PolarisError::Indexing(format!(
-                "no index at {}  —  run `polaris index <path>` first",
-                db_path.display()
-            )));
-        }
+        require_complete_index(db_path)?;
     }
 
     // Every database searched together must share the primary's model and
@@ -759,12 +789,7 @@ async fn cmd_window(
     // Single-DB command: chunk ids resolve against the primary index only.
     warn_extra_dbs_ignored(&cfg);
 
-    if !db::has_index(&cfg.db_path) {
-        return Err(PolarisError::Indexing(format!(
-            "no index at {}  —  run `polaris index <path>` first",
-            cfg.db_path.display()
-        )));
-    }
+    require_complete_index(&cfg.db_path)?;
 
     let db = Database::open(&cfg.db_path, cfg.embedding_dim, &cfg.model_id)?;
 
@@ -843,9 +868,12 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
     // Label column width (pad before styling to avoid ANSI-offset issues).
     let w = 10usize;
 
-    if !db::has_index(&cfg.db_path) {
+    let state = db::index_state(&cfg.db_path);
+    if state != db::IndexState::Complete {
+        let incomplete = state == db::IndexState::Incomplete;
         if output == OutputFormat::Json {
-            println!("{{\"error\": \"not initialized\"}}");
+            let err = if incomplete { "incomplete index" } else { "not initialized" };
+            println!("{{\"error\": \"{err}\"}}");
         } else {
             println!(
                 "  {}  {}",
@@ -853,11 +881,20 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
                 cfg.db_path.display(),
             );
             println!();
-            println!(
-                "  {}  not initialized  —  run {} to get started",
-                style("⚠").yellow(),
-                style("polaris index <path>").cyan(),
-            );
+            if incomplete {
+                // Not "run polaris index": that would never finish this file.
+                println!(
+                    "  {}  incomplete index  —  an earlier run was interrupted; {} and re-index",
+                    style("⚠").yellow(),
+                    style("delete the file").cyan(),
+                );
+            } else {
+                println!(
+                    "  {}  not initialized  —  run {} to get started",
+                    style("⚠").yellow(),
+                    style("polaris index <path>").cyan(),
+                );
+            }
             println!();
         }
         return Ok(());
@@ -951,12 +988,7 @@ async fn cmd_status(cfg: PolarisConfig, output: OutputFormat) -> Result<()> {
 async fn cmd_chunks(cfg: PolarisConfig, path: &PathBuf) -> Result<()> {
     warn_extra_dbs_ignored(&cfg);
 
-    if !db::has_index(&cfg.db_path) {
-        return Err(PolarisError::Indexing(format!(
-            "no index at {}  —  run `polaris index <path>` first",
-            cfg.db_path.display()
-        )));
-    }
+    require_complete_index(&cfg.db_path)?;
 
     let norm = normalise_path(path).ok_or_else(|| {
         PolarisError::Indexing(format!("invalid path: {}", path.display()))
@@ -1037,6 +1069,8 @@ async fn cmd_watch(mut cfg: PolarisConfig, paths: &[PathBuf], recursive: bool) -
             )));
         }
     }
+
+    reject_incomplete_index(&cfg.db_path)?;
 
     let paths_display = paths
         .iter()
@@ -1455,6 +1489,65 @@ mod command_tests {
         assert!(err.to_string().contains("no index at"), "{err}");
 
         assert_eq!(std::fs::metadata(&db).unwrap().len(), 0, "no schema may be written");
+    }
+
+    /// The file an interrupted run of a pre-transaction version left behind.
+    fn incomplete_index(path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO metadata (key, value) VALUES ('schema_version', '4'), ('embedding_dim', '512');",
+        )
+        .unwrap();
+    }
+
+    /// An incomplete index can only be deleted, so say so before spending a
+    /// model download on it — and before selection picks a model for nothing.
+    #[tokio::test]
+    async fn indexing_an_incomplete_index_fails_before_the_model_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = docs_with_one_file(dir.path());
+        let db = dir.path().join("polaris.db");
+        incomplete_index(&db);
+
+        // An unloadable model: reaching the load at all would say `bad-model`.
+        let err = cmd_index(cfg_with_unloadable_model(db.clone()), &docs, true, false, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("Incomplete index at"), "{err}");
+        assert!(err.contains(&db.display().to_string()), "{err}");
+
+        let err = cmd_watch(cfg_with_unloadable_model(db.clone()), &[docs], true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("Incomplete index at"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_only_commands_on_an_incomplete_index_say_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        incomplete_index(&db);
+
+        let err = cmd_search(cfg_at(db.clone()), "anything at all", 5, OutputFormat::Plain, false, 1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("Incomplete index at"), "{err}");
+        assert!(err.contains("delete the file and re-index"), "{err}");
+        for err in [
+            cmd_window(cfg_at(db.clone()), 1, 1, 2000).await.unwrap_err().to_string(),
+            cmd_chunks(cfg_at(db.clone()), &PathBuf::from("docs/a.md")).await.unwrap_err().to_string(),
+            crate::eval::run(&cfg_at(db.clone()), Some(10), false).unwrap_err().to_string(),
+            crate::savings::run(&db, 512, "nomic-embed-text-v1.5", false, 20, false).unwrap_err().to_string(),
+        ] {
+            assert!(err.starts_with("Incomplete index at"), "{err}");
+        }
+        // status reports rather than errors, as it does for an absent index.
+        cmd_status(cfg_at(db.clone()), OutputFormat::Plain).await.unwrap();
+        cmd_status(cfg_at(db.clone()), OutputFormat::Json).await.unwrap();
     }
 
     fn docs_with_one_file(dir: &std::path::Path) -> PathBuf {

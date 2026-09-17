@@ -2,7 +2,6 @@
 //! truth. Formatting only; the measurement lives in `polaris_core::eval`.
 
 use polaris_core::config::PolarisConfig;
-use polaris_core::db::has_index;
 use polaris_core::error::{PolarisError, Result};
 use polaris_core::eval::{EvalReport, MIN_RELIABLE_SAMPLE};
 
@@ -146,12 +145,7 @@ pub fn report_json(r: &EvalReport, cfg: &PolarisConfig) -> String {
 
 /// Entry point for `polaris eval`.
 pub fn run(cfg: &PolarisConfig, sample: Option<usize>, json: bool) -> Result<()> {
-    if !has_index(&cfg.db_path) {
-        return Err(PolarisError::Indexing(format!(
-            "no index at {}  —  run `polaris index <path>` first",
-            cfg.db_path.display()
-        )));
-    }
+    crate::require_complete_index(&cfg.db_path)?;
 
     crate::warn_pinned_threshold(cfg);
 

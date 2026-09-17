@@ -16,7 +16,7 @@ use rmcp::{
 };
 
 use polaris_core::config::PolarisConfig;
-use polaris_core::db::has_index;
+use polaris_core::db::{IndexState, has_index, index_state};
 use polaris_core::error::PolarisError;
 use polaris_core::search::SearchEngine;
 
@@ -108,6 +108,24 @@ fn no_index_message(db_path: &Path) -> String {
     )
 }
 
+/// An incomplete index needs the opposite advice from an absent one: indexing
+/// can never finish this file, only deleting it can.
+fn incomplete_index_message(db_path: &Path) -> String {
+    format!(
+        "Incomplete index at {} — an earlier run was interrupted before it recorded its model, so it cannot be completed. Delete the file and index again.",
+        db_path.display()
+    )
+}
+
+/// `Err` with the message to show when `db_path` is not a complete index.
+fn check_index(db_path: &Path) -> Result<(), String> {
+    match index_state(db_path) {
+        IndexState::Complete => Ok(()),
+        IndexState::Incomplete => Err(incomplete_index_message(db_path)),
+        IndexState::Absent => Err(no_index_message(db_path)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Server struct
 // ---------------------------------------------------------------------------
@@ -164,9 +182,7 @@ impl PolarisServer {
         self.state
             .bank
             .get_or_try_init(move || async move {
-                if !has_index(&base.db_path) {
-                    return Err(no_index_message(&base.db_path));
-                }
+                check_index(&base.db_path)?;
                 open_resolved(base).await
             })
             .await
@@ -187,6 +203,11 @@ impl PolarisServer {
 
         if !path.exists() {
             return format!("Error: path not found: {}{banner}", params.path);
+        }
+        // Before selection and the model load: indexing cannot finish a file
+        // left incomplete, and saying so must not cost a model download.
+        if index_state(&self.state.config.db_path) == IndexState::Incomplete {
+            return format!("{}{banner}", incomplete_index_message(&self.state.config.db_path));
         }
 
         let base = Arc::clone(&self.state.config);
@@ -576,6 +597,45 @@ mod tests {
         }
         assert!(!db.exists());
         assert!(server.state.bank.get().is_none());
+    }
+
+    /// A schema with no stored model can only be deleted. The tools must say
+    /// that, not "No index yet" — and the `index` tool must say it before it
+    /// selects a model or downloads one.
+    #[tokio::test]
+    async fn tools_on_an_incomplete_index_say_incomplete_and_load_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("polaris.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO metadata (key, value) VALUES ('schema_version', '4'), ('embedding_dim', '512');",
+            )
+            .unwrap();
+        }
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), "# T\n\nSome prose.\n").unwrap();
+        let server = server_for(serve_state(cfg_at(db.clone())).unwrap());
+
+        let search = server
+            .search(Parameters(SearchParams { query: "anything".into(), top_k: Some(2) }))
+            .await;
+        let status = server.status(Parameters(StatusParams {})).await;
+        let eval = server.eval(Parameters(EvalParams { sample: Some(5) })).await;
+        let index = server
+            .run_index(IndexParams {
+                path: docs.display().to_string(),
+                recursive: Some(true),
+                force: None,
+            }, None)
+            .await;
+        for response in [&search, &status, &eval, &index] {
+            assert!(response.starts_with("Incomplete index at"), "{response}");
+            assert!(response.contains("Delete the file"), "{response}");
+        }
+        assert!(server.state.bank.get().is_none(), "nothing may be loaded or created");
     }
 
     /// A CLI `polaris index` creates the file before it writes the stored

@@ -953,6 +953,9 @@ fn run_initial_index(cfg: &PolarisConfig, setup_path: &Path) -> Result<()> {
 
     let target = Path::new("docs");
     let mut cfg = cfg.clone();
+    // Before selection and the model load: an incomplete index can only be
+    // deleted, and saying so must not cost a download.
+    crate::reject_incomplete_index(&cfg.db_path)?;
     if let Some(line) =
         polaris_core::selection::resolve_for_new_index(&mut cfg, &[target.to_path_buf()], true)
     {

@@ -249,19 +249,65 @@ pub fn read_index_metadata(path: &Path) -> IndexMetadata {
     }
 }
 
-/// Whether a usable index exists at `path`. The one definition of the question,
-/// for every caller that must not act on a database that is not there yet.
+/// What is at an index path. The one definition of "does an index exist", for
+/// every caller that must not act on a database that is not there yet.
 ///
 /// Not `path.exists()`: `Connection::open` creates the file before any schema,
-/// so `touch polaris.db`, a stray non-Polaris database, or a file left by an
-/// interrupted run of an older version all pass `exists()` while holding no
-/// index. Taking those for an index skips model selection (an English default
-/// on a French corpus) and turns a clear "no index" message into a confusing
-/// failure further down. The stored `model_id` is written by the same
-/// transaction that creates the schema, so it is present exactly when the
-/// index is complete.
+/// so `touch polaris.db` and a stray non-Polaris database both pass `exists()`
+/// while holding no index. Taking those for an index skips model selection (an
+/// English default on a French corpus) and turns a clear "no index" message
+/// into a confusing failure further down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexState {
+    /// Nothing usable here — no file, not a database, or no `metadata` table.
+    /// Indexing this path creates the index, exactly as for a missing file.
+    Absent,
+    /// A schema, but no stored model: an interrupted run of a version that
+    /// created the schema outside a transaction. It cannot be completed (the
+    /// model that built its `vec_chunks` table is unknown) and must not be
+    /// mistaken for an absent index, whose remedy is the opposite — indexing.
+    Incomplete,
+    /// A complete index, model and all.
+    Complete,
+}
+
+/// Classify the index at `path` without creating or modifying anything.
+///
+/// The stored `model_id` is written by the same transaction that creates the
+/// schema, so it is present exactly when the index is complete.
+pub fn index_state(path: &Path) -> IndexState {
+    if !path.is_file() {
+        return IndexState::Absent;
+    }
+    let Ok(conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return IndexState::Absent;
+    };
+    let has_metadata = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .is_ok_and(|row| row.is_some());
+    if !has_metadata {
+        return IndexState::Absent;
+    }
+    let model: Option<String> = conn
+        .query_row("SELECT value FROM metadata WHERE key='model_id'", [], |r| r.get(0))
+        .optional()
+        .ok()
+        .flatten();
+    match model {
+        Some(_) => IndexState::Complete,
+        None => IndexState::Incomplete,
+    }
+}
+
+/// Whether a complete index exists at `path`. Shorthand for [`index_state`]
+/// where the caller has nothing different to say about an incomplete one.
 pub fn has_index(path: &Path) -> bool {
-    read_index_metadata(path).model_id.is_some()
+    index_state(path) == IndexState::Complete
 }
 
 // ---------------------------------------------------------------------------
@@ -1853,6 +1899,43 @@ mod tests {
     // -----------------------------------------------------------------------
     // has_index
     // -----------------------------------------------------------------------
+
+    /// Build the file an interrupted run of a pre-transaction version left:
+    /// a schema that records a dimension but no model.
+    fn incomplete_index(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO metadata (key, value) VALUES ('schema_version', '4'), ('embedding_dim', '4');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn index_state_tells_absent_from_incomplete_from_complete() {
+        INIT.call_once(register_vec_extension);
+        let dir = tempfile::tempdir().unwrap();
+
+        let missing = dir.path().join("missing.db");
+        let empty = dir.path().join("empty.db");
+        let garbage = dir.path().join("garbage.db");
+        let foreign = dir.path().join("foreign.db");
+        let partial = dir.path().join("partial.db");
+        let real = dir.path().join("real.db");
+
+        std::fs::write(&empty, b"").unwrap();
+        std::fs::write(&garbage, b"not an sqlite database at all").unwrap();
+        Connection::open(&foreign).unwrap().execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
+        incomplete_index(&partial);
+        drop(Database::open(&real, 4, "test").unwrap());
+
+        for absent in [&missing, &empty, &garbage, &foreign] {
+            assert_eq!(index_state(absent), IndexState::Absent, "{}", absent.display());
+        }
+        assert_eq!(index_state(&partial), IndexState::Incomplete);
+        assert_eq!(index_state(&real), IndexState::Complete);
+        assert!(!missing.exists(), "the check must never create a database");
+    }
 
     #[test]
     fn has_index_is_false_for_a_missing_or_empty_file() {

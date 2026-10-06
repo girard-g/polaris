@@ -2,6 +2,16 @@
 
 All notable changes to Polaris are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **`Bank::index_documents_with_progress`.** Like `index_path_with_progress`,
+  but for in-memory documents: a caller feeding converted/supplied Markdown
+  (e.g. Helios) can now get the same chunk-embedding progress callback that
+  on-disk indexing already had. `index_documents` is unchanged and still
+  reports no progress.
+
 ## [2.4.0] - 2026-09-17
 
 Indexing spent more memory and time than the corpus needed, one model served

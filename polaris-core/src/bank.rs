@@ -374,6 +374,31 @@ impl Bank {
         removed: &[PathBuf],
         force: bool,
     ) -> Result<IndexReport> {
+        self.index_documents_inner(docs, removed, force, None)
+    }
+
+    /// Like [`Bank::index_documents`], but with a progress callback.
+    ///
+    /// The callback receives `(fraction, message)` where `fraction` is in `[0, 1]`.
+    /// Used by Helios to stream embedding progress for in-memory documents, the
+    /// same way [`Bank::index_path_with_progress`] does for on-disk files.
+    pub fn index_documents_with_progress(
+        &self,
+        docs: Vec<InMemoryDoc>,
+        removed: &[PathBuf],
+        force: bool,
+        on_progress: Box<dyn Fn(f32, &str) + Send + Sync>,
+    ) -> Result<IndexReport> {
+        self.index_documents_inner(docs, removed, force, Some(on_progress))
+    }
+
+    fn index_documents_inner(
+        &self,
+        docs: Vec<InMemoryDoc>,
+        removed: &[PathBuf],
+        force: bool,
+        on_progress: Option<Box<dyn Fn(f32, &str) + Send + Sync>>,
+    ) -> Result<IndexReport> {
         let started = Instant::now();
         let db = self.inner.db.lock().expect("bank db poisoned");
         let mut report = IndexReport::default();
@@ -410,7 +435,7 @@ impl Bank {
             let sub = self
                 .inner
                 .indexer
-                .index_files_items(&db, &items, force, false, None)?;
+                .index_files_items(&db, &items, force, false, on_progress)?;
             report.added.extend(sub.added);
             report.modified.extend(sub.modified);
             report.unchanged.extend(sub.unchanged);

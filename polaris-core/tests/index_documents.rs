@@ -76,3 +76,84 @@ fn index_documents_stores_supplied_markdown_and_skips_unchanged() {
         "force must re-index an unchanged hash"
     );
 }
+
+/// `index_documents_with_progress` must report embedding progress for
+/// in-memory documents the same way `index_path_with_progress` does for
+/// on-disk files: fractions non-decreasing, within `[0, 1]`, ending at `1.0`.
+///
+/// Gated like the other embedding tests above: `Bank::open` requires a real
+/// `SharedEmbedding`.
+#[test]
+#[ignore = "Bank::open requires SharedEmbedding which downloads a ~137 MB ONNX model"]
+fn index_documents_with_progress_reports_non_decreasing_fractions_ending_at_one() {
+    use std::sync::{Arc, Mutex};
+
+    polaris_core::register_vec_extension();
+    let tmp = tempfile::tempdir().unwrap();
+    let embed = SharedEmbedding::load("nomic-embed-text-v1.5", 64).unwrap();
+    let bank = Bank::open(
+        BankConfig {
+            repo_root: tmp.path().to_path_buf(),
+            index_path: tmp.path().join("polaris.db"),
+            embedding_dim: 64,
+            model_id: "nomic-embed-text-v1.5".into(),
+            ..Default::default()
+        },
+        embed,
+    )
+    .unwrap();
+
+    // Enough content/documents to produce several chunks, so Phase B (the
+    // embedding loop that drives the progress callback) actually runs.
+    let docs: Vec<InMemoryDoc> = (0..5)
+        .map(|i| InMemoryDoc {
+            source_path: PathBuf::from(format!("docs/manual-{i}.pdf")),
+            markdown: format!(
+                "# Manual {i}\n\n{}",
+                "Install by running the setup wizard. ".repeat(200)
+            ),
+            hash: format!("hash-v1-{i}"),
+            title: Some(format!("Manual {i}")),
+        })
+        .collect();
+
+    let calls: Arc<Mutex<Vec<(f32, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let calls_clone = calls.clone();
+
+    let report = bank
+        .index_documents_with_progress(
+            docs,
+            &[],
+            false,
+            Box::new(move |fraction, message| {
+                calls_clone
+                    .lock()
+                    .unwrap()
+                    .push((fraction, message.to_string()));
+            }),
+        )
+        .unwrap();
+    assert_eq!(report.added.len(), 5);
+
+    let calls = calls.lock().unwrap();
+    assert!(!calls.is_empty(), "expected at least one progress callback");
+
+    let mut prev = 0.0f32;
+    for (fraction, _) in calls.iter() {
+        assert!(
+            (0.0..=1.0).contains(fraction),
+            "fraction {fraction} out of [0, 1]"
+        );
+        assert!(
+            *fraction >= prev,
+            "fractions must be non-decreasing: {prev} then {fraction}"
+        );
+        prev = *fraction;
+    }
+
+    assert_eq!(
+        calls.last().unwrap().0,
+        1.0,
+        "final callback must report completion at fraction 1.0"
+    );
+}

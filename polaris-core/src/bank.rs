@@ -382,6 +382,13 @@ impl Bank {
     /// The callback receives `(fraction, message)` where `fraction` is in `[0, 1]`.
     /// Used by Helios to stream embedding progress for in-memory documents, the
     /// same way [`Bank::index_path_with_progress`] does for on-disk files.
+    ///
+    /// Fires `0.2` once chunking finishes, then at most once per whole percent
+    /// of chunks embedded (always on the last chunk, at `0.8`), then `1.0` once
+    /// the write transaction commits. If every doc is unchanged (or `docs` is
+    /// empty), embedding never runs and the callback stops at `0.2` or doesn't
+    /// fire at all — the `Ok(IndexReport)` return, not a `1.0` callback, is
+    /// what tells the caller indexing finished.
     pub fn index_documents_with_progress(
         &self,
         docs: Vec<InMemoryDoc>,

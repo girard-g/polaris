@@ -2,6 +2,15 @@
 
 All notable changes to Polaris are documented in this file.
 
+## [2.4.2] - 2026-11-10
+
+### Fixed
+
+- **Chunks never cut inside a word.** A paragraph with no sentence end and no
+  blank line (a statement, a table) was cut at the raw size cap, splitting a
+  word or a masked token across two chunks (`CLIENT_4` → `CLI` | `ENT_4`). The
+  cut now falls on the last whitespace before the cap.
+
 ## [2.4.1] - 2026-10-06
 
 ### Added

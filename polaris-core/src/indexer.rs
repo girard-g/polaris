@@ -872,7 +872,14 @@ fn find_sentence_boundary(text: &str, max_chars: usize) -> usize {
             return pos + pattern.len();
         }
     }
-    // No sentence boundary — use the whole cap.
+    // No sentence boundary: cut at the last whitespace, never inside a word
+    // (a masked token like CLIENT_4 would come out as "CLI" | "ENT_4").
+    // Only a cap that already ends the text or a space-less run cuts at cap.
+    if cap < text.len() && !text[cap..].starts_with(char::is_whitespace) {
+        if let Some(pos) = search_in.rfind(char::is_whitespace).filter(|&p| p > 0) {
+            return pos;
+        }
+    }
     cap
 }
 
@@ -1486,6 +1493,24 @@ mod tests {
         let content = vec!["word"; 100].join(" ");
         let chunks = chunk_markdown(&content, 50, 10);
         assert!(chunks.len() > 1, "very long sentence should be word-split");
+    }
+
+    #[test]
+    fn chunk_markdown_never_cuts_inside_a_word() {
+        // A table-like run: no blank line, no ". ": the sentence split's
+        // fallback must cut at whitespace, not mid-word ("CLI" | "ENT_4").
+        let mut content = String::new();
+        for i in 0..80 {
+            content.push_str(&format!("Courrier du {:02}/03/CLIENT_4 0,67 € rémunération syndic\n", i % 28 + 1));
+        }
+        let chunks = chunk_markdown(&content, 1800, 200);
+        assert!(chunks.len() > 1);
+        let words: std::collections::HashSet<&str> = content.split_whitespace().collect();
+        for c in &chunks {
+            for w in c.content.split_whitespace() {
+                assert!(words.contains(w), "word cut by a chunk boundary: {w:?}");
+            }
+        }
     }
 
     #[test]
